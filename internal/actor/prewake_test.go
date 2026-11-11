@@ -224,7 +224,7 @@ func TestPrewakeLimit(t *testing.T) {
 		// A command's wake is not held up by the queue.
 		execDone := make(chan error, 1)
 		go func() {
-			ex, err := g.Exec(ctx, fmt.Sprint("env", n), "", func() {})
+			ex, err := g.Exec(ctx, fmt.Sprint("env", n), func() {})
 			if err == nil {
 				ex.Close()
 			}

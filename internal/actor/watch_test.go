@@ -76,7 +76,7 @@ func TestWatch(t *testing.T) {
 	}
 
 	// The agent box alone doesn't watch: no dev server would hear.
-	agent, err := g.Exec(t.Context(), store.AgentBox("demo"), "", func() {})
+	agent, err := g.Exec(t.Context(), store.AgentBox("demo"), func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestWatch(t *testing.T) {
 
 	// The environment's box watches for the agent box's writes, and passes
 	// them on to itself.
-	main, err := g.Exec(t.Context(), "demo", "", func() {})
+	main, err := g.Exec(t.Context(), "demo", func() {})
 	if err != nil {
 		t.Fatal(err)
 	}

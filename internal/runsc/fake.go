@@ -66,6 +66,14 @@ func (f *Fake) Sleep(_ context.Context, id string) error {
 	return nil
 }
 
+// Kill ends box id as a crash would: it is no longer up, and nobody was
+// told.
+func (f *Fake) Kill(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.up, id)
+}
+
 // Sleeps returns how many times a box has been put to sleep, or tried to be.
 func (f *Fake) Sleeps() int {
 	f.mu.Lock()

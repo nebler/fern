@@ -231,6 +231,76 @@ func TestBashBackgroundEnds(t *testing.T) {
 	output(t, s, runs, "stopped: its box went to sleep")
 }
 
+// keyed sends every request as the agent box's relay does a call: under key.
+type keyed struct{ token, key string }
+
+func (k keyed) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+k.token)
+	r.Header.Set(boxexec.CallKeyHeader, k.key)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func connectKeyed(t *testing.T, url, key string) *mcp.ClientSession {
+	t.Helper()
+	c := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	s, err := c.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: &http.Client{Transport: keyed{boxToken, key}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// A background call sent again under its key, as the relay does when the
+// daemon restarted under it, names the job the first one started.
+func TestBashBackgroundSentAgain(t *testing.T) {
+	b := newDemoBox(t)
+	url, _ := b.serve(t)
+	s := connectKeyed(t, url, "ABCDEFGH234567ABCDEFGH2345")
+	marker := filepath.Join(t.TempDir(), "runs")
+	args := map[string]any{"command": "echo run >> " + marker + "; sleep 100", "run_in_background": true}
+	first := jobID.FindString(call(t, s, "Bash", args))
+	if first != "bash_abcdefgh" {
+		t.Fatalf("the job's ID = %q, want it made from the call's key", first)
+	}
+	if again := jobID.FindString(call(t, s, "Bash", args)); again != first {
+		t.Errorf("the call sent again answered %q, want %q", again, first)
+	}
+	// And to a daemon that never heard of it, which finds it in the box.
+	url, _ = b.serve(t)
+	s = connectKeyed(t, url, "ABCDEFGH234567ABCDEFGH2345")
+	if again := jobID.FindString(call(t, s, "Bash", args)); again != first {
+		t.Errorf("the call sent to a new daemon answered %q, want %q", again, first)
+	}
+	if got := call(t, s, "BashOutput", map[string]any{"bash_id": first}); !strings.Contains(got, "is running") {
+		t.Errorf("BashOutput from the new daemon = %q, want it running", got)
+	}
+	var runs int
+	for deadline := time.Now().Add(20 * time.Second); runs == 0 && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		data, _ := os.ReadFile(marker)
+		runs = strings.Count(string(data), "run")
+	}
+	if runs != 1 {
+		t.Errorf("the command ran %d times, want 1", runs)
+	}
+}
+
+// A key that isn't the relay's is refused, and the daemon lives.
+func TestBashBackgroundBadKey(t *testing.T) {
+	url, _, _ := newMCP(t)
+	for _, key := range []string{"short", "../../etc/passwd", "ÄÖÜäöüßß-and-more"} {
+		s := connectKeyed(t, url, key)
+		res, err := s.CallTool(t.Context(), &mcp.CallToolParams{Name: "Bash", Arguments: map[string]any{"command": "true", "run_in_background": true}})
+		if err != nil {
+			t.Fatalf("key %q: %v", key, err)
+		}
+		if !res.IsError {
+			t.Errorf("key %q: a background command started", key)
+		}
+	}
+}
+
 // A background command runs on when the daemon stops, and the next daemon
 // adopts it: BashOutput and KillShell reach it again.
 func TestBashBackgroundAdopted(t *testing.T) {
@@ -696,5 +766,33 @@ func TestAgentStart(t *testing.T) {
 				t.Errorf("settings (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// BenchmarkMCPCall is the daemon's own share of a tool call, apart from the
+// command: a request that the server answers itself.
+func BenchmarkMCPCall(b *testing.B) {
+	log := slog.New(slog.DiscardHandler)
+	st := newFakeStore()
+	if _, err := st.Create(b.Context(), "demo", store.CreateOptions{}); err != nil {
+		b.Fatal(err)
+	}
+	drv := runsc.NewFake("box")
+	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
+	api := server.New(st, drv, envs, "http://fern-daemon:7071", notrace, log)
+	defer api.Close()
+	srv := httptest.NewServer(api.MCPHandler())
+	defer srv.Close()
+	c := mcp.NewClient(&mcp.Implementation{Name: "bench", Version: "1"}, nil)
+	s, err := c.Connect(b.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp/demo", HTTPClient: &http.Client{Transport: bearer{boxToken}}}, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := s.ListTools(b.Context(), nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

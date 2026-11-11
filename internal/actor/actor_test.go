@@ -241,7 +241,7 @@ func state(t *testing.T, drv *runsc.Fake, id string) runsc.State {
 // exec counts a command in demo's box from now for d.
 func exec(t *testing.T, g *actor.Group, d time.Duration) {
 	t.Helper()
-	ex, err := g.Exec(t.Context(), "demo", "", func() {})
+	ex, err := g.Exec(t.Context(), "demo", func() {})
 	if err != nil {
 		t.Fatalf("Exec(demo) error: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestNoIdleSleep(t *testing.T) {
 				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 					t.Fatal(err)
 				}
-				ex, err := g.Exec(t.Context(), "demo", "", func() {})
+				ex, err := g.Exec(t.Context(), "demo", func() {})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -343,11 +343,11 @@ func TestCloseAndSleep(t *testing.T) {
 				var other *actor.Exec
 				if tt.other {
 					var err error
-					if other, err = g.Exec(t.Context(), "demo", "", func() {}); err != nil {
+					if other, err = g.Exec(t.Context(), "demo", func() {}); err != nil {
 						t.Fatal(err)
 					}
 				}
-				ex, err := g.Exec(t.Context(), "demo", "", func() {})
+				ex, err := g.Exec(t.Context(), "demo", func() {})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -439,7 +439,7 @@ func TestAgentBox(t *testing.T) {
 					t.Fatal(err)
 				}
 				agent := store.AgentBox("demo")
-				ex, err := g.Exec(t.Context(), agent, "", func() {})
+				ex, err := g.Exec(t.Context(), agent, func() {})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -470,7 +470,7 @@ func TestCloseAndSleepAfter(t *testing.T) {
 			t.Fatal(err)
 		}
 		run := func() {
-			ex, err := g.Exec(t.Context(), "demo", "", func() {})
+			ex, err := g.Exec(t.Context(), "demo", func() {})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -540,7 +540,7 @@ func TestStopCancelsExecs(t *testing.T) {
 				}
 				cmdCtx, cancel := context.WithCancel(ctx)
 				defer cancel()
-				ex, err := g.Exec(ctx, "demo", "", cancel)
+				ex, err := g.Exec(ctx, "demo", cancel)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -561,7 +561,7 @@ func TestExecUnknown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
-		if _, err := g.Exec(t.Context(), "nope", "", func() {}); !errors.Is(err, store.ErrNotFound) {
+		if _, err := g.Exec(t.Context(), "nope", func() {}); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("Exec(nope) error = %v, want %v", err, store.ErrNotFound)
 		}
 		if n := drv.Wakes(); n != 0 {
@@ -672,7 +672,7 @@ func TestConcurrentChanges(t *testing.T) {
 		func(id string) error { return envs.Sleep(ctx, id) },
 		func(id string) error { return envs.Wake(ctx, id) },
 		func(id string) error {
-			ex, err := envs.Exec(ctx, id, "", func() {})
+			ex, err := envs.Exec(ctx, id, func() {})
 			if err != nil {
 				return err
 			}
@@ -714,7 +714,7 @@ func TestConcurrentChanges(t *testing.T) {
 		if err := envs.Create(ctx, id, store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		ex, err := envs.Exec(ctx, id, "", func() {})
+		ex, err := envs.Exec(ctx, id, func() {})
 		if err != nil {
 			t.Errorf("Exec(%s) after the storm error: %v", id, err)
 			continue
@@ -818,7 +818,7 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 		execCtx, giveUp := context.WithCancel(ctx)
 		result := make(chan error, 1)
 		go func() {
-			_, err := g.Exec(execCtx, "demo", "", giveUp)
+			_, err := g.Exec(execCtx, "demo", giveUp)
 			result <- err
 		}()
 		synctest.Wait() // the wake has started
@@ -1044,35 +1044,78 @@ func TestCrashingBox(t *testing.T) {
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		exec := func(stale string) error {
-			ex, err := g.Exec(t.Context(), "demo", stale, func() {})
-			if err == nil {
+		// exec runs a command; with dead, the box doesn't answer it: it died.
+		exec := func(dead bool) error {
+			ex, err := g.Exec(t.Context(), "demo", func() {})
+			switch {
+			case err != nil:
+			case dead:
+				drv.Kill("demo")
+				ex.Dead()
+			default:
 				ex.Close()
 			}
 			return err
 		}
-		if err := exec(""); err != nil {
-			t.Fatal(err)
-		}
-		// "box" is the address that stopped answering: it died.
 		for i := range 2 {
-			if err := exec("box"); err != nil {
-				t.Fatalf("command after crash %d: %v, want it woken again", i+1, err)
+			if err := exec(true); err != nil {
+				t.Fatalf("command %d: %v, want the box woken again", i+1, err)
 			}
 		}
+		// No wait for its actor to end: the next one counts on all the same.
 		if err := g.Sleep(t.Context(), "demo"); err != nil {
 			t.Fatal(err)
 		}
-		synctest.Wait() // its actor ends; the next counts on
-		if err := exec("box"); !errors.Is(err, actor.ErrCrashing) {
+		if err := exec(true); err != nil {
+			t.Fatalf("command after two crashes and a sleep: %v, want the box woken again", err)
+		}
+		if err := exec(false); !errors.Is(err, actor.ErrCrashing) {
 			t.Fatalf("command after a third crash: %v, want ErrCrashing", err)
 		}
-		if err := exec(""); !errors.Is(err, actor.ErrCrashing) {
-			t.Errorf("next command: %v, want ErrCrashing", err)
+		if got := drv.Wakes(); got != 3 {
+			t.Errorf("Wakes() = %d, want 3", got)
 		}
 		time.Sleep(5 * time.Minute)
-		if err := exec(""); err != nil {
+		if err := exec(false); err != nil {
 			t.Errorf("command five minutes after the first crash: %v, want it woken", err)
+		}
+	})
+}
+
+// A box that dies under several commands at once died once: each of them
+// says so, and it is woken again once.
+func TestBoxDeathCountedOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		open := func() *actor.Exec {
+			ex, err := g.Exec(t.Context(), "demo", func() {})
+			if err != nil {
+				t.Fatalf("Exec() error = %v, want the box woken", err)
+			}
+			return ex
+		}
+		inFlight := []*actor.Exec{open(), open(), open()}
+		drv.Kill("demo")
+		for _, ex := range inFlight {
+			ex.Dead()
+		}
+		// Each tries again, as the API does, and finds the box woken by the first.
+		again := []*actor.Exec{open(), open(), open()}
+		if got := drv.Wakes(); got != 2 {
+			t.Errorf("Wakes() = %d, want 2: the first, and one after the death", got)
+		}
+		// A command from before the death that says so late changes nothing.
+		inFlight[0].Dead()
+		for _, ex := range again {
+			ex.Close()
+		}
+		open().Close()
+		if got := drv.Wakes(); got != 2 {
+			t.Errorf("Wakes() after a late report = %d, want 2", got)
 		}
 	})
 }
@@ -1089,11 +1132,11 @@ func TestFailingWakes(t *testing.T) {
 		broken := errors.New("runsc: boom")
 		drv.FailWakes("demo", broken)
 		for i := range 3 {
-			if _, err := g.Exec(t.Context(), "demo", "", func() {}); !errors.Is(err, broken) {
+			if _, err := g.Exec(t.Context(), "demo", func() {}); !errors.Is(err, broken) {
 				t.Fatalf("wake %d: %v, want the driver's error", i+1, err)
 			}
 		}
-		if _, err := g.Exec(t.Context(), "demo", "", func() {}); !errors.Is(err, actor.ErrCrashing) {
+		if _, err := g.Exec(t.Context(), "demo", func() {}); !errors.Is(err, actor.ErrCrashing) {
 			t.Fatalf("fourth command: %v, want ErrCrashing without another wake", err)
 		}
 		drv.FailWakes("demo", nil)
@@ -1103,37 +1146,56 @@ func TestFailingWakes(t *testing.T) {
 	})
 }
 
-// A stop that fails under a lease is tried again after the agent's idle time,
-// not over and over at once.
+// A stop that fails is tried again after the agent's idle time, not over and
+// over at once, whatever the box was to sleep for.
 func TestFailedSleepBacksOff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), runsc.NewFake("box")
-		g := start(t, st, drv, idle)
-		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		ex, err := g.Exec(t.Context(), "demo", "", func() {})
-		if err != nil {
-			t.Fatal(err)
-		}
-		drv.FailSleeps("demo", errors.New("runsc is stuck"))
-		ex.CloseAndSleep(0)
-		synctest.Wait()
-		if got := drv.Sleeps(); got != 1 {
-			t.Fatalf("sleeps right after the lease = %d, want 1", got)
-		}
-		time.Sleep(idle.Agent - time.Second)
-		synctest.Wait()
-		if got := drv.Sleeps(); got != 1 {
-			t.Errorf("sleeps within the agent's idle time = %d, want 1: no retry before it", got)
-		}
-		drv.FailSleeps("demo", nil)
-		time.Sleep(time.Second)
-		synctest.Wait()
-		if got := state(t, drv, "demo"); got != runsc.Asleep {
-			t.Errorf("after the agent's idle time: state %s, want %s", got, runsc.Asleep)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		job  bool              // a job runs meanwhile
+		end  func(*actor.Exec) // how the command ends
+		wait time.Duration     // from then to the first stop
+	}{
+		{"under a lease", false, func(ex *actor.Exec) { ex.CloseAndSleep(0) }, 0},
+		{"on the idle clocks", false, (*actor.Exec).Close, idle.Human},
+		{"on the idle clocks, with a job", true, (*actor.Exec).Close, idle.Human},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				g := start(t, st, drv, idle)
+				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if tc.job {
+					if _, err := g.Job(t.Context(), "demo", func() {}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ex, err := g.Exec(t.Context(), "demo", func() {})
+				if err != nil {
+					t.Fatal(err)
+				}
+				drv.FailSleeps("demo", errors.New("runsc is stuck"))
+				tc.end(ex)
+				time.Sleep(tc.wait)
+				synctest.Wait()
+				if got := drv.Sleeps(); got != 1 {
+					t.Fatalf("stops when the box was to sleep = %d, want 1", got)
+				}
+				time.Sleep(idle.Agent - time.Second)
+				synctest.Wait()
+				if got := drv.Sleeps(); got != 1 {
+					t.Errorf("stops within the agent's idle time = %d, want 1: no retry before it", got)
+				}
+				drv.FailSleeps("demo", nil)
+				time.Sleep(time.Second)
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != runsc.Asleep {
+					t.Errorf("after the agent's idle time: state %s, want %s", got, runsc.Asleep)
+				}
+			})
+		})
+	}
 }
 
 // A command that asks for a quick sleep while a job runs doesn't leave a
@@ -1146,11 +1208,11 @@ func TestLeaseNotKeptPastJob(t *testing.T) {
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		job, err := g.Job(t.Context(), "demo", "", func() {})
+		job, err := g.Job(t.Context(), "demo", func() {})
 		if err != nil {
 			t.Fatal(err)
 		}
-		ex, err := g.Exec(t.Context(), "demo", "", func() {})
+		ex, err := g.Exec(t.Context(), "demo", func() {})
 		if err != nil {
 			t.Fatal(err)
 		}

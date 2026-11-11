@@ -56,7 +56,7 @@ func (a *actor) watch(ctx context.Context, workspace string) {
 func (g *Group) touch(ctx context.Context, id string, paths []string) {
 	var addr, token string
 	err := g.do(ctx, "touch", id, func(ctx context.Context, a *actor) error {
-		if a.addr == "" {
+		if a.phase != boxUp {
 			return nil
 		}
 		env, err := g.store.Get(ctx, id)

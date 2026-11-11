@@ -226,7 +226,7 @@ func (g *Group) Sleep(ctx context.Context, id string) error {
 // so the two can't wait for each other.
 func (g *Group) stopAgent(ctx context.Context, id string) error {
 	return g.do(ctx, "stop_agent", store.AgentBox(id), func(ctx context.Context, a *actor) error {
-		if !a.awake {
+		if a.phase == boxAsleep {
 			return nil
 		}
 		return a.stopBox(ctx)
@@ -240,7 +240,7 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 	return g.do(ctx, "wake", id, func(ctx context.Context, a *actor) error {
 		// A person asks: a box that kept crashing gets another try.
 		a.crashes = nil
-		if _, err := a.wake(ctx, ""); err != nil {
+		if _, err := a.wake(ctx); err != nil {
 			return err
 		}
 		a.endLease("used")

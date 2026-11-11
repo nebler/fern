@@ -191,7 +191,7 @@ func (g *Group) Run(ctx context.Context) error {
 	crashes := make(map[string][]time.Time)
 	exited := make(chan *actor)
 	start := func(id string, awake bool) *actor {
-		a := &actor{id: id, g: g, mailbox: make(chan message), done: make(chan struct{}), crashes: crashes[id]}
+		a := &actor{id: id, g: g, mailbox: make(chan message), done: make(chan struct{}), crashes: slices.Clone(crashes[id])}
 		actors[id] = a
 		wg.Go(func() {
 			a.run(ctx, awake)
@@ -202,6 +202,19 @@ func (g *Group) Run(ctx context.Context) error {
 			}
 		})
 		return a
+	}
+	// retire takes an actor whose goroutine has ended (a.done is closed) off
+	// the books, once, and keeps its count of crashes for the next.
+	retire := func(a *actor) {
+		if actors[a.id] != a {
+			return
+		}
+		delete(actors, a.id)
+		if cs := recent(a.crashes); len(cs) > 0 {
+			crashes[a.id] = cs
+		} else {
+			delete(crashes, a.id)
+		}
 	}
 	states, err := g.driver.States(ctx)
 	if err != nil {
@@ -221,20 +234,17 @@ func (g *Group) Run(ctx context.Context) error {
 			return nil
 		case req := <-g.find:
 			a, ok := actors[req.id]
-			if !ok || isClosed(a.done) {
+			if ok && isClosed(a.done) {
+				// It has ended, and its word of that is still on the way.
+				retire(a)
+				ok = false
+			}
+			if !ok {
 				a = start(req.id, false)
 			}
 			req.reply <- a
 		case a := <-exited:
-			if actors[a.id] == a {
-				delete(actors, a.id)
-			}
-			// Its goroutine is done with it (a.done is closed).
-			if a.crashes = recent(a.crashes); len(a.crashes) > 0 {
-				crashes[a.id] = a.crashes
-			} else {
-				delete(crashes, a.id)
-			}
+			retire(a)
 		}
 	}
 }
@@ -335,6 +345,21 @@ type message struct {
 	reply chan error // buffered, so the actor never waits for the caller
 }
 
+// boxPhase is what an actor knows of its box.
+type boxPhase int
+
+const (
+	// boxAsleep: it doesn't run.
+	boxAsleep boxPhase = iota
+	// boxMaybeUp: it may be running, and nothing can be run in it before a
+	// wake: it was found at the daemon's start, is being woken, died under a
+	// command, or a wake or a stop of it failed half-way. It is put to
+	// sleep like a box that is up.
+	boxMaybeUp
+	// boxUp: it runs, at addr.
+	boxUp
+)
+
 // actor owns one environment. Only its own goroutine touches the fields
 // below done.
 type actor struct {
@@ -343,16 +368,16 @@ type actor struct {
 	mailbox chan message
 	done    chan struct{} // closed when run returns
 
-	addr     string                     // the box's exec address while it is known to be up
-	awake    bool                       // the box may be running
-	execs    map[int]context.CancelFunc // commands running in the box, by number
-	jobs     map[int]context.CancelFunc // background commands running in it (Job), by number
-	next     int                        // the last command's number
-	opened   time.Time                  // when the last command started
-	closed   time.Time                  // when the last command ended
-	lease    time.Time                  // when an awake box with nothing running sleeps instead of after the idle times: set by a pre-wake, or a command that asked
-	prewoken bool                       // the lease's wake succeeded, so its end is counted
-	idle     *time.Timer                // fires when the box may have been idle long enough
+	phase  boxPhase                   // what is known of the box
+	addr   string                     // boxUp: the box's exec address
+	wakes  int                        // how often this actor has woken the box: a command names the wake it ran in when it reports the box dead
+	execs  map[int]context.CancelFunc // commands running in the box, by number
+	jobs   map[int]context.CancelFunc // background commands running in it (Job), by number
+	next   int                        // the last command's number
+	opened time.Time                  // when the last command started
+	closed time.Time                  // when the last command ended
+	lease  lease                      // when the box sleeps instead of after the idle times, and why
+	idle   *time.Timer                // fires when the box may have been idle long enough
 	// stopWatch stops the watch of the agent box's writes for this box
 	// (watch), and is nil while there is none.
 	stopWatch func()
@@ -379,7 +404,7 @@ func (a *actor) run(ctx context.Context, awake bool) {
 		}
 	}()
 	if awake {
-		a.awake = true
+		a.phase = boxMaybeUp
 		a.opened, a.closed = time.Now(), time.Now()
 	}
 	for {
@@ -392,7 +417,7 @@ func (a *actor) run(ctx context.Context, awake bool) {
 		case <-a.idle.C:
 			a.sleepIfIdle(ctx)
 		}
-		if a.awake || len(a.execs) > 0 || len(a.jobs) > 0 {
+		if a.phase != boxAsleep || len(a.execs) > 0 || len(a.jobs) > 0 {
 			continue
 		}
 		// Asleep with nothing running: exit, unless a message is waiting.
@@ -412,32 +437,26 @@ func (a *actor) handle(ctx context.Context, m message) {
 }
 
 // wake returns the record of the environment a's box belongs to once the
-// box is up, waking it unless it is known to be up somewhere other than
-// stale.
-func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
+// box is up, waking it unless it is known to be.
+func (a *actor) wake(ctx context.Context) (store.Env, error) {
 	env, err := a.g.store.Get(ctx, store.EnvOfBox(a.id))
 	if err != nil {
 		return store.Env{}, err
 	}
-	if a.addr != "" && a.addr != stale {
+	if a.phase == boxUp {
 		return env, nil
-	}
-	if stale != "" {
-		// It died under a command.
-		a.crashes = append(a.crashes, time.Now())
 	}
 	if a.crashes = recent(a.crashes); len(a.crashes) >= crashLimit {
 		return store.Env{}, fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, and is woken again after %s, or by fern wake; "+
 			"its log is boxes/%s/log in the pool", a.id, ErrCrashing, len(a.crashes), crashWindow,
 			a.crashes[0].Add(crashWindow).Format(time.TimeOnly), a.id)
 	}
-	a.addr = ""
 	// Set first: a wake that fails half-way may leave the box running. Its
 	// idle times start now, so a slow wake isn't put back to sleep at once.
-	if !a.awake {
-		a.awake = true
+	if a.phase == boxAsleep {
 		a.opened, a.closed = time.Now(), time.Now()
 	}
+	a.phase = boxMaybeUp
 	start := time.Now()
 	ctx, sp := span.Start(ctx, a.g.tracer, "box.wake", a.id)
 	addr, err := a.g.driver.Wake(ctx, a.g.boxOf(a.id, env))
@@ -448,7 +467,8 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 		return store.Env{}, err
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
-	a.addr = addr
+	a.phase, a.addr = boxUp, addr
+	a.wakes++
 	if a.g.cfg.Woken != nil && store.EnvOfBox(a.id) == a.id && !setup.IsBuilder(a.id) {
 		select {
 		case a.g.cfg.Woken <- a.id:
@@ -462,7 +482,10 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 // stopBox stops the box, then cancels the commands still counted as running
 // in it, so that none goes on against the disk that comes next.
 func (a *actor) stopBox(ctx context.Context) error {
-	a.addr = ""
+	// A stop that fails may have stopped it all the same.
+	if a.phase == boxUp {
+		a.phase, a.addr = boxMaybeUp, ""
+	}
 	// Started again by the next wake.
 	if a.stopWatch != nil {
 		a.stopWatch()
@@ -476,7 +499,7 @@ func (a *actor) stopBox(ctx context.Context) error {
 		return err
 	}
 	a.endLease("wasted")
-	a.awake = false
+	a.phase = boxAsleep
 	for _, running := range []map[int]context.CancelFunc{a.execs, a.jobs} {
 		for n, cancel := range running {
 			cancel()

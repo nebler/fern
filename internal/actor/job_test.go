@@ -20,13 +20,13 @@ func TestJob(t *testing.T) {
 			t.Fatal(err)
 		}
 		jobCtx, cancelJob := context.WithCancel(t.Context())
-		job, err := g.Job(t.Context(), "demo", "", cancelJob)
+		job, err := g.Job(t.Context(), "demo", cancelJob)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer job.Close()
 		// The Bash call that started it, which asks for a short linger.
-		bash, err := g.Exec(t.Context(), "demo", "", func() {})
+		bash, err := g.Exec(t.Context(), "demo", func() {})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +59,7 @@ func TestNoJobLinger(t *testing.T) {
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		bash, err := g.Exec(t.Context(), "demo", "", func() {})
+		bash, err := g.Exec(t.Context(), "demo", func() {})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,4 +70,49 @@ func TestNoJobLinger(t *testing.T) {
 			t.Errorf("after the linger: state %s, want %s", got, runsc.Asleep)
 		}
 	})
+}
+
+// A job the agent stopped (KillShell) is its last call: the box sleeps after
+// the linger it asks for, not after the idle times. Not while a command
+// still runs.
+func TestJobStoppedLingers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		running bool // a command runs when the job is stopped
+		want    runsc.State
+	}{
+		{"nothing else runs", false, runsc.Asleep},
+		{"a command runs", true, runsc.Running},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				g := start(t, st, drv, idle)
+				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				job, err := g.Job(t.Context(), "demo", func() {})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.running {
+					if _, err := g.Exec(t.Context(), "demo", func() {}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				time.Sleep(time.Minute)
+				job.CloseAndSleep(5 * time.Second)
+				time.Sleep(4 * time.Second)
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != runsc.Running {
+					t.Fatalf("4 s after the job was stopped: state %s, want %s", got, runsc.Running)
+				}
+				time.Sleep(2 * time.Second)
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != tc.want {
+					t.Errorf("6 s after the job was stopped: state %s, want %s", got, tc.want)
+				}
+			})
+		})
+	}
 }

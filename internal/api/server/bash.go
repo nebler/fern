@@ -132,7 +132,7 @@ func (h *heldAnswer) send(w http.ResponseWriter) {
 }
 
 func (s *Server) bashServer(id string) *mcp.Server {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "fern", Version: "1"}, nil)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fern", Version: "1"}, &mcp.ServerOptions{SchemaCache: s.schemas})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "Bash",
 		Description: "Runs a shell command in this thread's box, where its services (databases, servers) run, " +

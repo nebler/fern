@@ -32,7 +32,7 @@ func BenchmarkExec(b *testing.B) {
 		b.Fatal(err)
 	}
 	for b.Loop() {
-		ex, err := g.Exec(ctx, "bench", "", func() {})
+		ex, err := g.Exec(ctx, "bench", func() {})
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -65,6 +66,10 @@ type Server struct {
 	boxes *http.Client
 	jobs  jobs     // Claude's background commands
 	calls sync.Map // call key to its running Bash command, a *call
+	// schemas keeps the tools' JSON schemas: an MCP server is made for every
+	// request, and working them out again each time was most of a call's
+	// cost in the daemon (BenchmarkMCPCall).
+	schemas *mcp.SchemaCache
 
 	// Cloudflare returns the node's Cloudflare API token, "" while there is
 	// none. With one, an agent in the agent box of a repository that deploys
@@ -94,7 +99,7 @@ func (s *Server) stopping() bool {
 }
 
 // opener counts a command in a box, waking it: actor.Group's Exec or Job.
-type opener func(ctx context.Context, id, stale string, cancel context.CancelFunc) (*actor.Exec, error)
+type opener func(ctx context.Context, id string, cancel context.CancelFunc) (*actor.Exec, error)
 
 // New returns a Server that reads from st and drv, changes environments
 // through envs and records every request with tr. With agentMCP, where agent
@@ -102,7 +107,8 @@ type opener func(ctx context.Context, id, stale string, cancel context.CancelFun
 func New(st Store, drv Driver, envs *actor.Group, agentMCP string, tr trace.Tracer, log *slog.Logger) *Server {
 	return &Server{
 		store: st, driver: drv, envs: envs, tracer: tr, log: log, agentMCP: agentMCP,
-		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
+		boxes:   &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
+		schemas: mcp.NewSchemaCache(),
 	}
 }
 
@@ -341,16 +347,19 @@ func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id
 	}
 	var req boxexec.Request
 	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 {
-		mcp := fernMCP{URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token}
-		switch path.Base(req.Argv[0]) {
-		case "claude":
-			mcp.Cloudflare, mcp.AstroDocs = s.cloudflareToken(ctx, id), s.isAstro(ctx, id)
-			err = mcp.claude(&req)
-		case "opencode":
-			mcp.Cloudflare, mcp.AstroDocs = s.cloudflareToken(ctx, id), s.isAstro(ctx, id)
-			err = mcp.openCode(&req, ex.Addr)
-		default:
+		agent := path.Base(req.Argv[0])
+		if agent != "claude" && agent != "opencode" {
+			// Any other command starts as it is, without a question to the box.
 			return box.Write(ctx, typ, data)
+		}
+		mcp := fernMCP{
+			URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token,
+			Cloudflare: s.cloudflareToken(ctx, id), AstroDocs: s.isAstro(ctx, id),
+		}
+		if agent == "claude" {
+			err = mcp.claude(&req)
+		} else {
+			err = mcp.openCode(&req, ex.Addr)
 		}
 		if err != nil {
 			return err
@@ -538,11 +547,10 @@ func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) string {
 // command open counts. A box seen earlier may be gone (a crash, a box stopped
 // by hand): then it is woken once more.
 func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFunc, open opener) (*websocket.Conn, *actor.Exec, error) {
-	var stale string
 	var err error
-	for range 2 {
+	for try := range 2 {
 		var ex *actor.Exec
-		if ex, err = open(ctx, id, stale, cancel); err != nil {
+		if ex, err = open(ctx, id, cancel); err != nil {
 			return nil, nil, err
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
@@ -551,8 +559,14 @@ func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFu
 		if dialErr == nil {
 			return conn, ex, nil
 		}
-		ex.Close()
-		stale, err = ex.Addr, dialErr
+		err = dialErr
+		if try > 0 {
+			// The next command finds it and says so: a command counts one
+			// death of the box, not two.
+			ex.Close()
+			break
+		}
+		ex.Dead()
 	}
 	return nil, nil, fmt.Errorf("connect to box %s: %w", id, err)
 }
