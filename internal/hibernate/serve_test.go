@@ -42,6 +42,7 @@ type fakeOpenCode struct {
 	exited  chan int      // each run's exit
 	release chan struct{} // ends a held execution
 	die     chan struct{} // makes the first server fail
+	gate    chan struct{} // if set, a server waits for it to close before it listens
 }
 
 func newFakeOpenCode() *fakeOpenCode {
@@ -57,7 +58,15 @@ func (f *fakeOpenCode) exec(ctx context.Context, _ boxexec.Request, s boxexec.St
 	if run == 0 {
 		die = f.die
 	}
+	gate := f.gate
 	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return 143, nil
+		}
+	}
 	stopped := make(chan struct{})
 	defer close(stopped)
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
@@ -144,6 +153,11 @@ type served struct {
 
 func startServe(t *testing.T, f *fakeOpenCode) *served {
 	t.Helper()
+	return startServeWith(t, f.exec)
+}
+
+func startServeWith(t *testing.T, exec hibernate.Exec) *served {
+	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +172,7 @@ func startServe(t *testing.T, f *fakeOpenCode) *served {
 	sigs := make(chan os.Signal, 1)
 	result := make(chan [2]any, 1)
 	go func() {
-		code, err := hibernate.Serve(t.Context(), f.exec, req, boxexec.Streams{Stdout: pw, Stderr: io.Discard, Signal: sigs}, serveIdle)
+		code, err := hibernate.Serve(t.Context(), exec, req, boxexec.Streams{Stdout: pw, Stderr: io.Discard, Signal: sigs}, serveIdle)
 		_ = pw.Close()
 		result <- [2]any{code, err}
 	}()
@@ -322,7 +336,7 @@ func TestServeKeepsAnExecutionRunning(t *testing.T) {
 	select {
 	case <-f.exited:
 		t.Fatal("the server stopped during an execution")
-	case <-time.After(10 * serveIdle):
+	case <-time.After(4 * serveIdle):
 	}
 	f.release <- struct{}{}
 	if ev := next(t, events); ev != "session.execution.succeeded/0" {
@@ -402,5 +416,81 @@ func TestServeSaysWhyItsServerDidNotStart(t *testing.T) {
 	_, err := hibernate.Serve(t.Context(), exec, req, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}, serveIdle)
 	if !errors.Is(err, noBox) {
 		t.Errorf("Serve's error = %v, want the exec's", err)
+	}
+}
+
+// A request that gives up while its server starts must not stay counted as
+// under way, which would keep the server up for good.
+func TestServeForgetsARequestThatGaveUp(t *testing.T) {
+	f := newFakeOpenCode()
+	s := startServe(t, f)
+	waitExit(t, f)
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/api/session/s1/prompt", strings.NewReader("hi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", auth)
+	gaveUp := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		gaveUp <- err
+	}()
+	for f.count() < 2 {
+		select {
+		case err := <-gaveUp:
+			t.Fatalf("the request ended before its server started: %v", err)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-gaveUp; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the request's error = %v, want its cancellation", err)
+	}
+	close(gate)
+	// Nothing is under way, so the server it started stops when idle.
+	if code := waitExit(t, f); code != 0 {
+		t.Errorf("the server's exit = %d, want 0 from an idle stop", code)
+	}
+	if code := s.stop(t); code != 0 {
+		t.Errorf("Serve's code = %d", code)
+	}
+}
+
+func TestServeStartsAgainAfterAStartThatFailed(t *testing.T) {
+	f := newFakeOpenCode()
+	var mu sync.Mutex
+	fail := false
+	exec := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+		mu.Lock()
+		failing := fail
+		fail = false
+		mu.Unlock()
+		if failing {
+			return 0, errors.New("the daemon is restarting")
+		}
+		return f.exec(ctx, req, s)
+	}
+	s := startServeWith(t, exec)
+	waitExit(t, f)
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	if code, body := s.do(t, http.MethodPost, "/api/session/s1/prompt", "hi"); code != http.StatusBadGateway || !strings.Contains(body, "the daemon is restarting") {
+		t.Errorf("with a start that failed: %d %q, want a 502 saying why", code, body)
+	}
+	if code, run := s.do(t, http.MethodPost, "/api/session/s1/prompt", "hi"); code != http.StatusOK || run != "1" {
+		t.Errorf("the request after it: %d %q, want the second server's answer", code, run)
+	}
+	if code := s.stop(t); code != 0 {
+		t.Errorf("Serve's code = %d", code)
 	}
 }

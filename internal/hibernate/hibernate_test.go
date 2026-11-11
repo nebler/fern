@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,8 @@ var claudeArgv = []string{"claude", "--output-format", "stream-json", "--verbose
 // control requests, and each user message with a turn (init, assistant,
 // result). A user message saying "task" starts a background task, which
 // ends when the test sends a line on out. A signal stops it with 143, the
-// end of its stdin with 0.
+// end of its stdin with 0. After a message saying "stubborn" it ignores
+// signals, and after one saying "slow" it takes 5 s to stop on one.
 type fakeClaude struct {
 	mu     sync.Mutex
 	argvs  [][]string
@@ -59,6 +61,7 @@ func (f *fakeClaude) exec(ctx context.Context, req boxexec.Request, s boxexec.St
 	}()
 	write := func(format string, args ...any) { _, _ = fmt.Fprintf(s.Stdout, format+"\n", args...) }
 	stubborn := false // ignores signals
+	slow := false     // takes 5 s to exit on one
 	for {
 		select {
 		case line, ok := <-lines:
@@ -97,12 +100,17 @@ func (f *fakeClaude) exec(ctx context.Context, req boxexec.Request, s boxexec.St
 					continue // still working
 				case "stubborn":
 					stubborn = true
+				case "slow":
+					slow = true
 				}
 				write(`{"type":"result","subtype":"success"}`)
 			}
 		case line := <-f.out:
 			write("%s", line)
 		case <-s.Signal:
+			if slow {
+				time.Sleep(5 * time.Second)
+			}
 			if !stubborn {
 				return 143, nil
 			}
@@ -343,6 +351,101 @@ func TestEnd(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestEndWhileStopping: T3 ends Claude while it is being stopped for being
+// idle.
+func TestEndWhileStopping(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  string // the first message; what it says is how Claude stops
+		end    func(t *testing.T, s *session)
+		want   int
+		inputs [][]string
+	}{
+		{
+			// Nothing more to say, so no second Claude.
+			"stdin ends", "stubborn",
+			func(_ *testing.T, s *session) { _ = s.sdk.Close() },
+			0,
+			[][]string{{"control_request/initialize", "user"}},
+		},
+		{
+			// The line that waited still goes to a Claude, which then reads the end.
+			"stdin ends after a line", "stubborn",
+			func(t *testing.T, s *session) {
+				s.send(t, user("two"))
+				_ = s.sdk.Close()
+			},
+			0,
+			[][]string{{"control_request/initialize", "user"}, {"control_request/initialize", "user"}},
+		},
+		{
+			// Its exit is Run's, not a stop to resume from.
+			"signal", "slow",
+			func(_ *testing.T, s *session) { s.sigs <- syscall.SIGTERM },
+			143,
+			[][]string{{"control_request/initialize", "user"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newFakeClaude()
+				s := start(f, claudeArgv)
+				s.send(t, initialize)
+				s.send(t, user(tc.first))
+				time.Sleep(idle + time.Second)
+				synctest.Wait()
+				tc.end(t, s)
+				got := <-s.done
+				_ = s.sdk.Close()
+				if got.code != tc.want || got.err != nil {
+					t.Errorf("Run = %+v, want exit %d", got, tc.want)
+				}
+				_, inputs := f.runs()
+				if diff := cmp.Diff(tc.inputs, inputs); diff != "" {
+					t.Errorf("lines per run (-want +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
+// TestRestartFails: if Claude can't be started again (its box doesn't wake),
+// Run ends with the reason.
+func TestRestartFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeClaude()
+		noBox := errors.New("no box")
+		calls := 0
+		exec := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+			if calls++; calls > 1 {
+				return 0, noBox
+			}
+			return f.exec(ctx, req, s)
+		}
+		pr, pw := io.Pipe()
+		done := make(chan result, 1)
+		go func() {
+			code, err := hibernate.Run(t.Context(), exec, boxexec.Request{Argv: claudeArgv},
+				boxexec.Streams{Stdin: pr, Stdout: io.Discard, Stderr: io.Discard}, idle)
+			_ = pr.Close()
+			done <- result{code, err}
+		}()
+		for _, line := range []string{initialize, user("one")} {
+			if _, err := io.WriteString(pw, line+"\n"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(2 * idle)
+		synctest.Wait()
+		// Its write may fail: the Claude it is for never ran.
+		go func() { _, _ = io.WriteString(pw, user("two")+"\n") }()
+		if got := <-done; !errors.Is(got.err, noBox) {
+			t.Errorf("Run = %+v, want the exec's error", got)
+		}
+		_ = pw.Close()
+	})
 }
 
 // TestOtherCommands run as they are, without stopping.

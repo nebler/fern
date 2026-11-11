@@ -58,14 +58,38 @@ func Run(ctx context.Context, exec Exec, req boxexec.Request, s boxexec.Streams,
 // terminal.
 func Applies(req boxexec.Request) bool { return !req.TTY && isStreamingClaude(req.Argv) }
 
+// claudePhase is what a hibernator's Claude is doing.
+type claudePhase int
+
+const (
+	// claudeRunning: it takes the SDK's lines, and is stopped once idle.
+	claudeRunning claudePhase = iota
+	// claudeStopping: it was sent SIGTERM for being idle. The SDK's lines
+	// wait for the next Claude.
+	claudeStopping
+	// claudeAsleep: none runs, and its box may sleep. The SDK's next line
+	// starts one.
+	claudeAsleep
+	// claudeEnding: T3 is ending it, with a signal or the end of its stdin.
+	// Its exit is Run's.
+	claudeEnding
+)
+
 // hibernator is one Run: Claude, and the processes standing in for it one
-// after another.
+// after another. Only run's goroutine touches what follows st.
 type hibernator struct {
 	exec Exec
 	req  boxexec.Request
 	std  boxexec.Streams
 	idle time.Duration
 	st   *stream
+
+	phase   claudePhase
+	c       *claude   // the one running, stopping or ending; nil while asleep
+	stopAt  time.Time // stopping: when c was sent SIGTERM
+	waiting [][]byte  // stopping: the lines read for the next Claude
+	eof     bool      // the SDK's stdin has ended
+	code    int       // asleep: the exit code of the Claude stopped last
 }
 
 // claude is one Claude process: its stdin, the signals sent to it and its
@@ -86,88 +110,95 @@ func (h *hibernator) run(ctx context.Context) (int, error) {
 	done := make(chan struct{})
 	defer close(done)
 	lines := readLines(done, h.std.Stdin)
-	c := h.start(ctx, h.req)
-	var (
-		waiting  [][]byte  // lines for the next Claude, read while one stopped
-		eof      bool      // the SDK's stdin has ended
-		stopping time.Time // when c was sent SIGTERM because it was idle; zero if it wasn't
-		ending   bool      // T3 is ending Claude: c's exit is Run's
-		code     int       // the exit code of the Claude stopped last
-	)
+	h.c = h.start(ctx, h.req)
 	tick := time.NewTicker(min(max(h.idle/10, 10*time.Millisecond), time.Second))
 	defer tick.Stop()
 	for {
 		var exited chan result
-		if c != nil {
-			exited = c.done
+		if h.c != nil {
+			exited = h.c.done
 		}
 		select {
 		case line, ok := <-lines:
 			if !ok {
-				lines, eof = nil, true
-				switch {
-				case c == nil:
-					// Stopped, and nothing more to say: as Claude would on EOF.
+				lines, h.eof = nil, true
+				if h.ended() {
 					return 0, nil
-				case stopping.IsZero():
-					ending = true
-					_ = c.stdin.Close()
 				}
 				continue
 			}
-			if !stopping.IsZero() {
-				waiting = append(waiting, line)
-				continue
+			switch h.phase {
+			case claudeStopping:
+				h.waiting = append(h.waiting, line)
+			case claudeAsleep:
+				h.wake(ctx)
+				h.send(line)
+			case claudeRunning, claudeEnding:
+				h.send(line)
 			}
-			if c == nil {
-				c = h.restart(ctx)
-			}
-			h.send(c, line)
 		case sig := <-h.std.Signal:
-			if c == nil {
+			if h.phase == claudeAsleep {
 				// T3 ending a stopped Claude: it ended as it does on a signal.
-				return code, nil
+				return h.code, nil
 			}
-			ending = true
-			c.sigs <- sig
+			h.phase = claudeEnding
+			h.c.sigs <- sig
 		case r := <-exited:
-			if stopping.IsZero() || ending {
+			if h.phase != claudeStopping {
+				// It ended by itself, or as T3 asked.
 				return r.code, r.err
 			}
 			// Stopped; cut off if it took too long, with the code of a SIGTERM.
-			c, stopping, code = nil, time.Time{}, r.code
+			h.c, h.phase, h.code = nil, claudeAsleep, r.code
 			if r.err != nil {
-				code = 128 + int(syscall.SIGTERM)
+				h.code = 128 + int(syscall.SIGTERM)
 			}
-			if len(waiting) > 0 {
-				c = h.restart(ctx)
-				for _, line := range waiting {
-					h.send(c, line)
+			if len(h.waiting) > 0 {
+				h.wake(ctx)
+				for _, line := range h.waiting {
+					h.send(line)
 				}
-				waiting = nil
+				h.waiting = nil
 			}
-			if eof {
-				if c == nil {
-					return 0, nil
-				}
-				ending = true
-				_ = c.stdin.Close()
+			if h.eof && h.ended() {
+				return 0, nil
 			}
 		case <-tick.C:
-			switch {
-			case c == nil || ending:
-			case !stopping.IsZero():
-				if time.Since(stopping) >= stopTimeout {
-					c.cancel()
-				}
-			default:
+			switch h.phase {
+			case claudeRunning:
 				if since, ok := h.st.idleSince(); ok && time.Since(since) >= h.idle {
-					stopping = time.Now()
-					c.sigs <- syscall.SIGTERM
+					h.phase, h.stopAt = claudeStopping, time.Now()
+					h.c.sigs <- syscall.SIGTERM
 				}
+			case claudeStopping:
+				if time.Since(h.stopAt) >= stopTimeout {
+					h.c.cancel()
+				}
+			case claudeAsleep, claudeEnding:
 			}
 		}
 	}
+}
+
+// ended acts on the end of the SDK's stdin, and says whether Run is over:
+// with no Claude running there is nothing more to say, as Claude would on
+// EOF. One running reads the end too, and its exit is Run's. One stopping
+// stops first.
+func (h *hibernator) ended() bool {
+	switch h.phase {
+	case claudeAsleep:
+		return true
+	case claudeRunning, claudeEnding:
+		h.phase = claudeEnding
+		_ = h.c.stdin.Close()
+	case claudeStopping:
+	}
+	return false
+}
+
+// wake starts Claude again where it was.
+func (h *hibernator) wake(ctx context.Context) {
+	h.c, h.phase = h.restart(ctx), claudeRunning
 }
 
 // start runs a Claude with req.
@@ -202,10 +233,10 @@ func (h *hibernator) restart(ctx context.Context) *claude {
 	return c
 }
 
-// send gives line to c.
-func (h *hibernator) send(c *claude, line []byte) {
+// send gives line to Claude.
+func (h *hibernator) send(line []byte) {
 	h.st.In(line)
-	_, _ = c.stdin.Write(line)
+	_, _ = h.c.stdin.Write(line)
 }
 
 // readLines sends r's lines, each with its newline (the last may have

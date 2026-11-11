@@ -2,14 +2,12 @@ package hibernate
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -37,26 +35,40 @@ import (
 // Serve keeps it alive with heartbeats, as the server does, and passes on
 // each server's events in turn. To T3 it is the same server all along, a
 // slower one at the first request after a stop.
+//
+// Serve is an actor: its goroutine (proxy.run) owns the server's phase and
+// everything counted against it. The requests' handlers (serve_http.go) and
+// each server's goroutines reach it only through its mailbox (proxy.tell).
 
 const (
 	// serverStartTimeout is how long a server may take to say where it
-	// listens: a box's wake and OpenCode's start, about 3 s on the VPS.
+	// listens, and again to send its first event: a box's wake and
+	// OpenCode's start, about 3 s on the VPS.
 	serverStartTimeout = time.Minute
-	// heartbeat is how often T3's event stream gets a comment. T3 gives up on
-	// a stream after 45 s of silence; OpenCode sends one every 15 s.
-	heartbeat = 15 * time.Second
 	// replayTimeout is how long adding one MCP server again may take: OpenCode
 	// connects to it at once, and T3 allows as long for adding it.
 	replayTimeout = 5 * time.Second
-	// maxReplayed is the largest request body Serve keeps to send again.
-	maxReplayed = 1 << 20
-	// mcpPath is where T3 adds and removes its MCP servers.
-	mcpPath = "/api/experimental/mcp/"
 )
 
 // listeningRE finds the server's URL in what `opencode serve` prints, as T3
 // does.
 var listeningRE = regexp.MustCompile(`server listening on\s+(https?://\S+)`)
+
+// serverPhase is what a proxy's server is doing.
+type serverPhase int
+
+const (
+	// serverStopped: none runs, and its box may sleep. The next request
+	// starts one.
+	serverStopped serverPhase = iota
+	// serverStarting: one is on its way up. Requests wait for it.
+	serverStarting
+	// serverUp: one takes requests.
+	serverUp
+	// serverStopping: one was told to stop, for being idle or by T3.
+	// Requests wait for its exit, and for the server after it.
+	serverStopping
+)
 
 // Serves says whether req starts an OpenCode server that Serve can stop
 // and start again unseen: `opencode serve`, without a terminal.
@@ -79,50 +91,51 @@ func Serve(ctx context.Context, exec Exec, req boxexec.Request, s boxexec.Stream
 		return 0, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	p := newProxy(exec, req, s.Stderr)
-	var wg sync.WaitGroup
-	defer wg.Wait() // after cancel, which runs first
+	p := newProxy(exec, req, s.Stderr, idle)
+	// The servers' goroutines and the handlers end with ctx, or at their
+	// next word to the actor once nobody reads its mailbox any more.
+	unread := sync.OnceFunc(func() { close(p.done) })
+	defer p.wg.Wait()
+	defer unread()
 	defer cancel()
 
-	up, err := p.launch(ctx, &wg)
+	// The first server, before T3 is told where to call: if it can't start,
+	// T3 hears why from this command's end, as from OpenCode's own.
+	up, err := p.launch(ctx, nil)
 	if err != nil {
 		_ = ln.Close()
-		return p.exitCode(), err
+		return 0, err
 	}
-	p.started(up, nil)
-	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
-	wg.Go(func() { _ = srv.Serve(ln) })
-	defer p.handlers.Wait()
-	defer p.transport.CloseIdleConnections()
-	defer func() { _ = srv.Close() }()
+	p.launched(up, nil)
+
+	// The connections are counted from the goroutine that accepts them, so
+	// that once it has ended none is added while they are waited for.
+	var conns sync.WaitGroup
+	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second, ConnState: func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			conns.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			conns.Done()
+		case http.StateActive, http.StateIdle:
+		}
+	}}
+	accepting := make(chan struct{})
+	go func() {
+		defer close(accepting)
+		_ = srv.Serve(ln)
+	}()
+	defer func() {
+		unread()
+		_ = srv.Close()
+		<-accepting
+		conns.Wait()
+		p.transport.CloseIdleConnections()
+	}()
 	if _, err := fmt.Fprintf(s.Stdout, "opencode server listening on http://%s\n", ln.Addr()); err != nil {
 		return 0, err
 	}
-
-	tick := time.NewTicker(min(max(idle/10, 10*time.Millisecond), time.Second))
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return p.exitCode(), ctx.Err()
-		case sig := <-s.Signal:
-			// T3 ending the server: stop the one running, if any.
-			if up := p.stopping(); up != nil {
-				up.sigs <- sig
-				select {
-				case <-up.exited:
-				case <-time.After(stopTimeout):
-				}
-			}
-			return p.exitCode(), nil
-		case <-p.wakeup:
-			if p.starting() {
-				wg.Go(func() { p.started(p.launch(ctx, &wg)) })
-			}
-		case <-tick.C:
-			p.stopIdle(idle)
-		}
-	}
+	return p.run(ctx, s.Signal)
 }
 
 // listenAddr returns where T3 asked the server to listen: the --hostname
@@ -140,41 +153,53 @@ func listenAddr(argv []string) string {
 	return net.JoinHostPort(host, port)
 }
 
-// proxy is one Serve: the server, the servers standing in for it one after
-// another, and T3's requests and event streams. Its fields after mu are
-// shared by the handlers, the main loop and each server's goroutines.
+// proxy is one Serve: the servers standing in for T3's one after another,
+// and T3's requests and event streams.
 type proxy struct {
+	// Set once; any goroutine may read them.
 	exec      Exec
 	req       boxexec.Request
 	stderr    io.Writer
 	auth      string // the Authorization T3 sends; empty if it sends none
+	idle      time.Duration
 	transport *http.Transport
-	wakeup    chan struct{} // a request waits for a server; capacity 1
-	handlers  sync.WaitGroup
+	inbox     chan func(context.Context) // the actor's mailbox
+	done      chan struct{}              // closed when Serve returns: nobody reads the mailbox any more
+	wg        sync.WaitGroup             // the servers' goroutines
 
-	mu       sync.Mutex
-	changed  chan struct{} // closed, and replaced, when up or launching changes
-	up       *upstream     // the server running; nil while stopped or starting
-	launches bool          // a server is starting
-	err      error         // why the last start failed
-	code     int           // the code of the server's last exit
-	busy     int           // requests being passed on
-	quiet    time.Time     // since when busy and running have been zero
-	running  map[string]struct{}
-	hello    []byte                   // the first server's server.connected event
-	subs     map[chan []byte]struct{} // T3's event streams
-	mcp      map[string]resent        // T3's MCP servers, by path and query
+	// The actor's own: only run's goroutine touches what follows.
+	phase   serverPhase
+	server  *upstream                // the one up or stopping; nil otherwise
+	since   time.Time                // up: since when nothing has been under way; stopping: when it was told to stop
+	ending  bool                     // T3 is ending the server: its exit is Serve's
+	code    int                      // the code of the server's last exit
+	waiting []chan grant             // requests waiting for a server
+	busy    int                      // requests being passed on
+	running map[string]struct{}      // sessions with an execution under way
+	hello   []byte                   // the first server's server.connected event
+	subs    map[chan []byte]struct{} // T3's event streams
+	mcp     map[string]resent        // T3's MCP servers, by path and query
+	timer   *time.Timer              // fires when the server may be idle, or is late stopping
 }
 
 // upstream is one server process in the box.
 type upstream struct {
-	base     *url.URL
-	sigs     chan os.Signal
-	cancel   context.CancelFunc // cuts its exec off
-	exited   chan struct{}      // closed once code and err are set
-	code     int
-	err      error     // why its exec failed, if it did: no box, no daemon
-	stopping time.Time // when it was sent SIGTERM for being idle, or T3's signal; zero before
+	base   *url.URL
+	pass   *httputil.ReverseProxy // passes requests on to base
+	sigs   chan os.Signal
+	cancel context.CancelFunc // cuts its exec off
+	exited chan struct{}      // closed once code and err are set
+	code   int
+	err    error         // why its exec failed, if it did: no box, no daemon
+	events io.ReadCloser // its event stream
+	br     *bufio.Reader // reads events
+	first  sse           // its first event
+}
+
+// grant answers a request that asked for a server.
+type grant struct {
+	up  *upstream
+	err error
 }
 
 // resent is a request Serve sends again to a restarted server.
@@ -183,16 +208,18 @@ type resent struct {
 	body   []byte
 }
 
-func newProxy(exec Exec, req boxexec.Request, stderr io.Writer) *proxy {
+func newProxy(exec Exec, req boxexec.Request, stderr io.Writer, idle time.Duration) *proxy {
 	p := &proxy{
-		exec: exec, req: req, stderr: stderr,
+		exec: exec, req: req, stderr: stderr, idle: idle,
 		transport: &http.Transport{MaxIdleConnsPerHost: 16, IdleConnTimeout: time.Minute},
-		wakeup:    make(chan struct{}, 1),
-		changed:   make(chan struct{}),
+		inbox:     make(chan func(context.Context)),
+		done:      make(chan struct{}),
 		running:   map[string]struct{}{},
 		subs:      map[chan []byte]struct{}{},
 		mcp:       map[string]resent{},
+		timer:     time.NewTimer(0),
 	}
+	p.timer.Stop()
 	for _, v := range req.Environ {
 		if pw, ok := strings.CutPrefix(v, "OPENCODE_PASSWORD="); ok && pw != "" {
 			p.auth = "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+pw))
@@ -201,89 +228,265 @@ func newProxy(exec Exec, req boxexec.Request, stderr io.Writer) *proxy {
 	return p
 }
 
-// notify tells the requests waiting on a server that something changed.
-// p.mu is held.
-func (p *proxy) notify() {
-	close(p.changed)
-	p.changed = make(chan struct{})
-}
-
-func (p *proxy) exitCode() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.code
-}
-
-// starting says whether the main loop should start a server, and marks one
-// as starting if so.
-func (p *proxy) starting() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.up != nil || p.launches {
+// tell has the actor call fn, and says whether it will: not once Serve
+// has returned.
+func (p *proxy) tell(fn func(ctx context.Context)) bool {
+	select {
+	case p.inbox <- fn:
+		return true
+	case <-p.done:
 		return false
 	}
-	p.launches = true
-	p.notify()
-	return true
 }
 
-// started records the end of a start.
-func (p *proxy) started(up *upstream, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// run is the actor: it takes what the handlers and the servers' goroutines
+// tell it, one at a time, until T3's signal or ctx ends it.
+func (p *proxy) run(ctx context.Context, signals <-chan os.Signal) (int, error) {
+	defer p.timer.Stop()
+	for {
+		if p.ending && p.server == nil {
+			return p.code, nil
+		}
+		p.arm()
+		select {
+		case <-ctx.Done():
+			return p.code, ctx.Err()
+		case sig := <-signals:
+			p.end(sig)
+		case fn := <-p.inbox:
+			fn(ctx)
+		case <-p.timer.C:
+			p.timeUp()
+		}
+	}
+}
+
+// idling says whether the server is up with nothing under way.
+func (p *proxy) idling() bool {
+	return p.phase == serverUp && p.busy == 0 && len(p.running) == 0
+}
+
+// arm sets the timer for what the phase waits for: an idle server's stop,
+// or a stopping server's exit.
+func (p *proxy) arm() {
+	switch {
+	case p.idling():
+		p.timer.Reset(time.Until(p.since.Add(p.idle)))
+	case p.phase == serverStopping:
+		p.timer.Reset(time.Until(p.since.Add(stopTimeout)))
+	default:
+		p.timer.Stop()
+	}
+}
+
+// timeUp stops a server that has been idle long enough, and cuts off one
+// that takes too long to stop.
+func (p *proxy) timeUp() {
+	switch {
+	case p.idling() && time.Since(p.since) >= p.idle:
+		p.stop(syscall.SIGTERM)
+	case p.phase == serverStopping && time.Since(p.since) >= stopTimeout:
+		p.server.cancel()
+		p.since = time.Now() // and again, should even that not end it
+	}
+}
+
+// stop tells the server that is up to stop.
+func (p *proxy) stop(sig os.Signal) {
+	p.signal(sig)
+	p.phase, p.since = serverStopping, time.Now()
+}
+
+// signal passes sig on to the server. Its exec reads them; one that has
+// ended leaves them unread, and has no use for more.
+func (p *proxy) signal(sig os.Signal) {
+	select {
+	case p.server.sigs <- sig:
+	default:
+	}
+}
+
+// end is T3 ending the server with sig: the one running stops, and run
+// returns once none does.
+func (p *proxy) end(sig os.Signal) {
+	p.ending = true
+	switch p.phase {
+	case serverUp:
+		p.stop(sig)
+	case serverStopping:
+		p.signal(sig)
+	case serverStarting, serverStopped:
+		// None runs yet, or any more: run returns at once, and a start
+		// ends with Serve.
+	}
+}
+
+// start starts a server in the background, for the requests waiting.
+func (p *proxy) start(ctx context.Context) {
+	p.phase = serverStarting
+	calls := maps.Clone(p.mcp)
+	p.wg.Go(func() {
+		up, err := p.launch(ctx, calls)
+		p.tell(func(context.Context) { p.launched(up, err) })
+	})
+}
+
+// launched takes the end of a start: the server is up and the requests
+// that waited for it go in, or they hear why it isn't.
+func (p *proxy) launched(up *upstream, err error) {
 	if err == nil {
-		// Its exit, if it came already, found another server in p.up, or
-		// none, and left it: so it is no server now.
+		// One that has ended since is no server. Its exit, told
+		// separately, finds another in p.server, or none.
 		select {
 		case <-up.exited:
+			_ = up.events.Close()
 			err = up.early()
 		default:
-			p.up, p.quiet = up, time.Now()
 		}
 	}
-	p.launches, p.err = false, err
-	p.notify()
-}
-
-// stopping marks the server running, if any, as stopping, and returns it.
-func (p *proxy) stopping() *upstream {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	up := p.up
-	if up != nil && up.stopping.IsZero() {
-		up.stopping = time.Now()
-		p.notify()
-	}
-	return up
-}
-
-// stopIdle stops the server once nothing has been under way for idle, and
-// cuts off one that takes too long to stop.
-func (p *proxy) stopIdle(idle time.Duration) {
-	p.mu.Lock()
-	up := p.up
-	switch {
-	case up == nil:
-		p.mu.Unlock()
-	case !up.stopping.IsZero():
-		late := time.Since(up.stopping) >= stopTimeout
-		p.mu.Unlock()
-		if late {
-			up.cancel()
+	waiting := p.waiting
+	p.waiting = nil
+	if err != nil {
+		p.phase = serverStopped
+		for _, w := range waiting {
+			w <- grant{err: err}
 		}
-	case p.busy == 0 && len(p.running) == 0 && time.Since(p.quiet) >= idle:
-		up.stopping = time.Now()
-		p.notify()
-		p.mu.Unlock()
-		up.sigs <- syscall.SIGTERM
-	default:
-		p.mu.Unlock()
+		return
+	}
+	p.phase, p.server, p.since = serverUp, up, time.Now()
+	p.event(up, up.first)
+	// Followed from here on, so that none of its events comes before it is
+	// p.server.
+	p.wg.Go(func() { p.follow(up) })
+	for _, w := range waiting {
+		p.busy++
+		w <- grant{up: up}
 	}
 }
 
-// launch starts a server, waits until it listens, adds back T3's MCP
-// servers and subscribes to its events. The server's goroutines join wg.
-func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, error) {
+// exited takes a server's exit. One stopped on purpose leaves T3's event
+// streams open, and the next starts if requests wait for it. One that ended
+// by itself takes the streams along, with the executions it lost, so T3
+// reconnects and asks what became of them.
+func (p *proxy) exited(ctx context.Context, up *upstream) {
+	p.code = up.code
+	if up != p.server {
+		return // one that never came up; launched says so
+	}
+	byItself := p.phase == serverUp
+	p.phase, p.server = serverStopped, nil
+	if byItself {
+		for ch := range p.subs {
+			close(ch)
+		}
+		clear(p.subs)
+		clear(p.running)
+	}
+	if len(p.waiting) > 0 && !p.ending {
+		p.start(ctx)
+	}
+}
+
+// acquire answers a request that wants the server on reply: at once if one
+// is up, and otherwise after the start it causes or finds under way. A
+// request granted one is counted as under way until release.
+func (p *proxy) acquire(ctx context.Context, reply chan grant) {
+	if p.phase == serverUp {
+		p.busy++
+		reply <- grant{up: p.server}
+		return
+	}
+	p.waiting = append(p.waiting, reply)
+	if p.phase == serverStopped {
+		p.start(ctx)
+	}
+}
+
+// abandon answers a request that gave up waiting with err, unless it was
+// answered already.
+func (p *proxy) abandon(reply chan grant, err error) {
+	for i, w := range p.waiting {
+		if w == reply {
+			p.waiting = append(p.waiting[:i], p.waiting[i+1:]...)
+			reply <- grant{err: err}
+			return
+		}
+	}
+}
+
+// release ends a request acquire counted.
+func (p *proxy) release() {
+	p.busy--
+	if p.busy == 0 && len(p.running) == 0 {
+		p.since = time.Now()
+	}
+}
+
+// event takes one event of up: it keeps track of the executions under way
+// and passes the event on to T3's streams. A server's server.connected is
+// passed on only once, to each stream as it opens: the streams outlive the
+// servers.
+func (p *proxy) event(up *upstream, ev sse) {
+	if up != p.server {
+		return // a server that has gone
+	}
+	switch ev.kind {
+	case "server.connected":
+		if p.hello == nil {
+			p.hello = ev.frame
+		}
+		return
+	case "session.execution.started":
+		p.running[ev.session] = struct{}{}
+	case "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
+		delete(p.running, ev.session)
+		if len(p.running) == 0 && p.busy == 0 {
+			p.since = time.Now()
+		}
+	}
+	for ch := range p.subs {
+		select {
+		case ch <- ev.frame:
+		default:
+			// Too far behind: T3 reconnects and asks what it missed.
+			close(ch)
+			delete(p.subs, ch)
+		}
+	}
+}
+
+// eventsEnded takes the end of up's event stream. If the server wasn't
+// told to stop, it stopped sending events by itself: T3 must reconnect to
+// see what it missed, so this server goes.
+func (p *proxy) eventsEnded(up *upstream) {
+	if up == p.server && p.phase == serverUp {
+		up.cancel()
+	}
+}
+
+// subscribe adds one of T3's event streams and answers with the event it
+// begins with, if there is one yet.
+func (p *proxy) subscribe(ch chan []byte, hello chan<- []byte) {
+	p.subs[ch] = struct{}{}
+	hello <- p.hello
+}
+
+// unsubscribe drops one of T3's event streams, if it is still there.
+func (p *proxy) unsubscribe(ch chan []byte) { delete(p.subs, ch) }
+
+// setMCP keeps, or with a nil call forgets, one of T3's MCP servers.
+func (p *proxy) setMCP(key string, call *resent) {
+	if call == nil {
+		delete(p.mcp, key)
+		return
+	}
+	p.mcp[key] = *call
+}
+
+// launch starts a server, waits until it listens, adds T3's MCP servers
+// (calls) to it and reads the first event of its stream. It runs outside
+// the actor, which is told of the server's exit, whenever that is.
+func (p *proxy) launch(ctx context.Context, calls map[string]resent) (*upstream, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	up := &upstream{sigs: make(chan os.Signal, 4), cancel: cancel, exited: make(chan struct{})}
 	listening := make(chan string, 1)
@@ -296,7 +499,7 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		}
 		return false
 	}}
-	wg.Go(func() {
+	p.wg.Go(func() {
 		defer cancel()
 		code, err := p.exec(ctx, p.req, boxexec.Streams{Stdout: out, Stderr: p.stderr, Signal: up.sigs})
 		if err != nil && code == 0 {
@@ -304,7 +507,7 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		}
 		up.code, up.err = code, err
 		close(up.exited)
-		p.gone(up)
+		p.tell(func(ctx context.Context) { p.exited(ctx, up) })
 	})
 	fail := func(err error) (*upstream, error) {
 		cancel()
@@ -319,39 +522,32 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		if err != nil {
 			return fail(fmt.Errorf("opencode's URL %q: %w", raw, err))
 		}
-		up.base = base
+		up.base, up.pass = base, p.passTo(base, nil)
 	case <-up.exited:
 		return nil, up.early()
 	case <-timer.C:
 		return fail(errors.New("opencode did not listen within a minute"))
-	case <-ctx.Done():
-		return fail(ctx.Err())
 	}
-	p.replay(ctx, up)
-	events, err := p.subscribe(ctx, up)
+	for path, call := range calls {
+		// One that fails or is refused stays out; T3's next turn finds it
+		// missing. The server it is added to is still good.
+		if err := p.add(ctx, up, path, call); err != nil {
+			_, _ = fmt.Fprintf(p.stderr, "fern: MCP server %s was not added to opencode again: %v\n", path, err)
+		}
+	}
+	events, err := p.openEvents(ctx, up)
 	if err != nil {
 		return fail(err)
 	}
-	// Its first event, server.connected, before T3 hears of it: each of T3's
-	// streams begins with the first server's.
-	br := bufio.NewReaderSize(events, 64<<10)
+	up.events, up.br = events, bufio.NewReaderSize(events, 64<<10)
+	// Its first event, server.connected, with a time limit of its own.
 	late := time.AfterFunc(serverStartTimeout, cancel)
-	frame, data, err := readEvent(br)
+	up.first, err = readEvent(up.br)
 	late.Stop()
 	if err != nil {
 		_ = events.Close()
 		return fail(fmt.Errorf("opencode's events: %w", err))
 	}
-	p.event(frame, data)
-	wg.Go(func() {
-		defer func() { _ = events.Close() }()
-		p.follow(br)
-		if !p.stopped(up) {
-			// The server stopped sending events by itself: T3 must reconnect
-			// to see what it missed, so this server goes.
-			up.cancel()
-		}
-	})
 	return up, nil
 }
 
@@ -363,323 +559,17 @@ func (up *upstream) early() error {
 	return fmt.Errorf("opencode exited with %d as it started", up.code)
 }
 
-// stopped says whether up was stopped on purpose.
-func (p *proxy) stopped(up *upstream) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return !up.stopping.IsZero()
-}
-
-// gone records a server's exit. One stopped on purpose leaves T3's event
-// streams open; one that ended by itself takes them along, with the
-// executions it lost, so T3 reconnects and asks what became of them.
-func (p *proxy) gone(up *upstream) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.code = up.code
-	if p.up != up {
-		return
-	}
-	p.up = nil
-	if up.stopping.IsZero() {
-		for ch := range p.subs {
-			close(ch)
-			delete(p.subs, ch)
-		}
-		clear(p.running)
-		p.quiet = time.Now()
-	}
-	p.notify()
-}
-
-// replay adds T3's MCP servers to a new server.
-func (p *proxy) replay(ctx context.Context, up *upstream) {
-	p.mu.Lock()
-	calls := make(map[string]resent, len(p.mcp))
-	for k, v := range p.mcp {
-		calls[k] = v
-	}
-	p.mu.Unlock()
-	for path, call := range calls {
-		// One that fails or is refused stays out; T3's next turn finds it
-		// missing. The server it is added to is still good.
-		if err := p.add(ctx, up, path, call); err != nil {
-			_, _ = fmt.Fprintf(p.stderr, "fern: MCP server %s was not added to opencode again: %v\n", path, err)
-		}
-	}
-}
-
-// add sends one of T3's MCP servers to up.
-func (p *proxy) add(ctx context.Context, up *upstream, path string, call resent) error {
-	ctx, cancel := context.WithTimeout(ctx, replayTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, up.base.String()+path, bytes.NewReader(call.body))
-	if err != nil {
-		return err
-	}
-	req.Header = call.header.Clone()
-	resp, err := p.transport.RoundTrip(req)
-	if err != nil {
-		return err
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return errors.New(resp.Status)
-	}
-	return nil
-}
-
-// subscribe opens a server's event stream.
-func (p *proxy) subscribe(ctx context.Context, up *upstream) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, up.base.String()+"/api/event", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	if p.auth != "" {
-		req.Header.Set("Authorization", p.auth)
-	}
-	resp, err := p.transport.RoundTrip(req)
-	if err != nil {
-		return nil, fmt.Errorf("opencode's events: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("opencode's events: %s", resp.Status)
-	}
-	return resp.Body, nil
-}
-
-// follow reads a server's events until they end, keeps track of the
-// executions under way and passes the events on to T3's streams. A
-// server's server.connected is passed on only once, to each stream as it
-// opens: the streams outlive the servers.
-func (p *proxy) follow(br *bufio.Reader) {
+// follow tells the actor up's events until they end.
+func (p *proxy) follow(up *upstream) {
+	defer func() { _ = up.events.Close() }()
 	for {
-		frame, data, err := readEvent(br)
+		ev, err := readEvent(up.br)
 		if err != nil {
-			return
+			break
 		}
-		p.event(frame, data)
-	}
-}
-
-// readEvent reads the next event of a stream: its frame, with the blank
-// line that ends it, and its data. Comments (heartbeats) are skipped.
-func readEvent(br *bufio.Reader) (frame, data []byte, err error) {
-	for {
-		line, err := br.ReadBytes('\n')
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(bytes.TrimRight(line, "\r\n")) > 0 {
-			frame = append(frame, line...)
-			if v, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-				data = append(data, bytes.TrimSpace(v)...)
-			}
-			continue
-		}
-		if len(data) > 0 {
-			return append(frame, '\n'), data, nil
-		}
-		frame = nil
-	}
-}
-
-// event takes one event from the server.
-func (p *proxy) event(frame, data []byte) {
-	var ev struct {
-		Type string `json:"type"`
-		Data struct {
-			SessionID string `json:"sessionID"`
-		} `json:"data"`
-	}
-	_ = json.Unmarshal(data, &ev)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch ev.Type {
-	case "server.connected":
-		if p.hello == nil {
-			p.hello = frame
-		}
-		return
-	case "session.execution.started":
-		p.running[ev.Data.SessionID] = struct{}{}
-	case "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
-		delete(p.running, ev.Data.SessionID)
-		if len(p.running) == 0 && p.busy == 0 {
-			p.quiet = time.Now()
-		}
-	}
-	for ch := range p.subs {
-		select {
-		case ch <- frame:
-		default:
-			// Too far behind: T3 reconnects and asks what it missed.
-			close(ch)
-			delete(p.subs, ch)
-		}
-	}
-}
-
-// ServeHTTP passes T3's requests on to the server, starting it if needed,
-// and serves T3's event streams itself.
-func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p.handlers.Add(1)
-	defer p.handlers.Done()
-	if p.auth != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(p.auth)) != 1 {
-		// Refused here, so a stray request doesn't wake the box.
-		w.Header().Set("WWW-Authenticate", `Basic realm="opencode"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if r.Method == http.MethodGet && r.URL.Path == "/api/event" {
-		p.events(w, r)
-		return
-	}
-	var body []byte
-	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, mcpPath) {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxReplayed+1))
-		if err != nil || len(b) > maxReplayed {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		body = b
-		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
-	}
-	up, err := p.acquire(r.Context())
-	if err != nil {
-		http.Error(w, "fern: opencode: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer p.release()
-	rp := &httputil.ReverseProxy{
-		Rewrite:       func(pr *httputil.ProxyRequest) { pr.SetURL(up.base) },
-		Transport:     p.transport,
-		FlushInterval: -1,
-		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode/100 == 2 {
-				p.record(r, body)
-			}
-			return nil
-		},
-	}
-	rp.ServeHTTP(w, r)
-}
-
-// record keeps T3's MCP servers, to add them again to the next server.
-func (p *proxy) record(r *http.Request, body []byte) {
-	if !strings.HasPrefix(r.URL.Path, mcpPath) || strings.Contains(r.URL.Path[len(mcpPath):], "/") {
-		return
-	}
-	key := r.URL.Path + "?" + r.URL.RawQuery
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch r.Method {
-	case http.MethodPut:
-		h := http.Header{}
-		for _, k := range []string{"Authorization", "Content-Type"} {
-			if v := r.Header.Get(k); v != "" {
-				h.Set(k, v)
-			}
-		}
-		p.mcp[key] = resent{header: h, body: body}
-	case http.MethodDelete:
-		delete(p.mcp, key)
-	}
-}
-
-// acquire returns the running server, starting one if needed, and counts
-// the request as under way.
-func (p *proxy) acquire(ctx context.Context) (*upstream, error) {
-	p.mu.Lock()
-	asked := false
-	for {
-		if p.up != nil && p.up.stopping.IsZero() {
-			p.busy++
-			up := p.up
-			p.mu.Unlock()
-			return up, nil
-		}
-		if asked && p.up == nil && !p.launches && p.err != nil {
-			err := p.err
-			p.mu.Unlock()
-			return nil, err
-		}
-		if p.up == nil && !p.launches {
-			select {
-			case p.wakeup <- struct{}{}:
-			default:
-			}
-			// An earlier start's error is not this one's.
-			asked, p.err = true, nil
-		}
-		changed := p.changed
-		p.mu.Unlock()
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		p.mu.Lock()
-	}
-}
-
-// release ends a request acquire counted.
-func (p *proxy) release() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.busy--
-	if p.busy == 0 && len(p.running) == 0 {
-		p.quiet = time.Now()
-	}
-}
-
-// events serves one of T3's event streams: the first server's
-// server.connected, then every server's events, with a heartbeat between
-// them. It ends when T3 closes it or its server ends by itself.
-func (p *proxy) events(w http.ResponseWriter, r *http.Request) {
-	flusher, _ := w.(http.Flusher)
-	ch := make(chan []byte, 1024)
-	p.mu.Lock()
-	hello := p.hello
-	p.subs[ch] = struct{}{}
-	p.mu.Unlock()
-	defer func() {
-		p.mu.Lock()
-		delete(p.subs, ch)
-		p.mu.Unlock()
-	}()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	write := func(b []byte) bool {
-		if _, err := w.Write(b); err != nil {
-			return false
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return true
-	}
-	if hello != nil && !write(hello) {
-		return
-	}
-	tick := time.NewTicker(heartbeat)
-	defer tick.Stop()
-	for {
-		select {
-		case frame, ok := <-ch:
-			if !ok || !write(frame) {
-				return
-			}
-		case <-tick.C:
-			if !write([]byte(": heartbeat\n\n")) {
-				return
-			}
-		case <-r.Context().Done():
+		if !p.tell(func(context.Context) { p.event(up, ev) }) {
 			return
 		}
 	}
+	p.tell(func(context.Context) { p.eventsEnded(up) })
 }
