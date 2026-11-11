@@ -58,7 +58,16 @@ func Run(ctx context.Context, exec Exec, req boxexec.Request, s boxexec.Streams,
 // terminal.
 func Applies(req boxexec.Request) bool { return !req.TTY && isStreamingClaude(req.Argv) }
 
-// claudePhase is what a hibernator's Claude is doing.
+// claudePhase is what a hibernator's Claude is doing. It moves in four ways,
+// all in run:
+//
+//	running  → stopping   it was idle long enough, and is sent SIGTERM
+//	stopping → asleep     it exited
+//	asleep   → running    the SDK's next line, or one that waited while it stopped
+//	any but asleep → ending   T3's signal, or the end of its stdin while it runs
+//
+// Run returns when a Claude that is running or ending exits, and at T3's
+// signal or the end of stdin while none runs.
 type claudePhase int
 
 const (

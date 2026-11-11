@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -99,7 +100,7 @@ func TestOnDemand(t *testing.T) {
 			svc := service{Run: "FERN_TEST_ECHO=" + listen + " exec " + exe, Ready: "test -e ready", Listen: listen}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			o, err := listenOnDemand(ctx, "svc", svc, dir, []string{pathEnv}, slog.New(slog.DiscardHandler))
+			o, err := listenOnDemand(ctx, "svc", svc, dir, []string{pathEnv}, startTimeout, slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -158,10 +159,74 @@ func TestOnDemandUnused(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "svc.sock")
 	ctx, cancel := context.WithCancel(t.Context())
-	o, err := listenOnDemand(ctx, "svc", service{Run: "false", Listen: "unix:" + sock}, dir, []string{pathEnv}, slog.New(slog.DiscardHandler))
+	o, err := listenOnDemand(ctx, "svc", service{Run: "false", Listen: "unix:" + sock}, dir, []string{pathEnv}, startTimeout, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cancel()
+	o.stop(context.Background())
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("socket file after stop: %v, want none", err)
+	}
+}
+
+// A service that wasn't ready in time drops those who waited, and is waited
+// for again at the next connection: its supervisor goes on starting it.
+func TestOnDemandFailedThenAskedAgain(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "svc.sock")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exits at once until the file ok is there.
+	svc := service{Run: "[ -e ok ] || exit 1; FERN_TEST_ECHO=unix:" + sock + " exec " + exe, Ready: "test -e ready", Listen: "unix:" + sock}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// Longer than the first pause between its starts, so that a wait sees one.
+	o, err := listenOnDemand(ctx, "svc", svc, dir, []string{pathEnv}, 2*time.Second, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := bufio.NewReader(c).ReadString('\n'); !errors.Is(err, io.EOF) {
+		t.Fatalf("a connection to a service that doesn't start: %v, want it dropped", err)
+	}
+	_ = c.Close()
+	if why := o.supervisor().status().why(); !strings.Contains(why, "has exited") {
+		t.Errorf("the service's status says %q, want that it has exited", why)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ok"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask(t, "unix", sock, "later"); got != "svc:later" {
+		t.Errorf("answer at the next connection %q, want svc:later", got)
+	}
+	cancel()
+	o.stop(context.Background())
+}
+
+// One that never took its socket over leaves none behind either.
+func TestOnDemandFailedLeavesNoSocket(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "svc.sock")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	o, err := listenOnDemand(ctx, "svc", service{Run: "exit 1", Listen: "unix:" + sock}, dir, []string{pathEnv}, 100*time.Millisecond, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _ = bufio.NewReader(c).ReadString('\n') // dropped once the wait is over
+	_ = c.Close()
 	cancel()
 	o.stop(context.Background())
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {

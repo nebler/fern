@@ -40,7 +40,8 @@ type job struct {
 	killed atomic.Bool        // KillShell stopped it: the agent's call, after which the box lingers as after a Bash call
 }
 
-// jobState is what the daemon knows of a background command.
+// jobState is what the daemon knows of a background command. It leaves
+// jobWatching once, when the job's watch ends, for the state that says why.
 type jobState int32
 
 const (

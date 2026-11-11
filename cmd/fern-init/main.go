@@ -75,10 +75,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 	// builder's box, whose services must make their first start.
 	var stoppers []func(context.Context)
 	lazy := make(map[string]*onDemand)
+	always := make(map[string]*supervisor)
 	for name, svc := range services {
 		env := svc.environ(env)
 		if svc.Listen != "" && os.Getenv("FERN_ON_DEMAND") != "off" {
-			o, err := listenOnDemand(ctx, name, svc, dir, env, log)
+			o, err := listenOnDemand(ctx, name, svc, dir, env, startTimeout, log)
 			if err != nil {
 				for _, stop := range stoppers {
 					stop(ctx)
@@ -89,7 +90,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 			stoppers = append(stoppers, o.stop)
 			continue
 		}
-		stoppers = append(stoppers, startService(ctx, name, svc, dir, env, log).stop)
+		always[name] = startService(ctx, name, svc, dir, env, log)
+		stoppers = append(stoppers, always[name].stop)
 	}
 
 	mux := http.NewServeMux()
@@ -108,7 +110,13 @@ func run(ctx context.Context, log *slog.Logger) error {
 				check[name] = svc
 			}
 		}
-		return checkServices(ctx, check, dir, env)
+		return checkServices(ctx, check, dir, env, func(name string) string {
+			sup := always[name]
+			if o, ok := lazy[name]; ok {
+				sup = o.supervisor()
+			}
+			return sup.status().why()
+		})
 	}))
 	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_WAKE_ID"), cancel))
 	mux.Handle("POST "+boxexec.TouchPath, touch(token, dir))

@@ -1,14 +1,19 @@
 package runsc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
@@ -207,6 +212,23 @@ func TestWaitReadyExited(t *testing.T) {
 	}
 }
 
+// A wake that runs out of time says what fern-init last said of its
+// services, which names the one that isn't ready and what it is doing.
+func TestWaitReadySaysWhy(t *testing.T) {
+	newFakeNode(t, 0)
+	d := newTestDriver(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "db not ready (it has exited 3 times in a row, last with exit status 1, and starts again in 4s): exit status 2", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	err := d.waitReady(ctx, d.layout("demo"), strings.TrimPrefix(srv.URL, "http://"))
+	if err == nil || !strings.Contains(err.Error(), "db not ready (it has exited 3 times") {
+		t.Errorf("waitReady() of a box whose service keeps exiting: %v, want fern-init's words", err)
+	}
+}
+
 // A box's network is made by two ip batches: one on the node, one in the
 // box's namespace.
 func TestNetUp(t *testing.T) {
@@ -281,4 +303,62 @@ func TestAllocate(t *testing.T) {
 	if a, err := d.allocate(b); err != nil || a != got[7] {
 		t.Errorf("allocate after box7 went = %d, %v; want its address %d", a, err, got[7])
 	}
+}
+
+// What a wake does with a box depends on what it finds of it.
+func TestFind(t *testing.T) {
+	d := newTestDriver(t)
+	b := d.layout("demo")
+	tests := []struct {
+		name string
+		dir  bool
+		cs   []container
+		want found
+	}{
+		{name: "no directory", want: foundNothing},
+		{name: "no directory, whatever runsc lists", cs: []container{{ID: b.cid, Status: "running", Bundle: b.dir}}, want: foundNothing},
+		{name: "a directory only", dir: true, want: foundLeftover},
+		{name: "created, not started", dir: true, cs: []container{{ID: b.cid, Status: "created", Bundle: b.dir}}, want: foundLeftover},
+		{name: "stopped, not deleted", dir: true, cs: []container{{ID: b.cid, Status: "stopped", Bundle: b.dir}}, want: foundLeftover},
+		{name: "another box runs", dir: true, cs: []container{{ID: "other", Status: "running", Bundle: "/elsewhere"}}, want: foundLeftover},
+		{name: "running", dir: true, cs: []container{{ID: b.cid, Status: "running", Bundle: b.dir}}, want: foundRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := find(tt.dir, tt.cs, b); got != tt.want {
+				t.Errorf("find() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// A box found running is kept once its services are ready, however often
+// its fern-init says they aren't yet; one whose fern-init is silent is not.
+func TestAdopt(t *testing.T) {
+	d := newTestDriver(t)
+	t.Run("not ready, then ready", func(t *testing.T) {
+		var asked atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if asked.Add(1) <= 3 {
+				http.Error(w, "db not ready", http.StatusServiceUnavailable)
+			}
+		}))
+		defer srv.Close()
+		if !d.adopt(t.Context(), strings.TrimPrefix(srv.URL, "http://")) {
+			t.Error("adopt() gave up on a box that got ready")
+		}
+		if got := asked.Load(); got != 4 {
+			t.Errorf("asked %d times, want 4", got)
+		}
+	})
+	t.Run("silent", func(t *testing.T) {
+		start := time.Now()
+		// Nothing listens there.
+		if d.adopt(t.Context(), "127.0.0.1:1") {
+			t.Error("adopt() kept a box that doesn't answer")
+		}
+		if took := time.Since(start); took < adoptSilence || took > adoptSilence+5*time.Second {
+			t.Errorf("adopt() gave up after %s, want about %s", took, adoptSilence)
+		}
+	})
 }

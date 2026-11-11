@@ -37,41 +37,77 @@ const (
 	sessionAckBytes = sessionWindow / 4
 )
 
-// session is a command and what it has printed that its client hasn't
-// acknowledged. Its first request's handler owns it (Server.runSession); the
-// handlers of later connections only serve them.
+// outcome is how a session ends for its client. It is open until settle
+// ends it, once: what comes first stays.
+type outcome int
+
+const (
+	// open: the client may still come for the output and the exit code.
+	open outcome = iota
+	// delivered: the client has the exit code, and said so by closing.
+	delivered
+	// abandoned: nobody will read the output. The client closed before the
+	// command ended, no connection came within the grace, or the box stops.
+	abandoned
+)
+
+// link is one connection serving a session. A session has at most one, and
+// the next takes over only once the one before has let go (serve).
+type link struct {
+	conn   *websocket.Conn
+	cancel context.CancelFunc // ends its serve
+	done   chan struct{}      // closed when its serve has returned
+}
+
+// session is a command, what it has printed that its client hasn't
+// acknowledged, and the stdin it hasn't taken. Its first request's handler
+// owns it (Server.runSession); the handlers of later connections only serve
+// them.
 type session struct {
-	grace time.Duration
-	kill  context.CancelFunc // kills the command
-	stdin chan []byte
-	over  chan struct{} // closed when the command's handler is done
+	grace   time.Duration
+	kill    context.CancelFunc // kills the command
+	stdin   chan []byte        // to the command, from feed
+	over    chan struct{}      // closed when the command's handler is done
+	settled chan struct{}      // closed when outcome leaves open
 
-	killed    chan struct{} // closed by end: nobody will read the output
-	delivered chan struct{} // closed once the client has the exit code
-
-	mu        sync.Mutex
-	changed   sync.Cond // on mu: frames, ended, killed, or the connection changed
-	frames    [][]byte  // output frames from number base on
-	base      uint64
-	size      int  // bytes in frames
-	ended     bool // the command has exited with code
-	code      int
-	stdinSeen uint64   // stdin frames, the end included, taken from clients
-	p         *process // nil until the command has started
-	conn      *websocket.Conn
-	timer     *time.Timer // set while there is no connection
-	gone      bool        // killed is closed
-	got       bool        // delivered is closed
+	mu      sync.Mutex
+	changed sync.Cond // on mu: any of what follows changed, or a connection's context ended
+	outcome outcome
+	link    *link       // the connection the client is on; nil while it has none
+	timer   *time.Timer // runs while it has none and is awaited: abandons the session at the grace's end
+	frames  [][]byte    // output frames from number base on
+	base    uint64
+	size    int  // bytes in frames
+	ended   bool // the command has exited with code
+	code    int
+	in      [][]byte // stdin frames the command hasn't taken; a nil one is stdin's end
+	inGot   uint64   // stdin frames that came from clients, the end included: where the next connection goes on
+	inTaken uint64   // those the command has taken: what the client may forget
+	p       *process // nil until the command has started
 }
 
 func newSession(grace time.Duration, kill context.CancelFunc) *session {
 	s := &session{
 		grace: grace, kill: kill,
-		stdin: make(chan []byte, stdinQueue), over: make(chan struct{}),
-		killed: make(chan struct{}), delivered: make(chan struct{}),
+		stdin: make(chan []byte), over: make(chan struct{}), settled: make(chan struct{}),
 	}
 	s.changed.L = &s.mu
 	return s
+}
+
+// settle ends the session for its client as o, unless it has ended. The
+// caller holds mu.
+func (s *session) settle(o outcome) {
+	if s.outcome != open {
+		return
+	}
+	s.outcome = o
+	close(s.settled)
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+	s.changed.Broadcast()
 }
 
 // add keeps an output frame until it is acknowledged, waiting while too much
@@ -79,10 +115,10 @@ func newSession(grace time.Duration, kill context.CancelFunc) *session {
 func (s *session) add(frame []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for s.size >= sessionWindow && !s.gone {
+	for s.size >= sessionWindow && s.outcome == open {
 		s.changed.Wait()
 	}
-	if s.gone {
+	if s.outcome != open {
 		return errNoReader
 	}
 	s.frames = append(s.frames, bytes.Clone(frame))
@@ -96,14 +132,7 @@ func (s *session) abandon() {
 	s.kill()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.gone {
-		s.gone = true
-		close(s.killed)
-		s.changed.Broadcast()
-	}
-	if s.timer != nil {
-		s.timer.Stop()
-	}
+	s.settle(abandoned)
 }
 
 // end records the command's exit.
@@ -111,6 +140,7 @@ func (s *session) end(code int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ended, s.code = true, code
+	s.in = nil // nothing takes it any more
 	s.changed.Broadcast()
 }
 
@@ -127,23 +157,84 @@ func (s *session) ack(n uint64) {
 	s.changed.Broadcast()
 }
 
+// take keeps a stdin frame from a client, or stdin's end (nil), for the
+// command. It never waits: the connection's reader must go on reading, as
+// the client's acknowledgements of the output come on the same connection,
+// and a command that waits for those before it prints more is one that takes
+// no stdin meanwhile. What bounds the frames kept is the client, which sends
+// no more than sessionWindow bytes past the last frame it was told to forget.
+func (s *session) take(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inGot++
+	if s.ended {
+		return
+	}
+	s.in = append(s.in, data)
+	s.changed.Broadcast()
+}
+
+// feed gives the command its stdin, frame by frame, until the command has
+// ended. A frame counts as taken, and its client is told to forget it, once
+// the command's stdin has it.
+func (s *session) feed() {
+	for {
+		s.mu.Lock()
+		for len(s.in) == 0 && !s.ended {
+			s.changed.Wait()
+		}
+		if s.ended {
+			s.mu.Unlock()
+			return
+		}
+		frame := s.in[0]
+		tty := s.p != nil && s.p.tty != nil
+		s.mu.Unlock()
+		// A terminal has no EOF of its own: its end is dropped.
+		if frame != nil || !tty {
+			select {
+			case s.stdin <- frame:
+			case <-s.over:
+				return
+			}
+		}
+		s.mu.Lock()
+		if len(s.in) > 0 { // end has not cleared it
+			s.in[0] = nil
+			s.in = s.in[1:]
+		}
+		s.inTaken++
+		s.changed.Broadcast()
+		s.mu.Unlock()
+	}
+}
+
 // serve serves one connection until it ends. A later connection takes over
 // from this one.
 func (s *session) serve(ctx context.Context, conn *websocket.Conn, seen uint64) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	l := &link{conn: conn, cancel: cancel, done: make(chan struct{})}
+	defer close(l.done)
 	s.mu.Lock()
-	if s.conn != nil {
-		_ = s.conn.CloseNow()
-	}
-	s.conn = conn
+	old := s.link
+	s.link = l
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
 	}
-	stdinSeen := s.stdinSeen
 	s.mu.Unlock()
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	if old != nil {
+		// The connection before this one may have read a stdin frame it has
+		// yet to count. Were the client told where to go on before that, it
+		// would send the frame a second time.
+		old.cancel()
+		_ = old.conn.CloseNow()
+		<-old.done
+	}
+	s.mu.Lock()
+	got := s.inGot
+	s.mu.Unlock()
 	stop := context.AfterFunc(ctx, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -151,37 +242,35 @@ func (s *session) serve(ctx context.Context, conn *websocket.Conn, seen uint64) 
 	})
 	defer stop()
 	// The client resends stdin from here, and knows the session is there.
-	if conn.Write(ctx, websocket.MessageBinary, countFrame(frameAck, stdinSeen)) != nil {
-		s.dropped(conn, false)
+	if conn.Write(ctx, websocket.MessageBinary, countFrame(frameAck, got)) != nil {
+		s.dropped(l, false)
 		return
 	}
 	var sender sync.WaitGroup
-	sender.Go(func() { s.send(ctx, conn, seen) })
+	sender.Go(func() { s.send(ctx, conn, seen, got) })
 	err := s.read(ctx, conn)
 	cancel()
 	sender.Wait()
-	s.dropped(conn, websocket.CloseStatus(err) != -1)
+	s.dropped(l, websocket.CloseStatus(err) != -1)
 }
 
-// dropped handles the end of connection conn: closed says the client ended
+// dropped handles the end of l's connection: closed says the client ended
 // it with a close message, not by going away.
-func (s *session) dropped(conn *websocket.Conn, closed bool) {
+func (s *session) dropped(l *link, closed bool) {
 	s.mu.Lock()
-	if s.conn != conn {
+	if s.link != l {
 		s.mu.Unlock()
 		return // a later connection has taken over
 	}
-	s.conn = nil
+	s.link = nil
 	done := false
 	switch {
+	case s.outcome != open:
 	case closed && s.ended:
-		if !s.got {
-			s.got = true
-			close(s.delivered)
-		}
+		s.settle(delivered)
 	case closed:
 		done = true // the client has finished with the command
-	case !s.gone:
+	default:
 		s.timer = time.AfterFunc(s.grace, s.abandon)
 	}
 	s.mu.Unlock()
@@ -190,8 +279,10 @@ func (s *session) dropped(conn *websocket.Conn, closed bool) {
 	}
 }
 
-// send sends the frames from number next on, then the exit code.
-func (s *session) send(ctx context.Context, conn *websocket.Conn, next uint64) {
+// send sends the output frames from number next on, then the exit code, and
+// meanwhile tells the client of the stdin frames the command has taken past
+// number acked.
+func (s *session) send(ctx context.Context, conn *websocket.Conn, next, acked uint64) {
 	for {
 		s.mu.Lock()
 		if next < s.base {
@@ -204,12 +295,20 @@ func (s *session) send(ctx context.Context, conn *websocket.Conn, next uint64) {
 			}
 			continue
 		}
-		for next >= s.base+uint64(len(s.frames)) && !s.ended && ctx.Err() == nil {
+		for next >= s.base+uint64(len(s.frames)) && !s.ended && s.inTaken <= acked && ctx.Err() == nil {
 			s.changed.Wait()
 		}
 		if ctx.Err() != nil {
 			s.mu.Unlock()
 			return
+		}
+		if taken := s.inTaken; taken > acked {
+			s.mu.Unlock()
+			if conn.Write(ctx, websocket.MessageBinary, countFrame(frameAck, taken)) != nil {
+				return
+			}
+			acked = taken
+			continue
 		}
 		if next < s.base+uint64(len(s.frames)) {
 			frame := s.frames[next-s.base]
@@ -241,21 +340,10 @@ func (s *session) read(ctx context.Context, conn *websocket.Conn) error {
 			continue
 		}
 		switch data[0] {
-		case frameStdin, frameStdinEOF:
-			var chunk []byte
-			if data[0] == frameStdin {
-				chunk = bytes.Clone(data[1:])
-			}
-			if !s.queue(ctx, chunk) {
-				return ctx.Err()
-			}
-			s.mu.Lock()
-			s.stdinSeen++
-			n := s.stdinSeen
-			s.mu.Unlock()
-			if err := conn.Write(ctx, websocket.MessageBinary, countFrame(frameAck, n)); err != nil {
-				return err
-			}
+		case frameStdin:
+			s.take(bytes.Clone(data[1:]))
+		case frameStdinEOF:
+			s.take(nil)
 		case frameAck:
 			if len(data) == 9 {
 				s.ack(binary.BigEndian.Uint64(data[1:]))
@@ -268,25 +356,6 @@ func (s *session) read(ctx context.Context, conn *websocket.Conn) error {
 				p.control(data)
 			}
 		}
-	}
-}
-
-// queue puts data on stdin, unless ctx ends or the command has first. A
-// terminal has no EOF of its own: its end is dropped.
-func (s *session) queue(ctx context.Context, data []byte) bool {
-	s.mu.Lock()
-	tty := s.p != nil && s.p.tty != nil
-	s.mu.Unlock()
-	if data == nil && tty {
-		return true
-	}
-	select {
-	case s.stdin <- data:
-		return true
-	case <-s.over:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -353,6 +422,7 @@ func (s *Server) superviseSession(ctx, cmdCtx context.Context, conn *websocket.C
 		sess.p = p
 		sess.mu.Unlock()
 		streams.Go(func() { writeStdin(p, sess.stdin, sess.over) })
+		streams.Go(sess.feed)
 	}
 	streams.Go(func() { sess.serve(ctx, conn, req.Seen) })
 	if err == nil {
@@ -360,17 +430,16 @@ func (s *Server) superviseSession(ctx, cmdCtx context.Context, conn *websocket.C
 		close(sess.over)
 	}
 	sess.end(code)
-	return code, sess.waitDelivered()
+	return code, sess.waitSettled()
 }
 
-// waitDelivered waits until the client has the exit code, or never will.
-func (s *session) waitDelivered() bool {
-	select {
-	case <-s.delivered:
-		return true
-	case <-s.killed:
-		return false
-	}
+// waitSettled waits until the client has the exit code, or never will, and
+// says which.
+func (s *session) waitSettled() bool {
+	<-s.settled
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outcome == delivered
 }
 
 // serveSession serves a Request with a Session: it takes up the session, or

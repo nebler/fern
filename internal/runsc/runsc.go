@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -110,6 +111,69 @@ const (
 	exitedEvery   = time.Second // how often a box that isn't ready is looked for
 	readyInterval = 50 * time.Millisecond
 	readyWait     = 5 * time.Second
+	// A box found running is kept if it is ready within adoptWait, which is
+	// longer than fern-init's longest pause before it starts a service again
+	// (30 s), and given up on once its fern-init has not answered at all for
+	// adoptSilence: one that runs listens within a tenth of that.
+	adoptWait    = 45 * time.Second
+	adoptSilence = time.Second
+)
+
+// found is what there is on the node of a box that is to be woken.
+type found int
+
+const (
+	// foundNothing: no directory. Its last stop finished, or it never ran:
+	// the wake starts it.
+	foundNothing found = iota
+	// foundRunning: its container runs. It outlived a daemon, or a wake of it
+	// was cut short after its start: the wake keeps it if it gets ready.
+	foundRunning
+	// foundLeftover: a directory and no running container, what a wake or a
+	// stop that was cut short leaves: the wake clears it, then starts the box.
+	foundLeftover
+)
+
+// find says what there is of b's box, given whether its directory exists and
+// runsc's list.
+func find(dir bool, cs []container, b layout) found {
+	switch {
+	case !dir:
+		return foundNothing
+	case slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }):
+		return foundRunning
+	default:
+		return foundLeftover
+	}
+}
+
+// look says what there is of b's box on the node, and gives runsc's list if
+// it had to ask for it. A box that was stopped has no directory, as its stop
+// removes that last: there is none to find then, and runsc isn't asked, which
+// keeps its 16 ms out of an ordinary wake.
+func (d *Driver) look(ctx context.Context, b layout) (found, []container, error) {
+	_, err := os.Lstat(b.dir)
+	dir := !errors.Is(err, fs.ErrNotExist)
+	var cs []container
+	if dir {
+		if cs, err = d.list(ctx); err != nil {
+			return foundNothing, nil, err
+		}
+	}
+	return find(dir, cs, b), cs, nil
+}
+
+// readiness is what a box's fern-init says of its services.
+type readiness int
+
+const (
+	// noAnswer: nothing answers at its address. It hasn't started, hangs or
+	// is gone.
+	noAnswer readiness = iota
+	// notReady: fern-init answers, and a service's ready check fails.
+	notReady
+	// ready: every service is.
+	ready
 )
 
 // Driver runs boxes with runsc on the node.
@@ -272,32 +336,32 @@ func (d *Driver) States(ctx context.Context) (map[string]State, error) {
 }
 
 // Wake starts box, waits until its services are ready and returns the
-// address of its exec server. A box that runs and is ready, such as one
-// that outlived a daemon restart, is kept; any other left from before (a
-// crash, a stop that didn't finish) is stopped first, so a wake starts clean.
+// address of its exec server. A box that runs already, such as one that
+// outlived a daemon restart, is kept if it gets ready (adopt), and with it
+// the commands running in it; anything else left from before (a crash, a
+// stop that didn't finish) is stopped first, so a wake starts clean.
 func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
 	defer cancel()
 	b := d.layout(box.ID)
-	// A box that was stopped has no directory: its stop removes that last.
-	// So there is none to find, and nothing of one to clear.
-	_, err := os.Lstat(b.dir)
-	stopped := errors.Is(err, fs.ErrNotExist)
-	if !stopped {
-		cs, err := d.list(ctx)
-		if err != nil {
-			return "", fmt.Errorf("wake %s: %w", box.ID, err)
+	what, cs, err := d.look(ctx, b)
+	if err != nil {
+		return "", fmt.Errorf("wake %s: %w", box.ID, err)
+	}
+	if what == foundRunning {
+		if _, guest, err := linkAddrs(b); err == nil && d.adopt(ctx, execAddr(guest)) {
+			return execAddr(guest), nil
 		}
-		if addr, ok := d.running(ctx, b, cs); ok {
-			return addr, nil
-		}
+		what = foundLeftover // it didn't get ready: it is started anew
+	}
+	if what == foundLeftover {
 		if err := d.stopListed(ctx, box.ID, cs); err != nil {
 			return "", fmt.Errorf("wake %s: %w", box.ID, err)
 		}
 	}
 	start := time.Now()
 	addr, err := d.netUp(ctx, b, box.Kind)
-	if err != nil && stopped {
+	if err != nil && what == foundNothing {
 		// Its last stop left some of its network, which it can't say: a stop
 		// now clears it.
 		if err := d.stop(ctx, box.ID); err != nil {
@@ -325,20 +389,32 @@ func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	return addr, nil
 }
 
-// running returns the exec address of b's box if it is among cs, runs, and
-// fern-init says it is ready.
-func (d *Driver) running(ctx context.Context, b layout, cs []container) (string, bool) {
-	if !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }) {
-		return "", false
-	}
-	_, guest, err := linkAddrs(b)
-	if err != nil {
-		return "", false
-	}
-	addr := execAddr(guest)
-	ctx, cancel := context.WithTimeout(ctx, readyWait)
+// adopt waits for the box that runs at addr to be ready, and says whether
+// it is. A box whose services aren't ready yet is waited for, as a new one
+// would be: stopping it would end the commands that outlived the daemon in
+// it, for a service that is only starting again. It gives up after
+// adoptWait, and on a fern-init that has not answered for adoptSilence.
+func (d *Driver) adopt(ctx context.Context, addr string) bool {
+	ctx, cancel := context.WithTimeout(ctx, adoptWait)
 	defer cancel()
-	return addr, d.isReady(ctx, addr)
+	silent := time.Now() // since when fern-init has not answered
+	for {
+		switch answer, _ := d.ask(ctx, addr); answer {
+		case ready:
+			return true
+		case notReady:
+			silent = time.Now()
+		case noAnswer:
+			if time.Since(silent) >= adoptSilence {
+				return false
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(readyInterval):
+		}
+	}
 }
 
 // execAddr is the address of fern-init's exec server in the box at guest.
@@ -523,9 +599,14 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 // wakeTimeout two minutes later.
 func (d *Driver) waitReady(ctx context.Context, b layout, addr string) error {
 	looked := time.Now()
+	said := "its fern-init didn't answer"
 	for wait := readyFirst; ; wait = min(2*wait, readyInterval) {
-		if d.isReady(ctx, addr) {
+		answer, why := d.ask(ctx, addr)
+		if answer == ready {
 			return nil
+		}
+		if answer == notReady {
+			said = why
 		}
 		if time.Since(looked) >= exitedEvery {
 			looked = time.Now()
@@ -536,7 +617,7 @@ func (d *Driver) waitReady(ctx context.Context, b layout, addr string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("not ready: %w", ctx.Err())
+			return fmt.Errorf("not ready: %s: %w", said, ctx.Err())
 		case <-time.After(wait):
 		}
 	}
@@ -558,18 +639,29 @@ func logEnd(path string) string {
 	return string(data)
 }
 
-func (d *Driver) isReady(ctx context.Context, addr string) bool {
+// ask asks the fern-init at addr whether its services are ready, and waits
+// up to readyWait for them to be. With notReady it returns what fern-init
+// said of them: which service, its check's output, and whether it keeps
+// exiting.
+func (d *Driver) ask(ctx context.Context, addr string) (readiness, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+boxexec.ReadyPath+"?wait="+readyWait.String(), nil)
 	if err != nil {
-		return false
+		return noAnswer, ""
 	}
 	resp, err := d.ready.Do(req)
 	if err != nil {
-		return false // not listening yet
+		return noAnswer, "" // not listening yet
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusOK {
+		return ready, ""
+	}
+	why, _ := io.ReadAll(io.LimitReader(resp.Body, maxSaid))
+	return notReady, string(bytes.TrimSpace(why))
 }
+
+// maxSaid is how much of fern-init's answer a failed wake's error quotes.
+const maxSaid = 600
 
 // Sleep stops box id and waits until it is gone, with its network and
 // cgroup. A box that isn't there is asleep already. A box has nothing that

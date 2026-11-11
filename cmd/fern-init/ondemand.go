@@ -31,6 +31,33 @@ func listenAddr(listen string) (network, addr string, err error) {
 	return "", "", fmt.Errorf("listen %q: want unix:PATH or tcp:PORT", listen)
 }
 
+// demandPhase is where a service started on demand is.
+type demandPhase int
+
+const (
+	// demandListening: fern-init holds its socket, and nothing has connected.
+	// The service doesn't run, and counts as ready: its socket is.
+	demandListening demandPhase = iota
+	// demandStarting: a connection started it, or asked for it again after
+	// demandFailed. Connections wait until it is ready.
+	demandStarting
+	// demandReady: it has its socket. The connections that waited are relayed
+	// to it, and later ones reach it without fern-init.
+	demandReady
+	// demandFailed: it wasn't ready within the time allowed, and those waiting
+	// were dropped. Its supervisor goes on starting it. On a unix socket that
+	// is still fern-init's, the next connection waits for it again; a TCP
+	// port was let go, so later connections are the service's or refused.
+	demandFailed
+)
+
+// attempt is one wait for the service to be ready, shared by every
+// connection that came meanwhile.
+type attempt struct {
+	done chan struct{} // closed once err is set
+	err  error
+}
+
 // onDemand holds a service's socket and starts the service at the socket's
 // first connection: a box whose turn never uses its database doesn't wait
 // for it to start, nor keep its memory. The connections that come before
@@ -50,18 +77,22 @@ type onDemand struct {
 	network string
 	addr    string
 	ln      net.Listener
-	own     os.FileInfo // a unix socket's file while it is fern-init's
+	own     os.FileInfo   // a unix socket's file while it is fern-init's
+	timeout time.Duration // how long connections wait for the service to be ready
 	start   func() *supervisor
-
-	mu      sync.Mutex
-	started *supervisor // nil until the first connection
-	conns   map[net.Conn]struct{}
 	relays  sync.WaitGroup
 	done    chan struct{} // closed when serve returns
+
+	mu    sync.Mutex
+	phase demandPhase
+	sup   *supervisor // nil while demandListening
+	wait  *attempt    // the last wait for it; nil while demandListening
+	conns map[net.Conn]struct{}
 }
 
-// listenOnDemand takes svc's socket and serves it until stop.
-func listenOnDemand(ctx context.Context, name string, svc service, dir string, env []string, log *slog.Logger) (*onDemand, error) {
+// listenOnDemand takes svc's socket and serves it until stop. Connections
+// wait at most timeout for the service to be ready.
+func listenOnDemand(ctx context.Context, name string, svc service, dir string, env []string, timeout time.Duration, log *slog.Logger) (*onDemand, error) {
 	network, addr, err := listenAddr(svc.Listen)
 	if err != nil {
 		return nil, err
@@ -80,7 +111,7 @@ func listenOnDemand(ctx context.Context, name string, svc service, dir string, e
 		}
 	}
 	o := &onDemand{
-		name: name, svc: svc, dir: dir, env: env, log: log, network: network, addr: addr, ln: ln, own: own,
+		name: name, svc: svc, dir: dir, env: env, log: log, network: network, addr: addr, ln: ln, own: own, timeout: timeout,
 		start: func() *supervisor { return startService(ctx, name, svc, dir, env, log) },
 		conns: make(map[net.Conn]struct{}), done: make(chan struct{}),
 	}
@@ -92,44 +123,65 @@ func listenOnDemand(ctx context.Context, name string, svc service, dir string, e
 // the service, and every one waits for it to be ready.
 func (o *onDemand) serve(ctx context.Context) {
 	defer close(o.done)
-	var ready chan error
 	for {
 		conn, err := o.ln.Accept()
 		if err != nil {
 			return
 		}
 		o.mu.Lock()
-		if o.started != nil && o.fromService(conn) {
+		if o.phase != demandListening && o.fromService(conn) {
 			// The service checking whether it is up yet, as Postgres's start
 			// script does: held, it would wait for itself.
 			o.mu.Unlock()
 			_ = conn.Close()
 			continue
 		}
-		if o.started == nil {
+		switch o.phase {
+		case demandListening:
 			o.log.InfoContext(ctx, "starting service on demand", slog.String("service", o.name))
 			if o.network == "tcp" {
 				_ = o.ln.Close() // the service needs the port; serve ends after this connection
 			}
-			o.started = o.start()
-			ready = make(chan error, 1)
-			o.relays.Go(func() { ready <- o.waitReady(ctx) })
+			o.sup = o.start()
+			o.await(ctx)
+		case demandFailed:
+			// Its supervisor has gone on starting it: it gets as long again.
+			o.await(ctx)
+		case demandStarting, demandReady:
 		}
+		wait := o.wait
 		o.conns[conn] = struct{}{}
 		o.mu.Unlock()
-		o.relays.Go(func() { o.relay(ctx, conn, ready) })
+		o.relays.Go(func() { o.relay(ctx, conn, wait) })
 	}
 }
 
-// waitReady waits until the service's ready check passes, then lets go of a
-// unix socket, which the service has taken over.
-func (o *onDemand) waitReady(ctx context.Context) error {
-	defer func() {
-		if o.network == "unix" {
+// await begins a wait for the service to be ready, which ends in
+// demandReady or demandFailed. The caller holds mu.
+func (o *onDemand) await(ctx context.Context) {
+	a := &attempt{done: make(chan struct{})}
+	o.phase, o.wait = demandStarting, a
+	o.relays.Go(func() {
+		err := o.waitReady(ctx)
+		o.mu.Lock()
+		a.err, o.phase = err, demandReady
+		if err != nil {
+			o.phase = demandFailed
+		}
+		o.mu.Unlock()
+		close(a.done)
+		// A unix socket the service has taken over reaches fern-init no more.
+		// One it hasn't stays, for the next connection to wait again.
+		if o.network == "unix" && (err == nil || o.replaced()) {
 			_ = o.ln.Close()
 		}
-	}()
-	deadline := time.Now().Add(startTimeout)
+	})
+}
+
+// waitReady waits until the service has its socket and its ready check
+// passes, for at most o.timeout.
+func (o *onDemand) waitReady(ctx context.Context) error {
+	deadline := time.Now().Add(o.timeout)
 	for {
 		err := error(nil)
 		switch {
@@ -144,7 +196,7 @@ func (o *onDemand) waitReady(ctx context.Context) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("service %s not ready after %s: %w", o.name, startTimeout, err)
+			return fmt.Errorf("service %s not ready after %s%s: %w", o.name, o.timeout, o.supervisor().status().why(), err)
 		}
 		select {
 		case <-ctx.Done():
@@ -154,11 +206,19 @@ func (o *onDemand) waitReady(ctx context.Context) error {
 	}
 }
 
+// supervisor returns the service's supervisor, or nil while nothing has
+// connected.
+func (o *onDemand) supervisor() *supervisor {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.sup
+}
+
 // fromService says whether conn comes from a process of the started
 // service: one in its process group, on a unix socket, which tells who is
 // at the other end.
 func (o *onDemand) fromService(conn net.Conn) bool {
-	group := o.started.group.Load()
+	group := o.sup.group.Load()
 	pgid := peerGroup(conn)
 	return group != 0 && int64(pgid) == group
 }
@@ -171,9 +231,9 @@ func (o *onDemand) replaced() bool {
 }
 
 // relay waits for the service, then copies conn to and from it.
-func (o *onDemand) relay(ctx context.Context, conn net.Conn, ready chan error) {
+func (o *onDemand) relay(ctx context.Context, conn net.Conn, wait *attempt) {
 	defer o.forget(conn)
-	if err := o.wait(ctx, ready); err != nil {
+	if err := wait.result(ctx); err != nil {
 		o.log.WarnContext(ctx, "dropping a connection", slog.String("service", o.name), slog.Any("error", err))
 		return
 	}
@@ -198,13 +258,11 @@ func (o *onDemand) relay(ctx context.Context, conn net.Conn, ready chan error) {
 	<-done
 }
 
-// wait returns the service's readiness, which every waiting connection
-// reads: the first to come takes it and passes it on.
-func (o *onDemand) wait(ctx context.Context, ready chan error) error {
+// result waits for the attempt's end and returns how it went.
+func (a *attempt) result(ctx context.Context) error {
 	select {
-	case err := <-ready:
-		ready <- err
-		return err
+	case <-a.done:
+		return a.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -237,20 +295,23 @@ func (o *onDemand) stop(ctx context.Context) {
 	for c := range o.conns {
 		_ = c.Close()
 	}
-	started := o.started
+	sup := o.sup
 	o.mu.Unlock()
 	o.relays.Wait()
-	if started != nil {
-		started.stop(ctx)
-	} else if o.network == "unix" {
-		_ = os.Remove(o.addr) // still fern-init's own socket
+	if sup != nil {
+		sup.stop(ctx)
+	}
+	// A socket file that is still fern-init's own: nothing connected, or the
+	// service never took it over. One the service made is its to remove.
+	if o.network == "unix" && !o.replaced() {
+		_ = os.Remove(o.addr)
 	}
 }
 
-// isStarted says whether the service has started: until then it is ready,
-// as its socket is.
+// isStarted says whether the service has been started: until then it is
+// ready, as its socket is.
 func (o *onDemand) isStarted() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.started != nil
+	return o.phase != demandListening
 }

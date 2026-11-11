@@ -50,8 +50,10 @@ func readiness(check func(context.Context) error) http.HandlerFunc {
 }
 
 // checkServices runs every service's ready check at once and returns the
-// failures.
-func checkServices(ctx context.Context, services map[string]service, dir string, env []string) error {
+// failures. why, if not nil, adds what a service that isn't ready is doing
+// instead, such as starting again after it exited: the check alone says only
+// that nothing answers.
+func checkServices(ctx context.Context, services map[string]service, dir string, env []string, why func(name string) string) error {
 	names := slices.Sorted(maps.Keys(services)) // a stable order for the errors
 	errs := make([]error, len(names))
 	var wg sync.WaitGroup
@@ -61,7 +63,11 @@ func checkServices(ctx context.Context, services map[string]service, dir string,
 		}
 		wg.Go(func() {
 			if err := shell(ctx, readyTimeout, services[name].Ready, dir, services[name].environ(env)); err != nil {
-				errs[i] = fmt.Errorf("%s not ready: %w", name, err)
+				doing := ""
+				if why != nil {
+					doing = why(name)
+				}
+				errs[i] = fmt.Errorf("%s not ready%s: %w", name, doing, err)
 			}
 		})
 	}

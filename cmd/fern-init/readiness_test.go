@@ -38,7 +38,7 @@ func TestCheckServices(t *testing.T) {
 				services["svc"+strconv.Itoa(i)] = service{Run: "x", Ready: script}
 			}
 			start := time.Now()
-			err := checkServices(t.Context(), services, t.TempDir(), []string{pathEnv})
+			err := checkServices(t.Context(), services, t.TempDir(), []string{pathEnv}, nil)
 			if took := time.Since(start); took > budget {
 				t.Errorf("checkServices() took %v, want at most %v", took, budget)
 			}
@@ -54,7 +54,7 @@ func TestCheckServices(t *testing.T) {
 func TestCheckKillsGroup(t *testing.T) {
 	dir := t.TempDir()
 	services := map[string]service{"db": {Run: "x", Ready: `sleep 600 & echo $! > child; wait`}}
-	if err := checkServices(t.Context(), services, dir, []string{pathEnv}); err == nil {
+	if err := checkServices(t.Context(), services, dir, []string{pathEnv}, nil); err == nil {
 		t.Fatal("checkServices() with a hanging check succeeded, want an error")
 	}
 	checkGone(t, filepath.Join(dir, "child"))

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -103,6 +104,59 @@ const (
 	stableRun  = time.Minute
 )
 
+// backoffAfter is the pause before a service that has exited `exits` times
+// in a row, with no run of stableRun between, is started again.
+func backoffAfter(exits int) time.Duration {
+	if exits > 6 {
+		return maxBackoff
+	}
+	return min(minBackoff<<max(exits-1, 0), maxBackoff)
+}
+
+// servicePhase is what a supervised service is doing.
+type servicePhase int
+
+const (
+	// serviceRunning: its command runs. Whether it is ready is for its ready
+	// check to say.
+	serviceRunning servicePhase = iota
+	// serviceWaiting: its command exited, and is started again after a pause.
+	serviceWaiting
+	// serviceStopped: stop was called. It isn't started again.
+	serviceStopped
+)
+
+// serviceStatus is a service's phase and how it got there.
+type serviceStatus struct {
+	phase servicePhase
+	exits int       // how often it has exited with no run of stableRun between
+	last  error     // how its last run ended
+	next  time.Time // serviceWaiting: when it is started again
+	since time.Time // serviceRunning, after an exit: when it was started again
+}
+
+// why says, for a service that isn't ready, what it is doing instead: the
+// start of a clause, or nothing if it has never exited, or has run for
+// stableRun since it last did.
+func (st serviceStatus) why() string {
+	if st.exits == 0 || (st.phase == serviceRunning && time.Since(st.since) > stableRun) {
+		return ""
+	}
+	how := "exit status 0"
+	if st.last != nil {
+		how = st.last.Error()
+	}
+	switch st.phase {
+	case serviceWaiting:
+		return fmt.Sprintf(" (it has exited %d times in a row, last with %s, and starts again in %s)",
+			st.exits, how, time.Until(st.next).Round(time.Second))
+	case serviceRunning:
+		return fmt.Sprintf(" (it was started again after exiting %d times in a row, last with %s)", st.exits, how)
+	case serviceStopped:
+	}
+	return ""
+}
+
 // supervisor keeps one service running until it is stopped.
 type supervisor struct {
 	name string
@@ -115,6 +169,9 @@ type supervisor struct {
 	terminate context.CancelFunc // sends SIGTERM to the running service
 	done      chan struct{}      // closed when run has returned
 	group     atomic.Int64       // the running service's process group; 0 while none runs
+
+	mu sync.Mutex
+	st serviceStatus // written by run and stop
 }
 
 // startService starts and supervises svc. It keeps running after ctx is
@@ -129,10 +186,39 @@ func startService(ctx context.Context, name string, svc service, dir string, env
 	return s
 }
 
+// status returns what the service is doing.
+func (s *supervisor) status() serviceStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st
+}
+
+// exited records the end, with err, of a run that lasted ran, and returns
+// the pause before the next.
+func (s *supervisor) exited(err error, ran time.Duration) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ran > stableRun {
+		s.st.exits = 0
+	}
+	s.st.exits++
+	pause := backoffAfter(s.st.exits)
+	s.st.phase, s.st.last, s.st.next = serviceWaiting, err, time.Now().Add(pause)
+	return pause
+}
+
+// setPhase moves the service to phase, unless it was stopped.
+func (s *supervisor) setPhase(phase servicePhase) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.phase != serviceStopped {
+		s.st.phase, s.st.since = phase, time.Now()
+	}
+}
+
 // run runs the service and restarts it with backoff whenever it exits.
 func (s *supervisor) run(ctx context.Context) {
 	defer close(s.done)
-	backoff := minBackoff
 	for {
 		started := time.Now()
 		err := runService(ctx, s.svc, s.dir, s.env, func(pgid int) { s.group.Store(int64(pgid)) })
@@ -143,21 +229,19 @@ func (s *supervisor) run(ctx context.Context) {
 		default:
 		}
 		s.log.WarnContext(ctx, "service exited", slog.String("service", s.name), slog.Any("error", err))
-		if time.Since(started) > stableRun {
-			backoff = minBackoff
-		}
 		select {
 		case <-s.quit:
 			return
-		case <-time.After(backoff):
+		case <-time.After(s.exited(err, time.Since(started))):
 		}
-		backoff = min(2*backoff, maxBackoff)
+		s.setPhase(serviceRunning)
 	}
 }
 
 // stop stops the service for good: its stop command, if it has one, then
 // SIGTERM, then SIGKILL. It returns once the service has exited.
 func (s *supervisor) stop(ctx context.Context) {
+	s.setPhase(serviceStopped)
 	close(s.quit)
 	if s.svc.Stop != "" {
 		if err := shell(ctx, stopTimeout, s.svc.Stop, s.dir, s.env); err != nil {

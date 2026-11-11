@@ -345,7 +345,16 @@ type message struct {
 	reply chan error // buffered, so the actor never waits for the caller
 }
 
-// boxPhase is what an actor knows of its box.
+// boxPhase is what an actor knows of its box. It moves in four ways:
+//
+//	asleep   → maybe up   a wake starts (wake), or the box was found running at the daemon's start (run)
+//	maybe up → up         the wake succeeded (wake)
+//	up       → maybe up   a stop starts (stopBox), or a command found the box dead (endExec)
+//	maybe up → asleep     the stop succeeded (stopBox)
+//
+// A wake or a stop that fails leaves it maybe up, from where either can be
+// tried again. When it sleeps is not a state of its own: sleepAt works it
+// out from the phase, the commands counted, the lease and the two clocks.
 type boxPhase int
 
 const (

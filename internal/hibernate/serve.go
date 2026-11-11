@@ -54,7 +54,17 @@ const (
 // does.
 var listeningRE = regexp.MustCompile(`server listening on\s+(https?://\S+)`)
 
-// serverPhase is what a proxy's server is doing.
+// serverPhase is what a proxy's server is doing. It moves in six ways:
+//
+//	stopped  → starting   a request needs a server (acquire), or one waited as the last exited (exited)
+//	starting → up         it listens and has sent its first event (launched)
+//	starting → stopped    it didn't start, and those waiting hear why (launched)
+//	up       → stopping   it was idle long enough (timeUp), or T3 ends it (end)
+//	up       → stopped    it ended by itself, and takes T3's event streams along (exited)
+//	stopping → stopped    it exited (exited)
+//
+// The first server is started before T3 is told where to call, and goes
+// from stopped to up without a request waiting.
 type serverPhase int
 
 const (
@@ -170,7 +180,8 @@ type proxy struct {
 	// The actor's own: only run's goroutine touches what follows.
 	phase   serverPhase
 	server  *upstream                // the one up or stopping; nil otherwise
-	since   time.Time                // up: since when nothing has been under way; stopping: when it was told to stop
+	quiet   time.Time                // up: since when nothing has been under way
+	stopAt  time.Time                // stopping: when it was told to stop, or last cut off
 	ending  bool                     // T3 is ending the server: its exit is Serve's
 	code    int                      // the code of the server's last exit
 	waiting []chan grant             // requests waiting for a server
@@ -271,9 +282,9 @@ func (p *proxy) idling() bool {
 func (p *proxy) arm() {
 	switch {
 	case p.idling():
-		p.timer.Reset(time.Until(p.since.Add(p.idle)))
+		p.timer.Reset(time.Until(p.quiet.Add(p.idle)))
 	case p.phase == serverStopping:
-		p.timer.Reset(time.Until(p.since.Add(stopTimeout)))
+		p.timer.Reset(time.Until(p.stopAt.Add(stopTimeout)))
 	default:
 		p.timer.Stop()
 	}
@@ -283,18 +294,18 @@ func (p *proxy) arm() {
 // that takes too long to stop.
 func (p *proxy) timeUp() {
 	switch {
-	case p.idling() && time.Since(p.since) >= p.idle:
+	case p.idling() && time.Since(p.quiet) >= p.idle:
 		p.stop(syscall.SIGTERM)
-	case p.phase == serverStopping && time.Since(p.since) >= stopTimeout:
+	case p.phase == serverStopping && time.Since(p.stopAt) >= stopTimeout:
 		p.server.cancel()
-		p.since = time.Now() // and again, should even that not end it
+		p.stopAt = time.Now() // and again, should even that not end it
 	}
 }
 
 // stop tells the server that is up to stop.
 func (p *proxy) stop(sig os.Signal) {
 	p.signal(sig)
-	p.phase, p.since = serverStopping, time.Now()
+	p.phase, p.stopAt = serverStopping, time.Now()
 }
 
 // signal passes sig on to the server. Its exec reads them; one that has
@@ -353,7 +364,7 @@ func (p *proxy) launched(up *upstream, err error) {
 		}
 		return
 	}
-	p.phase, p.server, p.since = serverUp, up, time.Now()
+	p.phase, p.server, p.quiet = serverUp, up, time.Now()
 	p.event(up, up.first)
 	// Followed from here on, so that none of its events comes before it is
 	// p.server.
@@ -418,7 +429,7 @@ func (p *proxy) abandon(reply chan grant, err error) {
 func (p *proxy) release() {
 	p.busy--
 	if p.busy == 0 && len(p.running) == 0 {
-		p.since = time.Now()
+		p.quiet = time.Now()
 	}
 }
 
@@ -441,7 +452,7 @@ func (p *proxy) event(up *upstream, ev sse) {
 	case "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
 		delete(p.running, ev.session)
 		if len(p.running) == 0 && p.busy == 0 {
-			p.since = time.Now()
+			p.quiet = time.Now()
 		}
 	}
 	for ch := range p.subs {

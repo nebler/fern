@@ -117,6 +117,46 @@ func TestSupervisorBackoff(t *testing.T) {
 	})
 }
 
+func TestBackoffAfter(t *testing.T) {
+	want := []time.Duration{time.Second, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+	for exits, w := range want {
+		if got := backoffAfter(exits); got != w {
+			t.Errorf("backoffAfter(%d) = %s, want %s", exits, got, w)
+		}
+	}
+	if got := backoffAfter(1 << 40); got != maxBackoff {
+		t.Errorf("backoffAfter(a huge count) = %s, want %s", got, maxBackoff)
+	}
+}
+
+// A service that keeps exiting says so when it isn't ready: its ready check
+// alone says only that nothing answers.
+func TestSupervisorStatus(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, dir := newService(t, service{Run: "exit 3", Ready: "false"})
+		if got := s.status(); got.phase != serviceRunning || got.why() != "" {
+			t.Errorf("status at the start = %+v, %q; want running and nothing to say", got, got.why())
+		}
+		// Runs at 0s, 1s and 3s: three exits, and the next start at 7s.
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+		got := s.status()
+		if got.phase != serviceWaiting || got.exits != 3 {
+			t.Errorf("status after 5s = %+v, want waiting after 3 exits", got)
+		}
+		err := checkServices(t.Context(), map[string]service{"svc": s.svc}, dir, []string{pathEnv}, func(string) string { return s.status().why() })
+		for _, want := range []string{"svc not ready", "exited 3 times in a row", "exit status 3", "starts again in 2s"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("checkServices() = %v, want it to say %q", err, want)
+			}
+		}
+		s.stop(t.Context())
+		if got := s.status(); got.phase != serviceStopped {
+			t.Errorf("status after stop = %+v, want stopped", got)
+		}
+	})
+}
+
 // A stop command that ends the service must not get it restarted. It goes on
 // past the shortest backoff, so a restart would have happened by then.
 func TestSupervisorStopDoesNotRestart(t *testing.T) {

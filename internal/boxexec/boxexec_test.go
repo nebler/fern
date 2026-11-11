@@ -657,6 +657,92 @@ func TestSessionOutputPastWindow(t *testing.T) {
 	}
 }
 
+// A command that prints what it reads, given more stdin at once than both
+// windows hold: the client's word that it has the output comes on the same
+// connection as its stdin, and must be read however much stdin waits.
+func TestSessionLargeStdinEchoed(t *testing.T) {
+	dial := sessionServer(t, time.Minute)
+	conn, err := dial(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := bytes.Repeat([]byte("0123456789abcde\n"), 8<<20/16)
+	got := sha256.New()
+	var stderr lockedBuffer
+	code, err := boxexec.RunSession(t.Context(), conn, boxexec.Request{Argv: []string{"cat"}, Session: "echo"},
+		boxexec.Streams{Stdin: bytes.NewReader(in), Stdout: got, Stderr: &stderr}, boxexec.Resume{})
+	if err != nil || code != 0 {
+		t.Fatalf("RunSession = %d, %v; stderr %q", code, err, stderr.String())
+	}
+	if want := sha256.Sum256(in); !bytes.Equal(got.Sum(nil), want[:]) {
+		t.Error("the command's output differs from its stdin")
+	}
+}
+
+// A connection that breaks while the command isn't reading leaves its reader
+// holding a stdin frame it has not counted yet. The connection after it must
+// not be told to send that frame again while the first can still deliver it.
+func TestSessionTakeoverWithStdinBackedUp(t *testing.T) {
+	b := &breaker{dial: sessionServer(t, time.Minute)}
+	ctx := t.Context()
+	conn, err := b.Dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reads nothing until the file is there.
+	gate := filepath.Join(t.TempDir(), "go")
+	script := fmt.Sprintf(`while [ ! -e %q ]; do sleep 0.05; done; exec cat`, gate)
+	inR, inW := io.Pipe()
+	defer func() { _ = inW.Close() }()
+	const lines = 400
+	line := func(i int) string { return fmt.Sprintf("%06d %s\n", i, strings.Repeat("x", 4000)) }
+	var sent atomic.Int64
+	go func() {
+		for i := range lines {
+			if _, err := io.WriteString(inW, line(i)); err != nil {
+				return
+			}
+			sent.Add(1)
+		}
+		_ = inW.Close()
+	}()
+	var out lockedBuffer
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, err := boxexec.RunSession(ctx, conn, boxexec.Request{Argv: []string{"/bin/sh", "-c", script}, Session: "backed-up"},
+			boxexec.Streams{Stdin: inR, Stdout: &out, Stderr: &out}, boxexec.Resume{Dial: b.Dial, For: 10 * time.Second})
+		done <- result{code, err}
+	}()
+	// The client holds a window of stdin by now, far more than the server
+	// takes in for a command that reads none: its reader waits with a frame.
+	waitFor(t, "stdin to back up", func() bool { return sent.Load() >= 256 })
+	b.Break()
+	waitFor(t, "a second connection", func() bool { return b.dials() >= 2 })
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.err != nil || r.code != 0 {
+		t.Fatalf("RunSession = %d, %v", r.code, r.err)
+	}
+	got := strings.SplitAfter(out.String(), "\n")
+	if got[len(got)-1] == "" {
+		got = got[:len(got)-1]
+	}
+	if len(got) != lines {
+		t.Errorf("the command read %d lines, want %d", len(got), lines)
+	}
+	for i, l := range got {
+		if i >= lines || l != line(i) {
+			t.Fatalf("line %d is %.20q…: stdin was repeated or lost", i, l)
+		}
+	}
+}
+
 // During an upgrade a new client meets a box still running an older
 // fern-init, which ignores the session: the command just runs, as an exec.
 func TestSessionOnOlderServer(t *testing.T) {
