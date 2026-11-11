@@ -45,6 +45,9 @@ const (
 	// heartbeat is how often T3's event stream gets a comment. T3 gives up on
 	// a stream after 45 s of silence; OpenCode sends one every 15 s.
 	heartbeat = 15 * time.Second
+	// replayTimeout is how long adding one MCP server again may take: OpenCode
+	// connects to it at once, and T3 allows as long for adding it.
+	replayTimeout = 5 * time.Second
 	// maxReplayed is the largest request body Serve keeps to send again.
 	maxReplayed = 1 << 20
 	// mcpPath is where T3 adds and removes its MCP servers.
@@ -168,8 +171,9 @@ type upstream struct {
 	base     *url.URL
 	sigs     chan os.Signal
 	cancel   context.CancelFunc // cuts its exec off
-	exited   chan struct{}      // closed once code is set
+	exited   chan struct{}      // closed once code and err are set
 	code     int
+	err      error     // why its exec failed, if it did: no box, no daemon
 	stopping time.Time // when it was sent SIGTERM for being idle, or T3's signal; zero before
 }
 
@@ -227,10 +231,17 @@ func (p *proxy) starting() bool {
 func (p *proxy) started(up *upstream, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.launches, p.err = false, err
 	if err == nil {
-		p.up, p.quiet = up, time.Now()
+		// Its exit, if it came already, found another server in p.up, or
+		// none, and left it: so it is no server now.
+		select {
+		case <-up.exited:
+			err = up.early()
+		default:
+			p.up, p.quiet = up, time.Now()
+		}
 	}
+	p.launches, p.err = false, err
 	p.notify()
 }
 
@@ -291,7 +302,7 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		if err != nil && code == 0 {
 			code = 128 + int(syscall.SIGTERM)
 		}
-		up.code = code
+		up.code, up.err = code, err
 		close(up.exited)
 		p.gone(up)
 	})
@@ -310,15 +321,13 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		}
 		up.base = base
 	case <-up.exited:
-		return nil, fmt.Errorf("opencode exited with %d before it listened", up.code)
+		return nil, up.early()
 	case <-timer.C:
 		return fail(errors.New("opencode did not listen within a minute"))
 	case <-ctx.Done():
 		return fail(ctx.Err())
 	}
-	if err := p.replay(ctx, up); err != nil {
-		return fail(err)
-	}
+	p.replay(ctx, up)
 	events, err := p.subscribe(ctx, up)
 	if err != nil {
 		return fail(err)
@@ -326,7 +335,9 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 	// Its first event, server.connected, before T3 hears of it: each of T3's
 	// streams begins with the first server's.
 	br := bufio.NewReaderSize(events, 64<<10)
+	late := time.AfterFunc(serverStartTimeout, cancel)
 	frame, data, err := readEvent(br)
+	late.Stop()
 	if err != nil {
 		_ = events.Close()
 		return fail(fmt.Errorf("opencode's events: %w", err))
@@ -342,6 +353,14 @@ func (p *proxy) launch(ctx context.Context, wg *sync.WaitGroup) (*upstream, erro
 		}
 	})
 	return up, nil
+}
+
+// early says why a server that ended before it was in use did.
+func (up *upstream) early() error {
+	if up.err != nil {
+		return fmt.Errorf("opencode: %w", up.err)
+	}
+	return fmt.Errorf("opencode exited with %d as it started", up.code)
 }
 
 // stopped says whether up was stopped on purpose.
@@ -374,7 +393,7 @@ func (p *proxy) gone(up *upstream) {
 }
 
 // replay adds T3's MCP servers to a new server.
-func (p *proxy) replay(ctx context.Context, up *upstream) error {
+func (p *proxy) replay(ctx context.Context, up *upstream) {
 	p.mu.Lock()
 	calls := make(map[string]resent, len(p.mcp))
 	for k, v := range p.mcp {
@@ -382,21 +401,31 @@ func (p *proxy) replay(ctx context.Context, up *upstream) error {
 	}
 	p.mu.Unlock()
 	for path, call := range calls {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, up.base.String()+path, bytes.NewReader(call.body))
-		if err != nil {
-			return err
+		// One that fails or is refused stays out; T3's next turn finds it
+		// missing. The server it is added to is still good.
+		if err := p.add(ctx, up, path, call); err != nil {
+			_, _ = fmt.Fprintf(p.stderr, "fern: MCP server %s was not added to opencode again: %v\n", path, err)
 		}
-		req.Header = call.header.Clone()
-		resp, err := p.transport.RoundTrip(req)
-		if err != nil {
-			return fmt.Errorf("add MCP server %s again: %w", path, err)
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		// A refused one stays refused; T3's next turn finds it missing.
-		if resp.StatusCode/100 != 2 {
-			_, _ = fmt.Fprintf(p.stderr, "fern: opencode refused MCP server %s again: %s\n", path, resp.Status)
-		}
+	}
+}
+
+// add sends one of T3's MCP servers to up.
+func (p *proxy) add(ctx context.Context, up *upstream, path string, call resent) error {
+	ctx, cancel := context.WithTimeout(ctx, replayTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, up.base.String()+path, bytes.NewReader(call.body))
+	if err != nil {
+		return err
+	}
+	req.Header = call.header.Clone()
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return errors.New(resp.Status)
 	}
 	return nil
 }
@@ -583,7 +612,8 @@ func (p *proxy) acquire(ctx context.Context) (*upstream, error) {
 			case p.wakeup <- struct{}{}:
 			default:
 			}
-			asked = true
+			// An earlier start's error is not this one's.
+			asked, p.err = true, nil
 		}
 		changed := p.changed
 		p.mu.Unlock()

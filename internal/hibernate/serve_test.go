@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -391,5 +392,15 @@ func TestServePassesOtherCommands(t *testing.T) {
 	}
 	if diff := cmp.Diff(req.Argv, argv); diff != "" {
 		t.Error(diff)
+	}
+}
+
+func TestServeSaysWhyItsServerDidNotStart(t *testing.T) {
+	noBox := errors.New("no environment")
+	exec := func(context.Context, boxexec.Request, boxexec.Streams) (int, error) { return 0, noBox }
+	req := boxexec.Request{Argv: []string{"opencode", "serve", "--hostname=127.0.0.1", "--port=0"}}
+	_, err := hibernate.Serve(t.Context(), exec, req, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}, serveIdle)
+	if !errors.Is(err, noBox) {
+		t.Errorf("Serve's error = %v, want the exec's", err)
 	}
 }
