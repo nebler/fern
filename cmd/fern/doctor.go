@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,13 +24,14 @@ type node struct {
 	etc, pool, proc, bin string // /etc/fern, /var/lib/fern, /proc, /usr/local/bin
 	poolImage            string // the pool's sparse file's folder, /var/lib/fern-img
 	t3                   string // T3's server, http://127.0.0.1:30773
+	github, cloudflare   string // GitHub's and Cloudflare's APIs
 }
 
 // thisNode returns the node doctor runs on.
 func thisNode() node {
 	return node{
 		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
-		t3: "http://127.0.0.1:30773",
+		t3: "http://127.0.0.1:30773", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
 	}
 }
 
@@ -177,26 +179,122 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	}
 
 	// The GitHub App, which is optional.
-	switch app, err := github.Load(filepath.Join(n.etc, "github-app"), github.API); {
+	switch app, err := github.Load(filepath.Join(n.etc, "github-app"), n.github); {
 	case err != nil:
 		add(finding{name: "GitHub App", detail: err.Error(), fix: "run the install again with FERN_GITHUB_APP_ID and FERN_GITHUB_APP_KEY (README)"})
 	case app == nil:
 		add(finding{name: "GitHub App", info: true, detail: "none: public repositories only, and no push or pull requests (README)"})
 	default:
-		add(finding{name: "GitHub App", ok: true, detail: "set up: T3's git and gh get tokens"})
+		add(checkGitHub(ctx, app))
 	}
-	// Cloudflare's MCP server for Claude, which is optional too.
-	switch data, err := os.ReadFile(filepath.Join(n.etc, "cloudflare.env")); {
+	// Cloudflare's token, which is optional too.
+	switch token, err := fileVar(filepath.Join(n.etc, "cloudflare.env"), "CLOUDFLARE_API_TOKEN"); {
 	case errors.Is(err, os.ErrNotExist):
-		add(finding{name: "Cloudflare", info: true, detail: "no token: Claude has no Cloudflare MCP server; deploys by push still work (README)"})
+		add(finding{name: "Cloudflare", info: true, detail: "no token: Claude can't set up deploys or use Cloudflare's MCP server (README)"})
 	case err != nil:
 		add(finding{name: "Cloudflare", detail: err.Error(), fix: "check " + n.etc + "/cloudflare.env"})
-	case !strings.Contains(string(data), "CLOUDFLARE_API_TOKEN="):
+	case token == "":
 		add(finding{name: "Cloudflare", detail: n.etc + "/cloudflare.env holds no CLOUDFLARE_API_TOKEN", fix: "delete it and run the install again with FERN_CLOUDFLARE_TOKEN_FILE"})
 	default:
-		add(finding{name: "Cloudflare", ok: true, detail: "token set: Claude gets Cloudflare's MCP server in Cloudflare repositories"})
+		add(n.checkCloudflare(ctx, token))
 	}
 	return out
+}
+
+// checkGitHub asks GitHub what each account the App is installed on lets it
+// do. A permission the App has but an account hasn't accepted is missing
+// there, and shows only when a thread needs it: a push of a workflow, or
+// cloudflare_connect.
+func checkGitHub(ctx context.Context, app *github.App) finding {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	installations, err := app.Installations(ctx)
+	if err != nil {
+		return finding{
+			name: "GitHub App", detail: "GitHub doesn't accept it: " + err.Error(),
+			fix: "check the App's ID and key: run the install again with FERN_GITHUB_APP_ID and FERN_GITHUB_APP_KEY (README)",
+		}
+	}
+	if len(installations) == 0 {
+		return finding{name: "GitHub App", detail: "installed on no account", fix: "install it on your repositories: Install App, in its settings on GitHub"}
+	}
+	// Without Contents or Pull requests T3 can't push; without Workflows or
+	// Secrets only deploys from a thread can't be set up.
+	var lacking []string
+	optional := true
+	for _, i := range installations {
+		if lacks := i.Lacks(); len(lacks) > 0 {
+			lacking = append(lacking, fmt.Sprintf("%s lacks %s", i.Account, strings.Join(lacks, ", ")))
+			optional = optional && !slices.Contains(lacks, "Contents") && !slices.Contains(lacks, "Pull requests")
+		}
+	}
+	if len(lacking) > 0 {
+		return finding{
+			name: "GitHub App", info: optional, detail: strings.Join(lacking, "; "),
+			fix: "set them to Read and write in the App's settings (Permissions & events), then accept the request at github.com/settings/installations",
+		}
+	}
+	return finding{name: "GitHub App", ok: true, detail: fmt.Sprintf("installed on %d accounts, with every permission Fern uses", len(installations))}
+}
+
+// checkCloudflare asks Cloudflare's API what token may read. Cloudflare's
+// MCP server reads the user and the accounts when a user's token connects,
+// and refuses one that can't ("Insufficient scope"); a deploy needs
+// neither, so a token that fails only that is not broken.
+func (n node) checkCloudflare(ctx context.Context, token string) finding {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	get := func(path string) (int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, n.cloudflare+path, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	accounts, err := get("/accounts?per_page=5")
+	if err != nil {
+		return finding{name: "Cloudflare", info: true, detail: "token set; Cloudflare's API didn't answer: " + err.Error()}
+	}
+	edit := "edit the token at dash.cloudflare.com/profile/api-tokens (its value stays): "
+	switch {
+	case accounts == http.StatusUnauthorized || accounts == http.StatusBadRequest:
+		return finding{
+			name: "Cloudflare", detail: "Cloudflare refuses the token: it is wrong, expired or deleted",
+			fix: "make a new one (README) and run the install again with FERN_CLOUDFLARE_TOKEN_FILE",
+		}
+	case accounts != http.StatusOK:
+		return finding{
+			name: "Cloudflare", detail: fmt.Sprintf("the token can't read its account (HTTP %d)", accounts),
+			fix: edit + "add Account → Account Settings → Read",
+		}
+	}
+	if user, err := get("/user"); err == nil && user != http.StatusOK {
+		return finding{
+			name: "Cloudflare", info: true, detail: "the token deploys, but Cloudflare's MCP server refuses it: it can't read its user",
+			fix: edit + "add User → User Details → Read",
+		}
+	}
+	return finding{name: "Cloudflare", ok: true, detail: "token works: Claude sets up deploys and gets Cloudflare's MCP server in Cloudflare repositories"}
+}
+
+// fileVar returns the value of name in the env file, "" if it has none.
+func fileVar(file, name string) (string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), name+"="); ok {
+			return strings.Trim(v, `"'`), nil
+		}
+	}
+	return "", nil
 }
 
 // checkT3 asks T3's server whether it is up.

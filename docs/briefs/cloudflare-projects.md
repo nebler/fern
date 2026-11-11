@@ -30,6 +30,10 @@ Goal: a person's only steps are the logins no one can take for them. Tried by ha
 A real thread through T3 on the VPS, in `nebler/nutri-games`: what is this and where is it, build a second game, put it online. Claude named the preview link, built and tested the game with `animate`, `emil-design-eng` and `mobile-native` on, and asked before going further. What it found:
 - T3's home lost the clone at the update, and its worktrees' boxes had no git folder (Tried, above). Fixed.
 - Cloudflare's MCP server refused the token, "Insufficient scope": since 2026-11-09 it reads `/user` and `/accounts` when a user's token connects, so the token also needs *User Details: Read*, which the pre-filled link didn't ask for. The README says to add it; the link's key for it isn't in Cloudflare's docs.
+- Both one-time permissions failed late, when "put it online" ran. `fern doctor` now asks Cloudflare whether the token reads its account and its user, and GitHub which permissions each account gave the App, and names the one to add.
+- With deploys already set up, Claude called `cloudflare_connect` again and said the site couldn't go online when it failed. `fern-deploy` now checks the workflow's history first and ends with the one step left: commit and push in T3.
+- A wake took 34 s before the first page: pnpm 7 s to say nothing was to install, Astro 22 s to start (CPU, in the box). The guess, and `nutri-games`, skip pnpm when the lockfile is the one installed (`cmp` with `node_modules/.pnpm/lock.yaml`). Astro's start is open.
+- `lab/t3-run.sh cloudflare` is that run as a script, on `lab/cloudflare-repo`: the preview link, a D1 row through a revert, and the deploy skill.
 - T3 gives Claude its own MCP server at an address in T3's service, which Claude's box can't reach: it shows as failed. Not changed.
 
 ## Skill packs (built 2026-11-10)

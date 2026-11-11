@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Readies T3's server in the lab for the T3 app on this Mac: adds the sample
-# repo (Postgres with three users) and the toy repo (a notes app, no
-# database) as projects at repos/sample and repos/toy, once, and
+# repo (Postgres with three users), the toy repo (a notes app, no
+# database) and the Cloudflare repo (an Astro site with D1 and R2) as
+# projects at repos/sample, repos/toy and repos/cloudflare, once, and
 # prints a pairing link for 127.0.0.1:30773 that works for 15 minutes. In the
 # app: Settings → Connections, add the link. Needs lab/up.sh and
 # lab/build.sh t3. For a VPS (FERN_HOST), T3_PORT names the Mac's end of an
@@ -24,6 +25,7 @@ add_project() {
 }
 add_project sample lab/sample-repo
 add_project toy lab/toy-repo
+add_project cloudflare lab/cloudflare-repo
 # The server names its own address; the Mac reaches it at 127.0.0.1.
 t3 pair --ttl 15m --label "lab on $(hostname -s)" |
   grep -E '^(Pairing URL|Expires):' |

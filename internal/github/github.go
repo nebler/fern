@@ -211,6 +211,52 @@ func (a *App) SetSecret(ctx context.Context, owner, repo, secret, value string) 
 	return a.call(ctx, http.MethodPut, base+url.PathEscape(secret), t.Token, body, nil)
 }
 
+// Installation is an account the App is installed on, and what the account
+// lets it do there: the App's permissions that the account has accepted.
+type Installation struct {
+	Account     string
+	Permissions map[string]string // such as "secrets": "write"
+}
+
+// Lacks returns which of what Fern uses the installation lacks, by the
+// names GitHub's settings give them: Contents and Pull requests for T3's
+// git and gh, Workflows for pushing a deploy workflow, Secrets for
+// cloudflare_connect.
+func (i Installation) Lacks() []string {
+	var lacks []string
+	for _, p := range []struct{ key, name string }{
+		{"contents", "Contents"}, {"pull_requests", "Pull requests"}, {"workflows", "Workflows"}, {"secrets", "Secrets"},
+	} {
+		if i.Permissions[p.key] != "write" {
+			lacks = append(lacks, p.name)
+		}
+	}
+	return lacks
+}
+
+// Installations returns the accounts the App is installed on, up to a
+// hundred.
+func (a *App) Installations(ctx context.Context) ([]Installation, error) {
+	jwt, err := a.jwt()
+	if err != nil {
+		return nil, err
+	}
+	var out []struct {
+		Account struct {
+			Login string `json:"login"`
+		} `json:"account"`
+		Permissions map[string]string `json:"permissions"`
+	}
+	if err := a.call(ctx, http.MethodGet, "/app/installations?per_page=100", jwt, nil, &out); err != nil {
+		return nil, err
+	}
+	installations := make([]Installation, len(out))
+	for i, o := range out {
+		installations[i] = Installation{Account: o.Account.Login, Permissions: o.Permissions}
+	}
+	return installations, nil
+}
+
 // jwt returns the App's JSON Web Token, which lasts nine minutes (GitHub
 // takes ten at most) and starts a minute ago, for clocks that differ.
 func (a *App) jwt() (string, error) {

@@ -65,7 +65,10 @@ type packageManager struct {
 }
 
 var packageManagers = []packageManager{
-	{"pnpm", "pnpm-lock.yaml", "pnpm install --frozen-lockfile --prefer-offline", "pnpm install --prefer-offline", "pnpm run", false, true},
+	// pnpm keeps the lockfile it installed in node_modules: when it is the
+	// repository's, nothing is to install, and saying so took pnpm 7 s of a
+	// 34 s wake in a box (briefs/cloudflare-projects.md).
+	{"pnpm", "pnpm-lock.yaml", "{ cmp -s pnpm-lock.yaml node_modules/.pnpm/lock.yaml || pnpm install --frozen-lockfile --prefer-offline; }", "pnpm install --prefer-offline", "pnpm run", false, true},
 	{"bun", "bun.lock", "bun install --frozen-lockfile", "bun install", "bun run", false, true},
 	{"bun", "bun.lockb", "bun install --frozen-lockfile", "bun install", "bun run", false, true},
 	{"yarn", "yarn.lock", "corepack yarn install", "corepack yarn install", "corepack yarn run", false, false},

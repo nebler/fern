@@ -124,6 +124,29 @@ const scenarios = {
   },
 };
 
+// A site on Astro and Cloudflare, as a person who can't read code would use
+// it: the preview link, D1's data through the site's API and back with a
+// revert, and the skill Claude was given to deploy it
+// (briefs/cloudflare-projects.md).
+scenarios.cloudflare = {
+  project: "cloudflare",
+  steps: [
+    { send: "Where can I look at this site? Answer with just the link.", expect: /localhost:30780/ },
+    {
+      send:
+        "Add a score for 'ada' with 7 points through the site's own API with curl, then say how many scores the API lists. " +
+        "Answer with just the number.",
+      expect: /\b1\b/,
+    },
+    { send: "Delete every score through the API. Then answer with just the word deleted.", expect: /deleted/i },
+    { revert: 3 },
+    { send: "How many scores does the site's API list now? Answer with just the number.", expect: /\b1\b/ },
+    // Which MCP servers Claude has, lab/check.sh cloudflare reads from its
+    // arguments: its own account of them isn't steady enough to test.
+    { send: "Which skill would you use to put this site online? Answer with just its name.", expect: /fern-deploy/ },
+  ],
+};
+
 const scenario = scenarios[scenarioName];
 if (!scenario) throw new Error(`unknown scenario ${scenarioName}; have ${Object.keys(scenarios).join(", ")}`);
 

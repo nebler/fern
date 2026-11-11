@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/github"
 )
 
 // doctor finds each part that is there or missing on a node laid out in a
@@ -45,6 +50,14 @@ func TestDoctor(t *testing.T) {
 	}))
 	defer t3.Close()
 	n.t3 = t3.URL
+	// Cloudflare takes the token for its account but not for its user.
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer cf-x" || r.URL.Path != "/accounts" {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer cf.Close()
+	n.cloudflare = cf.URL
 
 	got := make(map[string]string)
 	for _, f := range n.check(t.Context(), api.NewClient(d.socket)) {
@@ -62,9 +75,45 @@ func TestDoctor(t *testing.T) {
 	want := map[string]string{
 		"daemon": "ok", "T3": "ok", "Claude login": "ok", "pool": "fail", "gVisor": "ok", "box image": "ok",
 		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info", "backups": "info",
-		"Cloudflare": "ok",
+		"Cloudflare": "info",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)
+	}
+}
+
+// doctor says which permissions an account hasn't given the GitHub App, and
+// is content when each has given all Fern uses.
+func TestDoctorGitHub(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	all := `"contents": "write", "pull_requests": "write", "workflows": "write", "secrets": "write"`
+	for _, tc := range []struct {
+		name, installations string
+		wantOK              bool
+		wantDetail          string
+	}{
+		{"every permission", `[{"account": {"login": "ada"}, "permissions": {` + all + `}}]`, true, "installed on 1 accounts, with every permission Fern uses"},
+		{"one account lacks two", `[{"account": {"login": "ada"}, "permissions": {` + all + `}},
+			{"account": {"login": "bo"}, "permissions": {"contents": "write", "pull_requests": "write"}}]`, false, "bo lacks Workflows, Secrets"},
+		{"installed nowhere", `[]`, false, "installed on no account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.installations))
+			}))
+			defer gh.Close()
+			app, err := github.New(7, keyPEM, gh.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := checkGitHub(t.Context(), app)
+			if got.ok != tc.wantOK || got.detail != tc.wantDetail || (!got.ok && got.fix == "") {
+				t.Errorf("checkGitHub() = %+v, want ok %v, %q, and a fix unless ok", got, tc.wantOK, tc.wantDetail)
+			}
+		})
 	}
 }

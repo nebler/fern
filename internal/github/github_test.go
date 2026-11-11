@@ -81,6 +81,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+		_, _ = fmt.Fprint(w, `[{"account": {"login": "owner"}, "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read", "secrets": "read"}}]`)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/app/installation":
 		_, _ = fmt.Fprint(w, `{"id": 42}`)
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/installation"):
@@ -233,6 +235,22 @@ func TestSetSecret(t *testing.T) {
 }
 
 // A token that expires within five minutes isn't handed out again: a push
+// The App's installations come with what each account accepted, and say
+// which of Fern's permissions are missing: read isn't enough for secrets.
+func TestInstallations(t *testing.T) {
+	app, _ := newApp(t, time.Hour)
+	got, err := app.Installations(t.Context())
+	if err != nil {
+		t.Fatalf("Installations() error: %v", err)
+	}
+	if len(got) != 1 || got[0].Account != "owner" {
+		t.Fatalf("Installations() = %+v, want owner's", got)
+	}
+	if diff := cmp.Diff([]string{"Workflows", "Secrets"}, got[0].Lacks()); diff != "" {
+		t.Errorf("Lacks() (-want +got):\n%s", diff)
+	}
+}
+
 // that starts with it must not outlive it.
 func TestTokenRenewed(t *testing.T) {
 	app, fake := newApp(t, 4*time.Minute)

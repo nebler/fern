@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs a demo scenario through T3's server many times, as the T3 app would,
-# and times every step: lab/t3-run.sh [toy|sample] [RUNS] [MODEL]. Each run
+# and times every step: lab/t3-run.sh [toy|sample|cloudflare] [RUNS] [MODEL]. Each run
 # starts a New worktree thread, sends the scenario's messages, reverts a
 # turn and checks the answers; lab/t3-run.mjs has the scenarios. Results go
 # to lab/t3-runs.jsonl, one line per run. KEEP=1 leaves the threads in T3;
