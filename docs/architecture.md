@@ -124,6 +124,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 | `POST /envs/{id}/restore` | restore `{snapshot}` | built; stops the box, swaps the workspace; the box restarts lazily |
 | `POST /envs/{id}/sleep` / `wake` | explicit lifecycle | built; planned: usually automatic |
 | `POST /envs/{id}/prewake` | wake the box ahead of a likely command, in the background | built; answers at once (§6.4); the T3 hook calls it when a thread is opened or reverted |
+| `GET /envs/{id}/holds` | what holds the environment's box awake, and its agent box: what runs in each, when it sleeps and by which rule | built (`fern why <env>`); asks the actors and wakes nothing (§6.3) |
 | `DELETE /envs/{id}` | delete the environment, its box and snapshots | built |
 | `DELETE /envs/{id}/snapshots/{s}` | prune | built; the T3 hook calls this when checkpoints are deleted |
 | `POST /envs/{id}/fork` | `{count, snapshot?}` new environments, forks, from a snapshot or the workspace as it is; answers `{forks: [ids]}` | built (§7.4); at most 8 forks an environment (409 past that). Planned: the identity hook |
@@ -187,6 +188,8 @@ An environment goes to sleep when all of these hold (two clocks, copied from Amp
 - **human clock:** `idle.human` (default 20 min) since the last human touch: an exec or terminal opened, or a preview request
 
 CPU usage and running services are ignored. An explicit `hold` keeps it awake.
+
+**Why a box is awake (built):** the rule is one function of what the actor counts (`sleepAt` in `internal/actor/idle.go`), which names the rule that decided as well as the time. Everything counted as running in a box is one list in its actor, each entry a command, a preview request or a job. `fern why <env>` prints that list for the environment's box and its agent box, with when each sleeps and by which rule (`GET /envs/{id}/holds`).
 
 **Background commands (built)** are the exception to the first rule: one Claude starts with Bash's `run_in_background`, such as a dev server, is counted as a job of the box (`Group.Job`), but it doesn't hold the box awake as other execs do. With one running, the box sleeps on the two clocks, ignoring a Bash call's 5 s linger and a pre-wake's lease, and Claude's edits passed on to it (§10) count as touches of the human clock. That sleep ends the command: a dev server Claude forgot costs at most 20 minutes of an awake box.
 
@@ -503,7 +506,7 @@ A first, then propose B with what the spike learned ([history/roadmap-weeks.md](
 - **Logs:** the daemon's with `journalctl -u fern-daemon`; a box's output in `boxes/<box>/log` while it runs. Planned: `fern logs <env>`.
 - **Turn timing:** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each checkpoint span. `fern-claude` passes the flag to boxexec, which logs the process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn.
 - **The lab measures everything else:** `lab/perf.sh` gates 288 metrics against a baseline, `lab/ab.sh` compares two versions on the same machine, `lab/profile.sh` shows where an operation's time and CPU go.
-- **CLI:** `fern ls`, `fern snapshots <env>`; planned: `fern inspect`, `fern top`.
+- **CLI:** `fern ls`, `fern snapshots <env>`, `fern why <env>` (what holds its boxes awake); planned: `fern inspect`, `fern top`.
 
 ## 17. Configuration
 

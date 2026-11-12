@@ -131,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /envs/{id}/sleep", s.handle(s.sleep))
 	mux.HandleFunc("POST /envs/{id}/wake", s.handle(s.wake))
 	mux.HandleFunc("POST /envs/{id}/prewake", s.handle(s.prewake))
+	mux.HandleFunc("GET /envs/{id}/holds", s.handle(s.holds))
 	mux.HandleFunc("PUT /goldens/{repo}", s.handle(s.prebuild))
 	// WebSocket handshakes are GET requests.
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
@@ -275,6 +276,29 @@ func (s *Server) sleep(r *http.Request) (any, error) {
 
 func (s *Server) wake(r *http.Request) (any, error) {
 	return nil, s.envs.Wake(r.Context(), r.PathValue("id"))
+}
+
+// holds says what holds the environment's box awake, and its agent box if
+// boxes have one: the answer to "why is this still running?". It asks the
+// actors, and wakes nothing.
+func (s *Server) holds(r *http.Request) (any, error) {
+	boxes := []string{r.PathValue("id")}
+	if s.agentMCP != "" {
+		boxes = append(boxes, store.AgentBox(boxes[0]))
+	}
+	out := make([]api.Holds, 0, len(boxes))
+	for _, box := range boxes {
+		h, err := s.envs.Holds(r.Context(), box)
+		if err != nil {
+			return nil, err
+		}
+		running := make([]api.Running, 0, len(h.Running))
+		for _, run := range h.Running {
+			running = append(running, api.Running{Kind: run.Kind, N: run.N, Since: run.Since})
+		}
+		out = append(out, api.Holds{Box: h.Box, Awake: h.Awake, Running: running, SleepAt: h.SleepAt, Why: h.Why})
+	}
+	return out, nil
 }
 
 // prewake queues a wake of the environment's box and answers at once,

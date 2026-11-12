@@ -638,6 +638,39 @@ func TestFindByPath(t *testing.T) {
 	}
 }
 
+// The API says what holds an environment's box awake, for its own box and
+// its agent box, and wakes neither to say it.
+func TestHolds(t *testing.T) {
+	c, drv := newAPI(t)
+	ctx := t.Context()
+	mustCreate(t, c, "demo")
+	holds, err := c.Holds(ctx, "demo")
+	if err != nil {
+		t.Fatalf("Holds(demo) error: %v", err)
+	}
+	if len(holds) == 0 || holds[0].Box != "demo" || holds[0].Awake || holds[0].Why != "asleep" {
+		t.Errorf("Holds(demo) of an asleep box = %+v, want demo asleep first", holds)
+	}
+	if states, err := drv.States(ctx); err != nil || states["demo"] == runsc.Running {
+		t.Errorf("asking woke the box: states %v, %v", states, err)
+	}
+	if err := c.Wake(ctx, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	holds, err = c.Holds(ctx, "demo")
+	if err != nil {
+		t.Fatalf("Holds(demo) error: %v", err)
+	}
+	// This server's idle sleep is off, which is the rule it must name.
+	if !holds[0].Awake || holds[0].Why != "stays awake: idle sleep is off" {
+		t.Errorf("Holds(demo) of a woken box = %+v, want awake, and why it stays so", holds[0])
+	}
+	var apiErr *api.Error
+	if _, err := c.Holds(ctx, "missing"); !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Errorf("Holds(missing) error = %v, want a 404", err)
+	}
+}
+
 // T3 deletes checkpoints after a revert and reuses their names: --replace
 // must take the snapshot again.
 func TestSnapshotDeleteAndReplace(t *testing.T) {

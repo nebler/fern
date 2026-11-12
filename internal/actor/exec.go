@@ -42,7 +42,7 @@ func (e *Exec) CloseAndSleep(d time.Duration) { e.close(ending{sleep: true, afte
 // it until the returned Exec is closed. A restore, sleep or delete calls
 // cancel, which must end the command.
 func (g *Group) Exec(ctx context.Context, id string, cancel context.CancelFunc) (*Exec, error) {
-	return g.exec(ctx, "exec", id, cancel)
+	return g.exec(ctx, kindExec, id, cancel)
 }
 
 // Job is Exec for a command that runs in the background, such as a dev
@@ -52,7 +52,7 @@ func (g *Group) Exec(ctx context.Context, id string, cancel context.CancelFunc) 
 // cancels the job. A lease (CloseAndSleep, a pre-wake) doesn't apply while
 // a job runs.
 func (g *Group) Job(ctx context.Context, id string, cancel context.CancelFunc) (*Exec, error) {
-	return g.exec(ctx, "job", id, cancel)
+	return g.exec(ctx, kindJob, id, cancel)
 }
 
 // Preview is Exec for a request to a preview of the box (internal/preview):
@@ -61,7 +61,7 @@ func (g *Group) Job(ctx context.Context, id string, cancel context.CancelFunc) (
 // can be a hundred requests.
 // It returns the box's exec address and done, which ends the count.
 func (g *Group) Preview(ctx context.Context, id string, cancel context.CancelFunc) (addr string, done func(), err error) {
-	ex, err := g.exec(ctx, "preview", id, cancel)
+	ex, err := g.exec(ctx, kindPreview, id, cancel)
 	if err != nil {
 		return "", nil, err
 	}
@@ -78,18 +78,15 @@ func (g *Group) exec(ctx context.Context, kind, id string, cancel context.Cancel
 		a.endLease("used")
 		a.next++
 		n := a.next
-		if kind == "job" {
-			a.jobs[n] = cancel
-		} else {
-			a.execs[n] = cancel
-		}
 		a.opened = time.Now()
+		a.running[n] = running{kind: kind, cancel: cancel, since: a.opened}
 		level := slog.LevelInfo
-		if kind == "preview" {
+		if kind == kindPreview {
 			level = slog.LevelDebug
 		}
+		commands, jobs := a.counts()
 		g.log.Log(ctx, level, kind+" opened", slog.String("env", id), slog.Int("exec", n),
-			slog.Int("active", len(a.execs)), slog.Int("jobs", len(a.jobs)))
+			slog.Int("active", commands), slog.Int("jobs", jobs))
 		wake := a.wakes
 		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(how ending) { a.endExec(n, wake, how, level) }}
 		return nil
@@ -110,7 +107,7 @@ func (g *Group) exec(ctx context.Context, kind, id string, cancel context.Cancel
 // A command opened since keeps the box's newer times.
 func (g *Group) AdoptClocks(ctx context.Context, id string, opened, closed time.Time) error {
 	return g.do(ctx, "adopt", id, func(_ context.Context, a *actor) error {
-		if a.phase != boxAsleep && len(a.execs) == 0 {
+		if commands, _ := a.counts(); a.phase != boxAsleep && commands == 0 {
 			a.opened, a.closed = opened, closed
 		}
 		return nil
@@ -121,7 +118,7 @@ func (g *Group) AdoptClocks(ctx context.Context, id string, opened, closed time.
 // else runs. A job is something to do: the box sleeps on its idle clocks,
 // and a lease set while one runs would apply, long past, when it ends.
 func (a *actor) linger(how ending, from time.Time) {
-	if how.sleep && len(a.execs) == 0 && len(a.jobs) == 0 {
+	if how.sleep && len(a.running) == 0 {
 		a.lease = lease{leaseLinger, from.Add(how.after)}
 	}
 }
@@ -137,21 +134,23 @@ func (a *actor) endExec(n, wake int, how ending, level slog.Level) {
 			a.crashes = append(a.crashes, time.Now())
 			a.g.log.WarnContext(ctx, "box didn't answer", slog.String("env", a.id), slog.Int("exec", n))
 		}
-		if _, ok := a.jobs[n]; ok {
-			delete(a.jobs, n)
+		r, ok := a.running[n]
+		if !ok {
+			return nil
+		}
+		delete(a.running, n)
+		commands, jobs := a.counts()
+		if r.kind == kindJob {
 			// A job the agent stopped is its last call: the box lingers as
 			// after any. One that ended by itself asks for nothing.
 			a.linger(how, time.Now())
-			a.g.log.InfoContext(ctx, "job closed", slog.String("env", a.id), slog.Int("exec", n), slog.Int("jobs", len(a.jobs)))
+			a.g.log.InfoContext(ctx, "job closed", slog.String("env", a.id), slog.Int("exec", n), slog.Int("jobs", jobs))
 			return nil
 		}
-		if _, ok := a.execs[n]; ok {
-			delete(a.execs, n)
-			a.closed = time.Now()
-			a.linger(how, a.closed)
-			a.g.log.Log(ctx, level, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
-				slog.Int("active", len(a.execs)), slog.Time("last_opened", a.opened))
-		}
+		a.closed = time.Now()
+		a.linger(how, a.closed)
+		a.g.log.Log(ctx, level, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
+			slog.Int("active", commands), slog.Time("last_opened", a.opened))
 		return nil
 	}
 	select {

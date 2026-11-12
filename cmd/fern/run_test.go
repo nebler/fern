@@ -52,6 +52,12 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 	mux.HandleFunc("GET /envs/{id}/snapshots", func(w http.ResponseWriter, _ *http.Request) {
 		reply(w, []api.Snapshot{{ID: "s1", Created: created}})
 	})
+	mux.HandleFunc("GET /envs/{id}/holds", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []api.Holds{
+			{Box: "demo", Awake: true, Running: []api.Running{{Kind: "exec", N: 7, Since: time.Now().Add(-90 * time.Second)}}, Why: "stays awake while a command or a preview request runs"},
+			{Box: "demo.agent", Why: "asleep"},
+		})
+	})
 	mux.HandleFunc("POST /github/token", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Repository string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -120,6 +126,7 @@ func TestRun(t *testing.T) {
 		{name: "sleep", args: []string{"sleep", "demo"}, requests: []string{"POST /envs/demo/sleep"}, stdout: "sleep demo took"},
 		{name: "wake", args: []string{"wake", "demo"}, requests: []string{"POST /envs/demo/wake"}, stdout: "wake demo took"},
 		{name: "prewake", args: []string{"prewake", "demo"}, requests: []string{"POST /envs/demo/prewake"}, stdout: "prewake demo took"},
+		{name: "why", args: []string{"why", "demo"}, requests: []string{"GET /envs/demo/holds"}, stdout: "demo        awake   exec 7 (1m30s)  stays awake while a command or a preview request runs"},
 		{name: "prebuild", args: []string{"prebuild", "app"}, stdin: "a checkout", requests: []string{"PUT /goldens/app a checkout"}},
 		{name: "no command", args: nil, code: 2, stderr: "usage: fern <create|"},
 		{name: "unknown command", args: []string{"frobnicate"}, code: 2, stderr: `unknown command "frobnicate"`},

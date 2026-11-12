@@ -377,16 +377,18 @@ type actor struct {
 	mailbox chan message
 	done    chan struct{} // closed when run returns
 
-	phase  boxPhase                   // what is known of the box
-	addr   string                     // boxUp: the box's exec address
-	wakes  int                        // how often this actor has woken the box: a command names the wake it ran in when it reports the box dead
-	execs  map[int]context.CancelFunc // commands running in the box, by number
-	jobs   map[int]context.CancelFunc // background commands running in it (Job), by number
-	next   int                        // the last command's number
-	opened time.Time                  // when the last command started
-	closed time.Time                  // when the last command ended
-	lease  lease                      // when the box sleeps instead of after the idle times, and why
-	idle   *time.Timer                // fires when the box may have been idle long enough
+	phase boxPhase // what is known of the box
+	addr  string   // boxUp: the box's exec address
+	wakes int      // how often this actor has woken the box: a command names the wake it ran in when it reports the box dead
+	// running is everything counted as running in the box, by number: the
+	// one list of what holds it. A command or a preview request keeps it
+	// awake; a job doesn't, past the idle times (sleepAt).
+	running map[int]running
+	next    int         // the last command's number
+	opened  time.Time   // when the last command started
+	closed  time.Time   // when the last command ended
+	lease   lease       // when the box sleeps instead of after the idle times, and why
+	idle    *time.Timer // fires when the box may have been idle long enough
 	// stopWatch stops the watch of the agent box's writes for this box
 	// (watch), and is nil while there is none.
 	stopWatch func()
@@ -403,7 +405,7 @@ func recent(ts []time.Time) []time.Time {
 // run handles messages until ctx is done, or until the box is asleep with
 // nothing left to do. awake says the box may be running already.
 func (a *actor) run(ctx context.Context, awake bool) {
-	a.execs, a.jobs = make(map[int]context.CancelFunc), make(map[int]context.CancelFunc)
+	a.running = make(map[int]running)
 	a.idle = time.NewTimer(0)
 	a.idle.Stop()
 	defer a.idle.Stop()
@@ -426,7 +428,7 @@ func (a *actor) run(ctx context.Context, awake bool) {
 		case <-a.idle.C:
 			a.sleepIfIdle(ctx)
 		}
-		if a.phase != boxAsleep || len(a.execs) > 0 || len(a.jobs) > 0 {
+		if a.phase != boxAsleep || len(a.running) > 0 {
 			continue
 		}
 		// Asleep with nothing running: exit, unless a message is waiting.
@@ -509,11 +511,9 @@ func (a *actor) stopBox(ctx context.Context) error {
 	}
 	a.endLease("wasted")
 	a.phase = boxAsleep
-	for _, running := range []map[int]context.CancelFunc{a.execs, a.jobs} {
-		for n, cancel := range running {
-			cancel()
-			delete(running, n)
-		}
+	for n, r := range a.running {
+		r.cancel()
+		delete(a.running, n)
 	}
 	return nil
 }

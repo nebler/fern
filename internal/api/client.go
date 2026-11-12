@@ -151,6 +151,15 @@ func (c *Client) Wake(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, envPath(id)+"/wake", nil, "", nil)
 }
 
+// Holds returns what holds environment id's box awake, and its agent box if
+// it has one: what runs in each, and when it sleeps and why. It wakes
+// neither.
+func (c *Client) Holds(ctx context.Context, id string) ([]Holds, error) {
+	var out []Holds
+	err := c.do(ctx, http.MethodGet, envPath(id)+"/holds", nil, "", &out)
+	return out, err
+}
+
 // Prewake asks for environment id's box to be woken in the background, and
 // returns without waiting for it.
 func (c *Client) Prewake(ctx context.Context, id string) error {

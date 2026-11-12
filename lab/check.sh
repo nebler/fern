@@ -279,6 +279,7 @@ box() {
   check "localhost is the loopback address" 127.0.0.1 "$(fern exec $ENV -- getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
   check "the box writes to the pool" y "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/inside")"
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
+  check "fern why says the box is awake, and when it sleeps" "awake in" "$(fern why $ENV | awk -v e=$ENV '$1 == e { print $2, $4 }')"
   local mounted=0
   metrics >"$TMP/metrics"
   for _ in $(seq "$WAKES"); do

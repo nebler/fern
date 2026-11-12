@@ -21,6 +21,25 @@ type Snapshot struct {
 	Created time.Time `json:"created"`
 }
 
+// Holds is what holds one box awake, as GET /envs/{id}/holds reports it for
+// an environment's box and its agent box: what runs in it, and when it
+// sleeps and by which rule.
+type Holds struct {
+	Box     string    `json:"box"`
+	Awake   bool      `json:"awake"`
+	Running []Running `json:"running,omitempty"` // oldest first
+	SleepAt time.Time `json:"sleep_at,omitzero"` // absent: it doesn't sleep at a time, for Why
+	Why     string    `json:"why"`               // the rule that decides, in words
+}
+
+// Running is a command, a preview request or a job counted as running in a
+// box.
+type Running struct {
+	Kind  string    `json:"kind"` // exec, preview or job
+	N     int       `json:"n"`    // its number in the daemon's log
+	Since time.Time `json:"since"`
+}
+
 // SnapshotRequest is the body of POST /envs/{id}/snapshots.
 type SnapshotRequest struct {
 	ID string `json:"id"`

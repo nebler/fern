@@ -118,29 +118,85 @@ func (a *actor) endLease(result string) {
 	a.lease = lease{}
 }
 
-// sleepAt returns when a box may be put to sleep, and whether it may at
-// all: not while it is asleep, a command runs in it, or idle sleep is off.
-// A job doesn't keep it awake past the idle times, but it does past a
-// linger or a pre-wake, which are for a box with nothing left to do.
-func sleepAt(phase boxPhase, execs, jobs int, l lease, opened, closed time.Time, idle Idle) (time.Time, bool) {
-	if phase == boxAsleep || execs > 0 || idle.Agent == 0 || idle.Human == 0 {
-		return time.Time{}, false
+// sleepAt returns when a box may be put to sleep and which rule says so, or
+// the rule by which it may not: while it is asleep, a command runs in it,
+// or idle sleep is off. A job doesn't keep it awake past the idle times, but
+// it does past a linger or a pre-wake, which are for a box with nothing left
+// to do. It is the whole policy: Holds reports the same answer in words.
+func sleepAt(phase boxPhase, commands, jobs int, l lease, opened, closed time.Time, idle Idle) (time.Time, reason) {
+	switch {
+	case phase == boxAsleep:
+		return time.Time{}, isAsleep
+	case commands > 0:
+		return time.Time{}, commandRuns
+	case idle.Agent == 0 || idle.Human == 0:
+		return time.Time{}, idleOff
+	case l.kind == leaseRetry:
+		return l.until, stopRetried
+	case l.kind == leaseLinger && jobs == 0:
+		return l.until, lingers
+	case l.kind != leaseNone && jobs == 0:
+		return l.until, wokenAhead
 	}
-	if l.kind == leaseRetry || (l.kind != leaseNone && jobs == 0) {
-		return l.until, true
+	agent, human := closed.Add(idle.Agent), opened.Add(idle.Human)
+	if agent.After(human) {
+		return agent, idleSinceCommand
 	}
-	return later(closed.Add(idle.Agent), opened.Add(idle.Human)), true
+	return human, idleSinceUse
 }
 
-func (a *actor) sleepAt() (time.Time, bool) {
-	return sleepAt(a.phase, len(a.execs), len(a.jobs), a.lease, a.opened, a.closed, a.g.cfg.Idle)
+// reason is the rule that decides when a box sleeps (sleepAt).
+type reason int
+
+const (
+	// The first three: it doesn't sleep.
+	isAsleep reason = iota
+	commandRuns
+	idleOff
+	// The rest: it sleeps at a time.
+	stopRetried      // its stop failed, and is tried again
+	lingers          // its last command asked for a quick sleep
+	wokenAhead       // a pre-wake, and no command has come
+	idleSinceCommand // Idle.Agent after its last command ended
+	idleSinceUse     // Idle.Human after it was last used
+)
+
+// sleeps says whether a box sleeps at a time by this rule.
+func (r reason) sleeps() bool { return r >= stopRetried }
+
+// words says the rule to a person.
+func (r reason) words(idle Idle) string {
+	switch r {
+	case isAsleep:
+		return "asleep"
+	case commandRuns:
+		return "stays awake while a command or a preview request runs"
+	case idleOff:
+		return "stays awake: idle sleep is off"
+	case stopRetried:
+		return "its stop failed and is tried again"
+	case lingers:
+		return "its last command asked for a quick sleep"
+	case wokenAhead:
+		return "woken ahead, and no command has come"
+	case idleSinceCommand:
+		return idle.Agent.String() + " after its last command ended"
+	case idleSinceUse:
+		return idle.Human.String() + " after it was last used"
+	}
+	return "by a rule this Fern can't name"
+}
+
+func (a *actor) sleepAt() (time.Time, reason) {
+	commands, jobs := a.counts()
+	return sleepAt(a.phase, commands, jobs, a.lease, a.opened, a.closed, a.g.cfg.Idle)
 }
 
 // armIdle sets the idle timer for when the box may sleep, and stops it if
 // it may not.
 func (a *actor) armIdle() {
-	at, ok := a.sleepAt()
-	if !ok {
+	at, why := a.sleepAt()
+	if !why.sleeps() {
 		a.idle.Stop()
 		return
 	}
@@ -148,8 +204,8 @@ func (a *actor) armIdle() {
 }
 
 func (a *actor) sleepIfIdle(ctx context.Context) {
-	at, ok := a.sleepAt()
-	if !ok || time.Now().Before(at) {
+	at, why := a.sleepAt()
+	if !why.sleeps() || time.Now().Before(at) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
@@ -167,11 +223,4 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 	a.g.idleSleeps.Inc()
 	a.g.log.InfoContext(ctx, "idle box went to sleep", slog.String("env", a.id),
 		slog.Time("last_opened", a.opened), slog.Time("last_closed", a.closed), slog.Time("idle_at", at))
-}
-
-func later(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
 }

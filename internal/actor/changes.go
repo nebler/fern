@@ -246,7 +246,8 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 		a.endLease("used")
 		now := time.Now()
 		a.opened, a.closed = now, now
-		g.log.InfoContext(ctx, "box touched", slog.String("env", id), slog.Int("active", len(a.execs)))
+		commands, _ := a.counts()
+		g.log.InfoContext(ctx, "box touched", slog.String("env", id), slog.Int("active", commands))
 		return nil
 	})
 }

@@ -148,6 +148,7 @@ func subcommands() []subcommand {
 		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
 		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
 		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
+		{name: "why", min: 1, max: 1, run: why},
 		{name: "git-credential", min: 1, max: 1, run: gitCredential},
 		{name: "github-token", max: 1, run: githubToken},
 		{name: "doctor", run: doctor},
@@ -332,6 +333,40 @@ func snapshots(ctx context.Context, c command, cl *api.Client, std stdio) (int, 
 	_, _ = fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
 	for _, s := range snaps {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
+	}
+	return 0, tw.Flush()
+}
+
+// why prints what holds an environment's boxes awake: what runs in each,
+// and when it sleeps and by which rule.
+func why(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	holds, err := cl.Holds(ctx, c.args[0])
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "BOX\tSTATE\tRUNNING\tSLEEPS")
+	for _, h := range holds {
+		state := "asleep"
+		if h.Awake {
+			state = "awake"
+		}
+		running := make([]string, 0, len(h.Running))
+		for _, r := range h.Running {
+			running = append(running, fmt.Sprintf("%s %d (%s)", r.Kind, r.N, now.Sub(r.Since).Round(time.Second)))
+		}
+		if len(running) == 0 {
+			running = []string{"-"}
+		}
+		sleeps := h.Why
+		switch {
+		case !h.Awake:
+			sleeps = "-"
+		case !h.SleepAt.IsZero():
+			sleeps = fmt.Sprintf("in %s: %s", max(h.SleepAt.Sub(now), 0).Round(time.Second), h.Why)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.Box, state, strings.Join(running, ", "), sleeps)
 	}
 	return 0, tw.Flush()
 }
