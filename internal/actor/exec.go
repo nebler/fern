@@ -71,8 +71,7 @@ func (g *Group) Preview(ctx context.Context, id string, cancel context.CancelFun
 func (g *Group) exec(ctx context.Context, kind, id string, cancel context.CancelFunc) (*Exec, error) {
 	var ex *Exec
 	err := g.do(ctx, kind, id, func(ctx context.Context, a *actor) error {
-		env, err := a.wake(ctx)
-		if err != nil {
+		if err := a.wake(ctx); err != nil {
 			return err
 		}
 		a.endLease("used")
@@ -88,7 +87,7 @@ func (g *Group) exec(ctx context.Context, kind, id string, cancel context.Cancel
 		g.log.Log(ctx, level, kind+" opened", slog.String("env", id), slog.Int("exec", n),
 			slog.Int("active", commands), slog.Int("jobs", jobs))
 		wake := a.wakes
-		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(how ending) { a.endExec(n, wake, how, level) }}
+		ex = &Exec{Addr: a.addr, Token: a.token, close: func(how ending) { a.endExec(n, wake, how, level) }}
 		return nil
 	})
 	if err != nil {
@@ -130,7 +129,7 @@ func (a *actor) endExec(n, wake int, how ending, level slog.Level) {
 	end := func(ctx context.Context, _ *actor) error {
 		if how.dead && a.phase == boxUp && wake == a.wakes {
 			// The first to say so of this wake: the next command wakes it again.
-			a.phase, a.addr = boxMaybeUp, ""
+			a.phase, a.addr, a.token = boxMaybeUp, "", ""
 			a.crashes = append(a.crashes, time.Now())
 			a.g.log.WarnContext(ctx, "box didn't answer", slog.String("env", a.id), slog.Int("exec", n))
 		}

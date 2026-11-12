@@ -37,9 +37,11 @@ type Store interface {
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
 }
 
-// Driver reports the state of boxes.
+// Driver reports the state of boxes, and the token a running box was
+// started with.
 type Driver interface {
 	States(ctx context.Context) (map[string]runsc.State, error)
+	Token(id string) (string, error)
 }
 
 // dialTimeout bounds connecting to a box and its WebSocket handshake.
@@ -381,8 +383,9 @@ func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id
 			// Any other command starts as it is, without a question to the box.
 			return box.Write(ctx, typ, data)
 		}
+		url, token := s.mcpURL(ctx, ex)
 		mcp := fernMCP{
-			URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token,
+			URL: url + "/mcp/" + id, Token: token,
 			Cloudflare: s.cloudflareToken(ctx, id), AstroDocs: s.isAstro(ctx, id),
 		}
 		if agent == "claude" {
@@ -476,11 +479,11 @@ const t3MCPPath = "/mcp"
 // the box writes those, and they run code in the agent box, next to
 // Claude's login.
 func (m fernMCP) claude(req *boxexec.Request) error {
-	servers := map[string]any{"fern": map[string]any{
-		"type":    "http",
-		"url":     m.URL,
-		"headers": map[string]string{"Authorization": "Bearer " + m.Token},
-	}}
+	fern := map[string]any{"type": "http", "url": m.URL}
+	if m.Token != "" {
+		fern["headers"] = map[string]string{"Authorization": "Bearer " + m.Token}
+	}
+	servers := map[string]any{"fern": fern}
 	if m.Cloudflare != "" {
 		servers["cloudflare"] = map[string]any{
 			"type":    "http",
@@ -538,10 +541,11 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	}
 	// Not in Code Mode, where only scripts could call it, and without OAuth,
 	// which OpenCode would try if the token were refused.
-	servers["fern"] = map[string]any{
-		"type": "remote", "url": m.URL, "headers": map[string]string{"Authorization": "Bearer " + m.Token},
-		"oauth": false, "codemode": false,
+	fern := map[string]any{"type": "remote", "url": m.URL, "oauth": false, "codemode": false}
+	if m.Token != "" {
+		fern["headers"] = map[string]string{"Authorization": "Bearer " + m.Token}
 	}
+	servers["fern"] = fern
 	if m.Cloudflare != "" {
 		servers["cloudflare"] = map[string]any{
 			"type": "remote", "url": cloudflareMCP, "headers": map[string]string{"Authorization": "Bearer " + m.Cloudflare},
@@ -566,13 +570,21 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 }
 
 // mcpURL returns where Claude in the agent box of ex reaches Fern's MCP
-// server: through the box's own relay, which carries a call across a restart
-// of the daemon. An agent box still running from before the relay has none.
-func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) string {
-	if !boxexec.HasMCPRelay(ctx, s.boxes, ex.Addr, ex.Token) {
-		return s.agentMCP
+// server, and the token it must send, if any: through the box's own relay,
+// which carries a call across a restart of the daemon and adds the box's
+// token itself, so the agent is given none. An agent box still running from
+// before the relay has none, and one from before 2026-11-12 has a relay that
+// adds no token: their agent gets the token in its arguments, as it did.
+func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) (url, token string) {
+	relay, auth := boxexec.HasMCPRelay(ctx, s.boxes, ex.Addr, ex.Token)
+	if !relay {
+		return s.agentMCP, ex.Token
 	}
-	return "http://127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort)
+	url = "http://127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort)
+	if auth {
+		return url, ""
+	}
+	return url, ex.Token
 }
 
 // dialBox connects to environment id's box, waking it if needed, for a

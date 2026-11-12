@@ -631,6 +631,8 @@ func (d guardDriver) Wake(ctx context.Context, box runsc.Box) (string, error) {
 	return d.drv.Wake(ctx, box)
 }
 
+func (d guardDriver) Token(id string) (string, error) { return d.drv.Token(id) }
+
 func (d guardDriver) Sleep(ctx context.Context, id string) error {
 	d.enter(id)
 	defer d.leave(id)

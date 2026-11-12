@@ -22,6 +22,9 @@ const (
 	BoxTokenHeader = "X-Fern-Box"
 	// CallKeyHeader names one call: the relay sends the same value each time.
 	CallKeyHeader = "X-Fern-Call"
+	// relayAuthHeader, in the answer to MCPRelayPath, says the relay adds the
+	// box's token to every call itself, so Claude need not be given it.
+	relayAuthHeader = "X-Fern-Relay-Auth"
 	// maxMCPCall is the largest call the relay holds to send again.
 	maxMCPCall = 16 << 20
 )
@@ -31,16 +34,22 @@ const (
 // tool call running then, and Claude would read that as the tool failing. The
 // relay sends the call again until a daemon answers, under the same key, which
 // is what lets the daemon find a command that call started (session.go).
+//
+// It also adds the box's token to every call, so the token is in fern-init's
+// memory and never in Claude's arguments, where anything in the box could
+// read it and a log could keep it.
 type MCPRelay struct {
 	daemon string
+	token  string
 	limit  time.Duration
 	client *http.Client
 }
 
-// NewMCPRelay returns a relay to the daemon at URL daemon, which sends a call
-// again for up to limit.
-func NewMCPRelay(daemon string, limit time.Duration) *MCPRelay {
-	return &MCPRelay{daemon: daemon, limit: limit, client: &http.Client{}}
+// NewMCPRelay returns a relay to the daemon at URL daemon, which
+// authenticates each call with the box's token and sends it again for up to
+// limit.
+func NewMCPRelay(daemon, token string, limit time.Duration) *MCPRelay {
+	return &MCPRelay{daemon: daemon, token: token, limit: limit, client: &http.Client{}}
 }
 
 func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +71,7 @@ func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Header = r.Header.Clone()
 		req.Header.Set(CallKeyHeader, key)
+		req.Header.Set("Authorization", "Bearer "+m.token)
 		resp, err := m.client.Do(req)
 		if err == nil {
 			defer func() { _ = resp.Body.Close() }()
@@ -118,21 +128,25 @@ func MCPRelayCheck(token string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		w.Header().Set(relayAuthHeader, "1")
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
-// HasMCPRelay reports whether the box whose fern-init is at addr has the relay.
-func HasMCPRelay(ctx context.Context, hc *http.Client, addr, token string) bool {
+// HasMCPRelay reports whether the box whose fern-init is at addr has the
+// relay, and whether that relay adds the box's token itself: one in a box
+// started before 2026-11-12 doesn't.
+func HasMCPRelay(ctx context.Context, hc *http.Client, addr, token string) (relay, auth bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+MCPRelayPath, nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := hc.Do(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusNoContent
+	relay = resp.StatusCode == http.StatusNoContent
+	return relay, relay && resp.Header.Get(relayAuthHeader) != ""
 }

@@ -220,7 +220,7 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 		if g.hasSnapshot(ctx, id, key) {
 			return nil // an earlier build made it
 		}
-		_, err = a.wake(ctx)
+		err = a.wake(ctx)
 		if stopErr := a.stopBox(ctx); err == nil {
 			err = stopErr
 		}

@@ -156,8 +156,10 @@ func TestMCPRelayRetriesALongCall(t *testing.T) {
 	const limit = 2 * time.Second
 	var calls atomic.Int32
 	keys := make(chan string, 2)
+	auths := make(chan string, 2)
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		keys <- r.Header.Get(boxexec.CallKeyHeader)
+		auths <- r.Header.Get("Authorization")
 		if calls.Add(1) == 1 {
 			// A tool that runs past the limit, in a daemon that then stops.
 			time.Sleep(limit + 500*time.Millisecond)
@@ -170,7 +172,7 @@ func TestMCPRelayRetriesALongCall(t *testing.T) {
 		_, _ = io.Copy(w, r.Body)
 	}))
 	t.Cleanup(daemon.Close)
-	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, limit))
+	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, "the-box-token", limit))
 	t.Cleanup(relay.Close)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, relay.URL+"/mcp/demo", strings.NewReader("the call"))
@@ -188,5 +190,11 @@ func TestMCPRelayRetriesALongCall(t *testing.T) {
 	}
 	if first, second := <-keys, <-keys; first == "" || first != second {
 		t.Errorf("the call's keys = %q, %q, want the same one twice", first, second)
+	}
+	// The caller sent no token: the relay has the box's, so Claude needs none.
+	for range 2 {
+		if got := <-auths; got != "Bearer the-box-token" {
+			t.Errorf("the daemon was sent Authorization %q, want the box's token from the relay", got)
+		}
 	}
 }

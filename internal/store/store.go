@@ -11,7 +11,7 @@
 //	envs/<id>/snaps/pre-restore-<time>/  the workspace a restore replaced, for a day
 //	envs/<id>/live.new/        a restore's copy before the swap, the old workspace after
 //	envs/<id>/adopt.new/       an adopt's copy before the swap, the old directory after
-//	envs/<id>/env.json         the environment's record: its workspace, git folder and box token
+//	envs/<id>/env.json         the environment's record: its workspace and git folder
 //	envs/<id>/incomplete       marks a create or delete that hasn't finished
 //	worktrees/<repo>/<name>/   workspaces at a path the caller chose (T3's worktrees)
 //	repos/                     the main repositories those worktrees belong to (T3 keeps them)
@@ -76,9 +76,8 @@ type Env struct {
 	// worktree of, as it was at create; empty if it isn't a worktree of one
 	// under repos/. The box gets it read-only, so git works there and can't
 	// change the repository's config or hooks.
-	Git      string
-	Created  time.Time
-	BoxToken string // authenticates the daemon to the environment's box
+	Git     string
+	Created time.Time
 }
 
 // Snapshot is a read-only copy of an environment's workspace at one moment.
@@ -272,7 +271,7 @@ func (s *Store) FindByPath(ctx context.Context, path string) (Env, error) {
 func (s *Store) env(id string, rec record) Env {
 	return Env{
 		ID: id, Workspace: rec.Workspace, Claude: s.claudePath(id), Git: rec.Git,
-		Created: rec.Created.UTC(), BoxToken: rec.BoxToken,
+		Created: rec.Created.UTC(),
 	}
 }
 

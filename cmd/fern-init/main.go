@@ -128,7 +128,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		mux.Handle("GET "+boxexec.MCPRelayPath, boxexec.MCPRelayCheck(token))
 		relay = &http.Server{
 			Addr:              "127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort),
-			Handler:           boxexec.NewMCPRelay(daemon, boxexec.DefaultGrace),
+			Handler:           boxexec.NewMCPRelay(daemon, token, boxexec.DefaultGrace),
 			BaseContext:       func(net.Listener) context.Context { return ctx },
 			ReadHeaderTimeout: 10 * time.Second,
 		}

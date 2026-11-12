@@ -19,8 +19,11 @@ threats below:
 - The box with the services gets **no login and no Claude folder** (T6, T2): a
   box can no longer read the subscription token, or plant settings or hooks
   where Claude reads them.
-- The MCP endpoint (`/mcp/<env>`) takes the environment's box token and offers
-  only that environment's Bash (T4). Tests: `internal/api/server/bash_test.go`.
+- The MCP endpoint (`/mcp/<env>`) takes the token of the environment's running
+  agent box and offers only that environment's Bash (T4). Since 2026-11-12 every
+  box has a token of its own, made at its start: the box with the services
+  can't open this endpoint with its own, and Claude is given none, as the relay
+  in its box adds it. Tests: `internal/api/server/bash_test.go`.
 - T1, T3, T8 and T9 no longer apply as written: Claude is in a box, not in T3's
   pod.
 - Measured in the lab (`lab/t3-run.sh toy 1`, `lab/boxes.sh agents`): the run

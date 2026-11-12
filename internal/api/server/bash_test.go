@@ -54,9 +54,28 @@ type demoBox struct {
 
 func newDemoBox(t *testing.T) demoBox {
 	t.Helper()
+	return newDemoBoxWith(t, false)
+}
+
+// agentUp starts environment id's agent box in drv, as a thread's Claude
+// has: its token is the one the MCP endpoint takes.
+func agentUp(t testing.TB, drv *runsc.Fake, id string) {
+	t.Helper()
+	if _, err := drv.Wake(t.Context(), runsc.Box{ID: store.AgentBox(id), Kind: runsc.Agent}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newDemoBoxWith is newDemoBox whose box, with relay, says it has the MCP
+// relay that adds the box's token, as fern-init in an agent box does.
+func newDemoBoxWith(t *testing.T, relay bool) demoBox {
+	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
 	dir := t.TempDir()
+	if relay {
+		mux.Handle("GET "+boxexec.MCPRelayPath, boxexec.MCPRelayCheck(boxToken))
+	}
 	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, dir, nil, log))
 	jobs := boxexec.NewJobs(boxToken, dir, nil, log)
 	jobs.Register(mux)
@@ -68,6 +87,7 @@ func newDemoBox(t *testing.T) demoBox {
 	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	agentUp(t, drv, "demo")
 	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -144,6 +164,57 @@ func TestBash(t *testing.T) {
 	states, _ := drv.States(t.Context())
 	if states["demo"] != runsc.Running {
 		t.Errorf("box %s after Bash, want it woken", states["demo"])
+	}
+}
+
+// boxTokens is a fake driver whose boxes each have a token of their own, as
+// a real driver's do.
+type boxTokens struct {
+	*runsc.Fake
+	tokens map[string]string
+}
+
+func (d boxTokens) Token(id string) (string, error) {
+	if _, err := d.Fake.Token(id); err != nil {
+		return "", err
+	}
+	return d.tokens[id], nil
+}
+
+// The endpoint takes the token of the environment's running agent box, made
+// when that box started. The box that runs the repository's code has
+// another, which opens nothing here, and a token ends with its box.
+func TestMCPTakesTheAgentBoxTokenAlone(t *testing.T) {
+	b := newDemoBox(t)
+	drv := boxTokens{b.drv, map[string]string{"demo": boxToken, "demo.agent": "the-agent-box"}}
+	api := server.New(b.st, drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	t.Cleanup(api.Close)
+	srv := httptest.NewServer(api.MCPHandler())
+	t.Cleanup(srv.Close)
+	url := srv.URL + "/mcp/demo"
+
+	s, err := connect(t, url, "the-agent-box")
+	if err != nil {
+		t.Fatalf("with the agent box's token: %v", err)
+	}
+	_ = s.Close()
+	if s, err := connect(t, url, boxToken); err == nil {
+		_ = s.Close()
+		t.Error("the token of the box that runs the code opened the endpoint")
+	}
+	// Claude's box sleeps: its token is gone with it.
+	if err := b.drv.Sleep(t.Context(), "demo.agent"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := connect(t, url, "the-agent-box"); err == nil {
+		_ = s.Close()
+		t.Error("the token of an agent box that has stopped opened the endpoint")
+	}
+	for _, id := range []string{"../demo", "demo.agent", "DEMO"} {
+		if s, err := connect(t, srv.URL+"/mcp/"+id, "the-agent-box"); err == nil {
+			_ = s.Close()
+			t.Errorf("environment %q opened the endpoint", id)
+		}
 	}
 }
 
@@ -229,7 +300,7 @@ func TestBashBackground(t *testing.T) {
 // A background command that exits is reported with its exit code; one whose
 // box sleeps is stopped.
 func TestBashBackgroundEnds(t *testing.T) {
-	url, _, envs := newMCP(t)
+	url, drv, envs := newMCP(t)
 	s, err := connect(t, url, boxToken)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +316,8 @@ func TestBashBackgroundEnds(t *testing.T) {
 	if err := envs.Sleep(t.Context(), "demo"); err != nil {
 		t.Fatal(err)
 	}
+	// The sleep stopped Claude's box too. Its next message starts it again.
+	agentUp(t, drv, "demo")
 	output(t, s, runs, "stopped: its box went to sleep")
 }
 
@@ -438,7 +511,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	swap.set(first.MCPHandler())
 	daemon := httptest.NewServer(swap)
 	t.Cleanup(daemon.Close)
-	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, 30*time.Second))
+	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, boxToken, 30*time.Second))
 	t.Cleanup(relay.Close)
 
 	s, err := connect(t, relay.URL+"/mcp/demo", boxToken)
@@ -493,7 +566,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 // A call cut off for any other reason ends its command.
 func TestBashCancelledCallKillsCommand(t *testing.T) {
 	url, _, _ := newMCP(t)
-	relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), 30*time.Second))
+	relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), boxToken, 30*time.Second))
 	t.Cleanup(relay.Close)
 	pidfile := filepath.Join(t.TempDir(), "pid")
 	// As Claude gives up on a call: its request goes away.
@@ -701,6 +774,7 @@ func TestCloudflareConnect(t *testing.T) {
 			if _, err := b.st.Create(t.Context(), "cf", store.CreateOptions{Workspace: b.dir}); err != nil {
 				t.Fatal(err)
 			}
+			agentUp(t, b.drv, "cf")
 			api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
 			t.Cleanup(api.Close)
 			api.Cloudflare = func(context.Context) (string, error) { return "cf-1", nil }
@@ -753,7 +827,9 @@ func TestCloudflareConnectAbsent(t *testing.T) {
 
 // An agent started in an agent box gets Fern's MCP server in place of its
 // own shell: Claude in its arguments, OpenCode's server in its settings,
-// with the box's address to listen on. Other commands are left alone.
+// with the box's address to listen on. Other commands are left alone. The
+// table's box is one started before the relay: its agent is still given the
+// token, as the only way it has.
 func TestAgentStart(t *testing.T) {
 	// Each agent here prints its arguments, then OpenCode's settings.
 	bin := t.TempDir()
@@ -812,6 +888,27 @@ func TestAgentStart(t *testing.T) {
 			wantArgs: []string{"models", "--hostname=10.0.0.1"},
 		},
 	}
+	// A box whose fern-init has the relay that adds the token: the agent is
+	// pointed at the relay and given no token at all.
+	const relayURL = "http://127.0.0.1:7072/mcp/demo"
+	withRelay := newDemoBoxWith(t, true)
+	relayAPI := server.New(withRelay.st, withRelay.drv, withRelay.envs, "http://fern-daemon:7071", notrace, withRelay.log)
+	t.Cleanup(relayAPI.Close)
+	relayed := serveSocket(t, relayAPI.Handler())
+	var stdout bytes.Buffer
+	req := boxexec.Request{Argv: []string{filepath.Join(bin, "claude"), "-p"}}
+	if _, err := relayed.ExecAgent(t.Context(), "demo", req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
+		t.Fatalf("ExecAgent() in a box with the relay: %v", err)
+	}
+	wantArgs := "-p\n--mcp-config\n" + `{"mcpServers":{"fern":{"type":"http","url":"` + relayURL + `"}}}` +
+		"\n--disallowedTools\nBash,BashOutput,KillShell,KillBash,Monitor\n--setting-sources=user\n"
+	if diff := cmp.Diff(wantArgs, stdout.String()); diff != "" {
+		t.Errorf("Claude's arguments in a box with the relay (-want +got):\n%s", diff)
+	}
+	if strings.Contains(stdout.String(), boxToken) {
+		t.Error("the box's token is in Claude's arguments")
+	}
+
 	b := newDemoBox(t)
 	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
 	t.Cleanup(api.Close)
@@ -849,6 +946,7 @@ func BenchmarkMCPCall(b *testing.B) {
 		b.Fatal(err)
 	}
 	drv := runsc.NewFake("box")
+	agentUp(b, drv, "demo")
 	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
 	api := server.New(st, drv, envs, "http://fern-daemon:7071", notrace, log)
 	defer api.Close()

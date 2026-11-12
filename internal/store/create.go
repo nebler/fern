@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -115,7 +114,7 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err != nil {
 		return Env{}, err
 	}
-	rec := record{Workspace: workspace, Git: git, Created: now(), BoxToken: rand.Text()}
+	rec := record{Workspace: workspace, Git: git, Created: now()}
 	if err := s.writeRecord(id, rec); err != nil {
 		return Env{}, err
 	}
@@ -176,7 +175,7 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 		return Env{}, err
 	}
 	if git != env.Git {
-		rec := record{Workspace: env.Workspace, Git: git, Created: env.Created, BoxToken: env.BoxToken}
+		rec := record{Workspace: env.Workspace, Git: git, Created: env.Created}
 		if err := s.writeRecord(env.ID, rec); err != nil {
 			return Env{}, err
 		}

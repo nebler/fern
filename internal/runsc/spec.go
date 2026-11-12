@@ -205,9 +205,9 @@ func boxSpec(box Box, b layout, image, vars []string, lim Limits) spec {
 // boxVars are the variables fern-init needs: the token that authenticates
 // the daemon, the wake's ID (stop requests name it), the workspace, what
 // box's kind turns off, and Claude's folder and login if it gets them.
-func boxVars(box Box, wakeID, login string, mcpPort int) []string {
+func boxVars(box Box, wakeID, token, login string, mcpPort int) []string {
 	vars := []string{
-		"FERN_BOX_TOKEN=" + box.Env.BoxToken,
+		"FERN_BOX_TOKEN=" + token,
 		"FERN_WAKE_ID=" + wakeID,
 		"FERN_WORKSPACE=" + box.Env.Workspace,
 	}

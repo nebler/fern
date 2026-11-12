@@ -17,15 +17,16 @@ const RecordFile = "env.json"
 const recordVersion = 1
 
 // record is what an environment's directory can't say by itself: where its
-// workspace is, which git folder its box gets, when it was made and the
-// token of its box. Its ID is the directory's name, so the two can't
-// disagree.
+// workspace is, which git folder its box gets and when it was made. Its ID
+// is the directory's name, so the two can't disagree. It holds no secret: a
+// box's token is made when the box starts and kept with its bundle, off the
+// pool (runsc.Driver.Token). A record written before 2026-11-12 also has a
+// box_token, which nothing reads any more.
 type record struct {
 	Version   int       `json:"version"`
 	Workspace string    `json:"workspace"`
 	Git       string    `json:"git"`
 	Created   time.Time `json:"created"`
-	BoxToken  string    `json:"box_token"`
 }
 
 // errBadRecord means an environment's record is there and can't be used:
@@ -55,8 +56,8 @@ func (s *Store) readRecord(id string) (record, error) {
 
 // writeRecord makes rec environment id's record, replacing one it has. The
 // whole record appears in one rename, flushed first: a power cut leaves the
-// old record or the new one, and the token in it can't be made again. Only
-// root reads it.
+// old record or the new one, and a worktree's path can't be worked out
+// again from its directory. Only root reads it.
 func (s *Store) writeRecord(id string, rec record) error {
 	rec.Version = recordVersion
 	data, err := json.Marshal(rec)

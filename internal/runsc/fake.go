@@ -2,11 +2,16 @@ package runsc
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"sync"
 )
 
+// FakeToken is the token of every box a Fake runs.
+const FakeToken = "box-token"
+
 // Fake is an in-memory driver for tests. Every awake box is reachable at the
-// address it was made with. It is safe for concurrent use.
+// address it was made with, and has FakeToken. It is safe for concurrent use.
 type Fake struct {
 	addr string
 
@@ -44,6 +49,17 @@ func (f *Fake) Wake(_ context.Context, box Box) (string, error) {
 	}
 	f.boxes[box.ID], f.up[box.ID] = box, true
 	return f.addr, nil
+}
+
+// Token returns FakeToken for a box that is up, and fs.ErrNotExist for one
+// that isn't, as Driver.Token does.
+func (f *Fake) Token(id string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.up[id] {
+		return "", fmt.Errorf("box %s: %w", id, fs.ErrNotExist)
+	}
+	return FakeToken, nil
 }
 
 // FailSleeps makes box id's sleeps fail with err, leaving it up; nil makes

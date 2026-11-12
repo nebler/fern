@@ -148,8 +148,8 @@ func TestCreate(t *testing.T) {
 	st, _ := openPool(t)
 	seed := tarball(t, map[string]string{"README.md": "hello\n", "src/main.go": "package main\n"})
 	env := create(t, st, "demo", store.CreateOptions{Seed: seed})
-	if env.ID != "demo" || env.BoxToken == "" || env.Created.IsZero() {
-		t.Errorf("Create(demo) = %+v, want ID, BoxToken and Created set", env)
+	if env.ID != "demo" || env.Created.IsZero() {
+		t.Errorf("Create(demo) = %+v, want ID and Created set", env)
 	}
 	for name, want := range map[string]string{"README.md": "hello\n", "src/main.go": "package main\n"} {
 		if got := readFile(t, filepath.Join(env.Workspace, name)); got != want {
@@ -342,7 +342,7 @@ func TestOpen(t *testing.T) {
 	st, dir := openPool(t)
 	create(t, st, "demo", store.CreateOptions{})
 	if uid, _, perm := stat(t, filepath.Join(dir, "envs", "demo", store.RecordFile)); uid != 0 || perm != 0o600 {
-		t.Errorf("the record: owner %d, mode %v; want root's alone (0600): it holds the box token", uid, perm)
+		t.Errorf("the record: owner %d, mode %v; want root's alone (0600)", uid, perm)
 	}
 	other := t.TempDir()
 	var fsInfo unix.Statfs_t
@@ -884,7 +884,7 @@ func TestImportIndex(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(demo) at %s: %v", pass, err)
 		}
-		want := store.Env{ID: "demo", Workspace: env.Workspace, Claude: env.Claude, Git: "/git", Created: created, BoxToken: "old-token"}
+		want := store.Env{ID: "demo", Workspace: env.Workspace, Claude: env.Claude, Git: "/git", Created: created}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("Get(demo) at %s (-want +got):\n%s", pass, diff)
 		}
@@ -941,9 +941,6 @@ func TestFork(t *testing.T) {
 		}
 		if tt.env.Git != gitDir {
 			t.Errorf("%s: Git = %q, want %q", tt.env.ID, tt.env.Git, gitDir)
-		}
-		if tt.env.BoxToken == src.BoxToken {
-			t.Errorf("%s has its source's box token", tt.env.ID)
 		}
 		if uid, ino, _ := stat(t, tt.env.Workspace); uid != store.BoxUID || ino != subvolumeIno {
 			t.Errorf("%s's workspace: uid %d, inode %d, want a subvolume of the box user", tt.env.ID, uid, ino)

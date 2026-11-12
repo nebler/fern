@@ -544,7 +544,14 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	}
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
-	vars := boxVars(box, hex.EncodeToString(wakeID), login, d.cfg.MCPPort)
+	// The box's token is made here, for this wake alone, and kept with the
+	// bundle on the node's tmpfs: it is in no record, snapshot or backup,
+	// and no other box has the same one.
+	token := rand.Text()
+	if err := os.WriteFile(filepath.Join(b.dir, tokenFile), []byte(token), 0o600); err != nil {
+		return err
+	}
+	vars := boxVars(box, hex.EncodeToString(wakeID), token, login, d.cfg.MCPPort)
 	if skills != "" {
 		vars = append(vars, "FERN_SKILLS="+skills)
 	}
@@ -739,19 +746,38 @@ func (d *Driver) stopListed(ctx context.Context, id string, cs []container) erro
 	return nil
 }
 
-// askStop starts fern-init's graceful shutdown with its authenticated
-// POST /stop, naming the wake it stops. A box that doesn't answer, or
-// refuses (an older fern-init), gets runsc's SIGTERM instead.
-func (d *Driver) askStop(ctx context.Context, b layout) {
+// tokenFile is where a box's bundle keeps the token made at its start.
+const tokenFile = "token"
+
+// Token returns the token box id was started with, which authenticates the
+// daemon to its fern-init and the box to the daemon. Each start makes a new
+// one, so a box that isn't running has none: the error is fs.ErrNotExist.
+// It wakes nothing.
+func (d *Driver) Token(id string) (string, error) {
+	b := d.layout(id)
+	data, err := os.ReadFile(filepath.Join(b.dir, tokenFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		// A box started before 2026-11-12 has it in its spec only.
+		token, _, err := bundleVars(b)
+		return token, err
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// bundleVars reads the token and the wake ID a box was started with from
+// its bundle's spec.
+func bundleVars(b layout) (token, wakeID string, err error) {
 	data, err := os.ReadFile(filepath.Join(b.dir, "config.json"))
 	if err != nil {
-		return
+		return "", "", err
 	}
 	var s spec
-	if json.Unmarshal(data, &s) != nil {
-		return
+	if err := json.Unmarshal(data, &s); err != nil {
+		return "", "", err
 	}
-	var token, wakeID string
 	for _, v := range s.Process.Env {
 		if t, ok := strings.CutPrefix(v, "FERN_BOX_TOKEN="); ok {
 			token = t
@@ -759,6 +785,17 @@ func (d *Driver) askStop(ctx context.Context, b layout) {
 		if w, ok := strings.CutPrefix(v, "FERN_WAKE_ID="); ok {
 			wakeID = w
 		}
+	}
+	return token, wakeID, nil
+}
+
+// askStop starts fern-init's graceful shutdown with its authenticated
+// POST /stop, naming the wake it stops. A box that doesn't answer, or
+// refuses (an older fern-init), gets runsc's SIGTERM instead.
+func (d *Driver) askStop(ctx context.Context, b layout) {
+	token, wakeID, err := bundleVars(b)
+	if err != nil {
+		return
 	}
 	_, guest, err := linkAddrs(b)
 	if err != nil {

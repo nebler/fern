@@ -41,8 +41,9 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-// boxToken is the token of every fake environment; the test box accepts it.
-const boxToken = "box-token"
+// boxToken is the token of every box the fake driver runs; the test box
+// accepts it.
+const boxToken = runsc.FakeToken
 
 var created = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
@@ -83,7 +84,7 @@ func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOption
 	if workspace == "" {
 		workspace = "/pool/envs/" + id + "/live"
 	}
-	env := store.Env{ID: id, Workspace: workspace, Created: created, BoxToken: boxToken}
+	env := store.Env{ID: id, Workspace: workspace, Created: created}
 	f.envs[id] = env
 	return env, nil
 }

@@ -672,7 +672,7 @@ bye" "$(cat "$out")"
   # A Bash call, as Claude makes it, through the agent box's relay.
   if agent_boxes; then
     fern exec $ENV -- rm -f /tmp/bash.runs
-    MCP_URL=relay mcp $ENV Bash '{"command": "echo run >> /tmp/bash.runs; echo before; sleep 8; echo after; exit 4"}' >"$out" 2>&1 &
+    mcp $ENV Bash '{"command": "echo run >> /tmp/bash.runs; echo before; sleep 8; echo after; exit 4"}' >"$out" 2>&1 &
     pid=$!
     until [ "$(fern exec $ENV -- sh -c 'cat /tmp/bash.runs 2>/dev/null' | wc -l)" -ge 1 ]; do sleep 0.2; done
     restart_daemon
@@ -707,6 +707,38 @@ settings() {
     return
   fi
   fresh $ENV
+  # An agent is a program named claude: this one prints its arguments.
+  # shellcheck disable=SC2016 # the box's shell's
+  fern exec $ENV -- sh -c 'mkdir -p .fern/bin && printf "#!/bin/sh\nprintf \"%%s\\\\n\" \"\$@\"\n" >.fern/bin/claude && chmod 755 .fern/bin/claude'
+  local given
+  given=$(fern exec --agent $ENV -- ./.fern/bin/claude -p)
+  check "Claude is pointed at the relay in its own box" yes "$(succeeds grep -q '127.0.0.1:7072/mcp/' <<<"$given")"
+  check "… and is given no token: the relay adds the box's" no "$(succeeds grep -q 'Authorization' <<<"$given")"
+  # Each box has a token of its own, made when it starts. The tool server
+  # takes the agent box's and refuses the one of the box that runs the code.
+  tool_server() {
+    fern exec --agent $ENV -- curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Authorization: Bearer $1" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"1"}}}' \
+      "http://fern-daemon:7071/mcp/$ENV"
+  }
+  # A token lives as long as its box: hold Claude's box awake to read it.
+  fern exec --agent $ENV -- sleep 12 </dev/null >/dev/null 2>&1 &
+  local hold=$! agent_token box_token
+  for _ in $(seq 50); do
+    in_daemon "test -s /run/fern/boxes/$ENV.agent/token" && break
+    sleep 0.2
+  done
+  agent_token=$(in_daemon "cat /run/fern/boxes/$ENV.agent/token")
+  box_token=$(in_daemon "cat /run/fern/boxes/$ENV/token")
+  check "each box has a token of its own" yes "$([ -n "$agent_token" ] && [ -n "$box_token" ] && [ "$agent_token" != "$box_token" ] && echo yes || echo no)"
+  check "the tool server takes the agent box's token" 200 "$(tool_server "$agent_token")"
+  check "… and refuses the token of the box that runs the code" 401 "$(tool_server "$box_token")"
+  check "no token is in the pool" "" "$(in_daemon "grep -rlF -e '${agent_token:-none}' -e '${box_token:-none}' /var/lib/fern/envs/$ENV 2>/dev/null")"
+  # Its command over, Claude's box stops. The next start makes a new token,
+  # and the old one opens nothing.
+  wait $hold 2>/dev/null || true
+  check "a token ends with its box" 401 "$(tool_server "$agent_token")"
   # shellcheck disable=SC2016 # the box's shell's
   fern exec $ENV -- sh -c 'mkdir -p .claude
     cat > .claude/m.sh <<"M"
@@ -1130,24 +1162,18 @@ except Exception as e:
 
 # mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell, env_fork, …) of environment
 # ENV's MCP server with ARGS, a JSON object, from its agent box, as Claude
-# there does (only agent boxes reach the port), and prints the answer's
-# text; it fails if the tool did.
+# there does: through the box's relay, which adds the box's token (Claude is
+# given none), and prints the answer's text; it fails if the tool did.
 mcp() {
-  local token call out host=fern-daemon:7071
-  # MCP_URL=relay goes through the box's relay, as Claude does.
-  [ "${MCP_URL:-}" = relay ] && host=127.0.0.1:7072
-  # shellcheck disable=SC2016 # python's, on the node
-  token=$(on_node python3 -c 'import json, sys
-print(json.load(open("/var/lib/fern/envs/" + sys.argv[1] + "/env.json"))["box_token"])' "$1" </dev/null)
+  local call out
   call=$(python3 -c 'import json, sys
 print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$2" "$3")
   # shellcheck disable=SC2016 # the box's shell's
   out=$(fern exec --agent "$1" -- sh -c '
-    set -- "Authorization: Bearer $1" "http://$4/mcp/$2" "$3"
-    for body in "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"check\", \"version\": \"1\"}}}" "$3"; do
-      out=$(curl -sf -m 600 -H "$1" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$body" "$2") || exit
+    for body in "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"check\", \"version\": \"1\"}}}" "$2"; do
+      out=$(curl -sf -m 600 -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$body" "http://127.0.0.1:7072/mcp/$1") || exit
     done
-    printf %s "$out"' sh "$token" "$1" "$call" "$host") || return
+    printf %s "$out"' sh "$1" "$call") || return
   python3 -c 'import json, sys
 res = json.load(sys.stdin)["result"]
 print(res["content"][0]["text"])

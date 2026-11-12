@@ -98,13 +98,14 @@ Three nouns. Everything else is a property of one of them.
 There is no database. An environment is its directory, `envs/<id>/`, with a record file in it (`internal/store/record.go`):
 
 ```json
-envs/<id>/env.json   {"version": 1, "workspace": "…", "git": "…", "created": "…", "box_token": "…"}
+envs/<id>/env.json   {"version": 1, "workspace": "…", "git": "…", "created": "…"}
 envs/<id>/snaps/<snapshot>/   a snapshot: a read-only subvolume, taken when btrfs says it was
 ```
 
 - **The disk is the only record.** An environment exists when its directory has its record: a create writes it last, in one flushed rename, and a delete removes it first. A snapshot exists when its subvolume does, and btrfs keeps the time it was taken. At start the daemon finishes or clears what a change left half-way (§12).
 - **Until 2026-11-12 there was a SQLite index beside the disk** (`state/fern.sqlite`), and the two had to be reconciled. A pool or a backup from before then still has one: the store reads its environments into records at its next start and moves it aside (`internal/store/import.go`).
-- `git` is the main repository's git folder that the box gets read-only (§13); `box_token` authenticates the daemon to the environment's boxes, and is why only root may read a record.
+- `git` is the main repository's git folder that the box gets read-only (§13).
+- **A record holds no secret.** A box's token, which authenticates the daemon to its fern-init and an agent box to the daemon, is made when the box starts and kept with its bundle on the node's tmpfs (`runsc.Driver.Token`): every box has its own, it ends with the box, and it is in no record, snapshot or backup. Until 2026-11-12 one token per environment was kept in the record (before that in the index) and shared by its two boxes; a box running since then answers to the one in its spec.
 - **No two environments share a workspace:** a create claims its path in the daemon's memory until its record is written.
 - **A restore fences stale work** by stopping the box and cancelling every command the actor counts, including one still connecting, so nothing that started before it runs after it.
 - **Golden snapshots are snapshots too:** a golden is a snapshot of its builder environment named `golden-<key>`, and a build waiting at a restart is a snapshot named `golden-source` (§7.5).
@@ -137,7 +138,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 
 **Errors:** an HTTP status (404 not found, 400 invalid, 500 failed) with `{"error": message}`. Planned with the actor and quotas: busy, conflict and quota exceeded; normal calls will queue in the actor's mailbox.
 
-**For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the environment's box token. Its tool Bash runs a command in the environment's box (§10); with `run_in_background` the command goes on after the call, and BashOutput and KillShell read and stop it (§10).
+**For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the token of the environment's running agent box, which fern-init's relay in that box adds to each call (§4): the agent itself is given none, and the box that runs the repository's code has another, which opens nothing here. Its tool Bash runs a command in the environment's box (§10); with `run_in_background` the command goes on after the call, and BashOutput and KillShell read and stop it (§10).
 
 **Cloudflare's, for Cloudflare repositories (built, opt-in):** with a token in `/etc/fern/cloudflare.env` (root only; `install.sh cloudflare`), the daemon adds Cloudflare's MCP server (`https://mcp.cloudflare.com/mcp`, the token as its bearer token) to the agent's MCP config as it starts Claude or OpenCode's server in the agent box, when the workspace deploys to Cloudflare (§8). It reads the file at each start, so adding or removing the token needs no restart. The token is in the agent's arguments or settings in the agent box only, beside Claude's login; the box that runs the repository's code, the workspace and its snapshots never see it (`lab/check.sh cloudflare`).
 
@@ -260,7 +261,7 @@ Each type's comment lists its transitions and the function that makes each. The 
 
 ### 7.4 Fork
 1. `POST /envs/t3-8f2c/fork {count: 3}` (or `fern fork -n 3 t3-8f2c`, or Claude's `env_fork`). The environment's actor picks the lowest free numbers, so two forks never take the same, and makes `t3-8f2c-fork-1` … `-3`: each an ordinary create (crash-safe the same way: the marker first) whose workspace, `envs/<fork>/live`, is a writable btrfs snapshot of the thread's workspace as it is, or of `{snapshot}`. Taking it flushes the workspace's writes first, so a running Postgres's data is as a crash would leave it, which it recovers from as from a revert.
-2. A fork is `asleep` and wakes on its first command into a box of its own: its own services, its own Postgres on :5432, its own box token and an empty Claude folder. Its `.git` file still names the thread's worktree, whose git folder the box gets read-only, as the thread's does.
+2. A fork is `asleep` and wakes on its first command into a box of its own: its own services, its own Postgres on :5432, a token of its own like every box and an empty Claude folder. Its `.git` file still names the thread's worktree, whose git folder the box gets read-only, as the thread's does.
 3. A fork's ID says whose it is (`store.ForkOf`): Claude's tools reach only its own environment's forks, and deleting an environment deletes its forks first. Forks sleep when idle like any environment; `env_exec` lets a fork's box sleep 5 s after its last command.
 
 **Built** (`lab/check.sh fork`, VPS): three forks of a thread with Postgres running take 77–94 ms; woken and each changing and counting its own database at the same time, 2.1–2.7 s. **Not built:** the identity hook (fresh secrets and ports; a fork's services get the same configuration as the thread's), T3's own Fork, which shares the thread's worktree (design §10.4), and forks on another machine.
@@ -415,7 +416,7 @@ The threat model is in [briefs/claude-outside-the-box.md](briefs/claude-outside-
   - the daemon is privileged (it manages btrfs, mounts and the boxes)
   - **boxes are untrusted:** they run what an agent writes
   - T3 and the CLI are trusted local callers, through the socket's group
-  - an agent box's MCP Bash is authenticated with its environment's box token and reaches only that environment's box
+  - an agent box's MCP Bash is authenticated with that agent box's own token, made at its start, and reaches only its environment's box; the box that runs the repository's code has a different token, so the firewall is no longer the only thing between it and the agent's tools and exec port
 - **A box sees only its own folders:** its workspace, its Claude folder (the agent box only) and its repository's git folder read-only, as bind mounts in its OCI spec. Nothing else of the host.
 - **A box can't make T3 run its code.** T3's server runs git in the worktrees, as the box's user. The box gets the main repository's git folder read-only, and the worktree's `.git` file read-only too, so it can't point git at a folder whose config runs commands (such as `core.fsmonitor`). `fern-claude` never runs Claude in T3's process for a folder in the pool's worktrees. Checked by `lab/check.sh t3`.
 - **Isolation:** gVisor, a non-root user, no capabilities, `no_new_privs`, a read-only root, cgroup limits (§10).
@@ -423,10 +424,10 @@ The threat model is in [briefs/claude-outside-the-box.md](briefs/claude-outside-
   - Claude's login (`CLAUDE_CODE_OAUTH_TOKEN`) is in `/etc/fern/claude.env`, which only root reads; the daemon reads it at every wake and gives it, as an environment variable, only to the box that runs Claude (§13.1). It is never in the index or a workspace
   - **never in a workspace, golden or snapshot.** Claude's state lives in `envs/<id>/claude/`, outside the workspace; with the login in its environment Claude writes no credentials file. A golden builder's box gets no login (§7.5)
   - GitHub (built): T3's server pushes and opens pull requests, never a box (the repository's git folder is read-only there). Its git asks `fern git-credential` (set in `fern-t3.service`) and its `gh` asks `fern github-token` (`images/fern-gh`) for a token; the daemon mints it from the person's GitHub App (`internal/github`; its ID and key in `/etc/fern/github-app/`, root only): for the one repository, with contents and pull requests only, for an hour, renewed five minutes before. The request goes over the API's socket, which boxes can't reach, so no token is in a box, a workspace or a snapshot. Without an App, or one installed on the repository, git and gh go on without a token. `lab/check.sh github` checks it against a fake GitHub.
-  - forks get no credentials (built: an empty Claude folder, their own box token); planned: fresh secrets in the identity hook
+  - forks get no credentials (built: an empty Claude folder, and a token of their own as every box has); planned: fresh secrets in the identity hook
 - **The boxes' network:** an nftables table of their own (`inet fern`, replaced whole in one transaction at every daemon start) drops what boxes send to private, shared, loopback, link-local and multicast ranges and everything they send to the node except answers; only the daemon, on the node, connects to a box. Agent boxes alone may reach the daemon's MCP port. Boxes resolve names with public resolvers (`--box-dns`). Checked by `lab/check.sh`: another box, the node's ports (T3, the daemon's metrics) and the metadata address time out; the internet answers.
 - **The machine's network:** T3's port must never be public, as anyone who reaches it uses the owner's subscription (§13.1). On a VPS, `lab/vps.sh` installs a firewall (`inet fern_host`, a table of its own) that lets in only SSH; reach T3 through an SSH tunnel or a tailnet. The daemon's metrics and profiles listen on localhost.
-- **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces inside gVisor aren't set up.
+- **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); a box's own token is readable in `/proc` by that box's processes, in fern-init's first environment (it opens only that box's fern-init, which they are already inside of, and for an agent box that environment's tools, which its agent has anyway; it is no longer in Claude's arguments); the Cloudflare token, where one is set up, is still in the agent's arguments; user namespaces inside gVisor aren't set up.
 - **Isolation levels by class (planned):** gVisor → micro-VM.
 
 ### 13.1 Subscription terms

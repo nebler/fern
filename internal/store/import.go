@@ -31,7 +31,7 @@ func (s *Store) importIndex(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	// The index holds every box token, and so does the copy kept of it.
+	// The index held every box token, and so does the copy kept of it.
 	if err := os.Chmod(filepath.Dir(old), 0o700); err != nil {
 		return err
 	}
@@ -53,7 +53,9 @@ func (s *Store) importRows(ctx context.Context, old string) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, db.Close()) }()
-	rows, err := db.QueryContext(ctx, `SELECT id, workspace, git, created_at, box_token FROM environments`)
+	// Its box tokens aren't read: a box's token is made at its start now, and
+	// a box running since before answers to the one in its bundle.
+	rows, err := db.QueryContext(ctx, `SELECT id, workspace, git, created_at FROM environments`)
 	if err != nil {
 		return err
 	}
@@ -62,7 +64,7 @@ func (s *Store) importRows(ctx context.Context, old string) (err error) {
 		var id string
 		var created int64
 		var rec record
-		if err := rows.Scan(&id, &rec.Workspace, &rec.Git, &created, &rec.BoxToken); err != nil {
+		if err := rows.Scan(&id, &rec.Workspace, &rec.Git, &created); err != nil {
 			return err
 		}
 		if CheckEnvID(id) != nil {

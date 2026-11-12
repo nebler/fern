@@ -15,7 +15,7 @@ import (
 
 var env = store.Env{
 	ID: "demo", Workspace: "/pool/worktrees/r/demo", Claude: "/pool/envs/demo/claude",
-	Git: "/pool/repos/r/.git", BoxToken: "tok",
+	Git: "/pool/repos/r/.git",
 }
 
 // mounts returns the spec's bind mounts as destination: options.
@@ -33,7 +33,7 @@ func TestBoxSpec(t *testing.T) {
 	box := Box{ID: env.ID, Kind: Services, Env: env}
 	b := newLayout("/run/boxes", "/pool", box.ID)
 	lim := Limits{CPUs: 1.5, Memory: 3 << 30, Pids: 500}
-	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login", 7071), lim)
+	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "tok", "login", 7071), lim)
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
@@ -96,7 +96,7 @@ func TestBoxVars(t *testing.T) {
 			if tc.box.Env.Claude != "" {
 				login = "login" // Wake reads it only for a box with Claude
 			}
-			got := boxVars(tc.box, "w1", login, 7071)[3:]
+			got := boxVars(tc.box, "w1", "tok", login, 7071)[3:]
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("vars (-want +got):\n%s", diff)
 			}

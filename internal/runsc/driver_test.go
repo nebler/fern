@@ -3,7 +3,9 @@ package runsc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -136,7 +138,7 @@ func TestSleep(t *testing.T) {
 				}
 			}
 			box := Box{ID: "demo", Env: env}
-			config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "", 7071), DefaultLimits))
+			config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "tok", "", 7071), DefaultLimits))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -361,4 +363,35 @@ func TestAdopt(t *testing.T) {
 			t.Errorf("adopt() gave up after %s, want about %s", took, adoptSilence)
 		}
 	})
+}
+
+// A box's token is what its bundle holds: the file its start wrote, or for a
+// box started before there was one, the variable in its spec. A box that
+// isn't running has none.
+func TestToken(t *testing.T) {
+	d := newTestDriver(t)
+	if got, err := d.Token("demo"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Token of a box that isn't running = %q, %v; want %v", got, err, fs.ErrNotExist)
+	}
+	b := d.layout("demo")
+	if err := os.MkdirAll(b.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	box := Box{ID: "demo", Env: env}
+	config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "from-the-spec", "", 7071), DefaultLimits))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.dir, "config.json"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Token("demo"); err != nil || got != "from-the-spec" {
+		t.Errorf("Token of a box started before the file = %q, %v; want the spec's", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(b.dir, tokenFile), []byte("from-the-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Token("demo"); err != nil || got != "from-the-file" {
+		t.Errorf("Token = %q, %v; want the file's", got, err)
+	}
 }

@@ -240,7 +240,7 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 	return g.do(ctx, "wake", id, func(ctx context.Context, a *actor) error {
 		// A person asks: a box that kept crashing gets another try.
 		a.crashes = nil
-		if _, err := a.wake(ctx); err != nil {
+		if err := a.wake(ctx); err != nil {
 			return err
 		}
 		a.endLease("used")

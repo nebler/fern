@@ -81,7 +81,7 @@ func (s *Server) MCPHandler() http.Handler {
 	}
 	mux.HandleFunc("/mcp/{id}", func(w http.ResponseWriter, r *http.Request) {
 		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !s.hasBoxToken(r.Context(), r.PathValue("id"), token) {
+		if !s.hasBoxToken(r.PathValue("id"), token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -110,11 +110,18 @@ func (s *Server) MCPHandler() http.Handler {
 	return mux
 }
 
-// hasBoxToken says whether token is environment id's box token: the same
-// answer whether or not the environment exists.
-func (s *Server) hasBoxToken(ctx context.Context, id, token string) bool {
-	env, err := s.store.Get(ctx, id)
-	return err == nil && env.BoxToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(env.BoxToken)) == 1
+// hasBoxToken says whether token is the token of environment id's running
+// agent box, the only box these routes are for: the same answer whether the
+// token is wrong, the box asleep or the environment unknown. The token was
+// made when that box started and ends with it, and the box that runs the
+// repository's code has another.
+func (s *Server) hasBoxToken(id, token string) bool {
+	// The ID becomes a path in the driver.
+	if store.CheckEnvID(id) != nil {
+		return false
+	}
+	want, err := s.driver.Token(store.AgentBox(id))
+	return err == nil && want != "" && subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
 }
 
 // t3Handler passes an agent box's calls to T3's own MCP server on to T3, at
@@ -139,7 +146,7 @@ func (s *Server) t3Handler() http.Handler {
 			http.Error(w, "T3's address: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if !s.hasBoxToken(r.Context(), r.PathValue("id"), r.Header.Get(boxexec.BoxTokenHeader)) {
+		if !s.hasBoxToken(r.PathValue("id"), r.Header.Get(boxexec.BoxTokenHeader)) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

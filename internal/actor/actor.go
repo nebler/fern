@@ -48,6 +48,8 @@ type Store interface {
 // Driver runs boxes.
 type Driver interface {
 	Wake(ctx context.Context, box runsc.Box) (addr string, err error)
+	// Token returns the token a running box was started with.
+	Token(id string) (string, error)
 	Sleep(ctx context.Context, id string) error
 	States(ctx context.Context) (map[string]runsc.State, error)
 }
@@ -379,6 +381,7 @@ type actor struct {
 
 	phase boxPhase // what is known of the box
 	addr  string   // boxUp: the box's exec address
+	token string   // boxUp: the token it was started with
 	wakes int      // how often this actor has woken the box: a command names the wake it ran in when it reports the box dead
 	// running is everything counted as running in the box, by number: the
 	// one list of what holds it. A command or a preview request keeps it
@@ -447,18 +450,18 @@ func (a *actor) handle(ctx context.Context, m message) {
 	m.reply <- m.fn(ctx, a)
 }
 
-// wake returns the record of the environment a's box belongs to once the
-// box is up, waking it unless it is known to be.
-func (a *actor) wake(ctx context.Context) (store.Env, error) {
+// wake returns once a's box is up, at a.addr with a.token, waking it unless
+// it is known to be.
+func (a *actor) wake(ctx context.Context) error {
 	env, err := a.g.store.Get(ctx, store.EnvOfBox(a.id))
 	if err != nil {
-		return store.Env{}, err
+		return err
 	}
 	if a.phase == boxUp {
-		return env, nil
+		return nil
 	}
 	if a.crashes = recent(a.crashes); len(a.crashes) >= crashLimit {
-		return store.Env{}, fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, and is woken again after %s, or by fern wake; "+
+		return fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, and is woken again after %s, or by fern wake; "+
 			"its log is boxes/%s/log in the pool", a.id, ErrCrashing, len(a.crashes), crashWindow,
 			a.crashes[0].Add(crashWindow).Format(time.TimeOnly), a.id)
 	}
@@ -475,10 +478,16 @@ func (a *actor) wake(ctx context.Context) (store.Env, error) {
 	observe(a.g.wakes, start, &err)
 	if err != nil {
 		a.crashes = append(a.crashes, time.Now())
-		return store.Env{}, err
+		return err
+	}
+	// The driver made the token at the box's start, or kept it since.
+	token, err := a.g.driver.Token(a.id)
+	if err != nil {
+		a.crashes = append(a.crashes, time.Now())
+		return fmt.Errorf("the token of %s: %w", a.id, err)
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
-	a.phase, a.addr = boxUp, addr
+	a.phase, a.addr, a.token = boxUp, addr, token
 	a.wakes++
 	if a.g.cfg.Woken != nil && store.EnvOfBox(a.id) == a.id && !setup.IsBuilder(a.id) {
 		select {
@@ -487,7 +496,7 @@ func (a *actor) wake(ctx context.Context) (store.Env, error) {
 		}
 	}
 	a.watch(ctx, env.Workspace)
-	return env, nil
+	return nil
 }
 
 // stopBox stops the box, then cancels the commands still counted as running
@@ -495,7 +504,7 @@ func (a *actor) wake(ctx context.Context) (store.Env, error) {
 func (a *actor) stopBox(ctx context.Context) error {
 	// A stop that fails may have stopped it all the same.
 	if a.phase == boxUp {
-		a.phase, a.addr = boxMaybeUp, ""
+		a.phase, a.addr, a.token = boxMaybeUp, "", ""
 	}
 	// Started again by the next wake.
 	if a.stopWatch != nil {

@@ -62,7 +62,7 @@ func (g *Group) prewake(ctx context.Context, id string) {
 		// Set first, so that a wake that fails half-way, leaving the box
 		// running, still ends with the lease.
 		a.lease = lease{leasePrewaking, time.Now().Add(g.cfg.Idle.Prewake)}
-		if _, err := a.wake(ctx); err != nil {
+		if err := a.wake(ctx); err != nil {
 			if a.phase == boxAsleep {
 				a.lease = lease{}
 			}
