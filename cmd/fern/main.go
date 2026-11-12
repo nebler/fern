@@ -29,6 +29,7 @@
 //	                                         token from the daemon's GitHub App
 //	fern github-token [owner/repo]           print a token for the repository, or the
 //	                                         one origin names (T3's gh wrapper)
+//	fern github-token --account [name]       … for an account the App is installed on
 //	fern backup                              back up the node's threads now (install.sh
 //	                                         sets backups up; they run hourly)
 //	fern doctor                              check the node Fern runs on, as root on it,
@@ -110,6 +111,7 @@ type command struct {
 	environ []string      // exec -e, as NAME=VALUE
 	idle    time.Duration // exec --hibernate
 	agent   bool          // exec --agent
+	account bool          // github-token --account
 	argv    []string      // exec: the command
 }
 
@@ -156,7 +158,9 @@ func subcommands() []subcommand {
 		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
 		{name: "why", min: 1, max: 1, run: why},
 		{name: "git-credential", min: 1, max: 1, run: gitCredential},
-		{name: "github-token", max: 1, run: githubToken},
+		{name: "github-token", max: 1, run: githubToken, flags: func(fs *flag.FlagSet, c *command) {
+			fs.BoolVar(&c.account, "account", false, "a token for an account the App is installed on, the one named or the only one, not for a repository")
+		}},
 		{name: "doctor", run: doctor},
 		{name: "df", run: diskUsage},
 		{name: "gc", run: collect},

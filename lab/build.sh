@@ -33,7 +33,18 @@ if [ "$t3" = yes ]; then install_units t3; else install_units; fi
 restart_daemon
 echo "restarted the daemon"
 if [ "$t3" = yes ]; then
-  on_node systemctl restart fern-t3 </dev/null
-  wait_t3
-  echo "restarted T3's server"
+  # The daemon's restart carries running turns on; T3's ends them. On a VPS,
+  # where someone's thread may be working, wait for the turns (FERN_DRAIN
+  # seconds, 600), and leave T3 running its image from before if they don't
+  # end: a thread worked for eight hours on 2026-11-12 with a day's fixes
+  # waiting on it. FERN_DRAIN=0 restarts it whatever runs, as the lab does.
+  drain=${FERN_DRAIN:-$([ -n "$FERN_HOST" ] && echo 600 || echo 0)}
+  if [ "$drain" = 0 ] || turns_end "$drain"; then
+    on_node systemctl restart fern-t3 </dev/null
+    wait_t3
+    echo "restarted T3's server"
+  else
+    echo "T3's server was NOT restarted: a thread is still working. It runs its image from before;" \
+      "run lab/build.sh again when the thread is idle, or with FERN_DRAIN=0 to end its turn."
+  fi
 fi

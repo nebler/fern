@@ -1,11 +1,25 @@
 #!/bin/sh
 # fern-gh is `gh` on the PATH of Fern's T3 image, which T3 runs for pull
-# requests. It gives GitHub's CLI a token for the repository T3 runs it in,
-# from the daemon's GitHub App (fern github-token): one repository, one
-# hour. Without an App, or one installed on the repository, gh runs as it
-# would anyway, with no token.
+# requests. It gives GitHub's CLI a token from the daemon's GitHub App (fern
+# github-token), for an hour: in a repository, for that repository alone.
+# T3 also asks for its GitHub credential once for the host, in its own
+# folder and no repository (`gh auth token --hostname github.com`), and uses
+# it for every thread's pull requests: there the token is for the account
+# the App is installed on, the one --user names if T3 names one. Until
+# 2026-11-12 that call got nothing, T3 had no GitHub credential, and its
+# pull request lookups failed once a minute for every thread. Without an
+# App, or one installed where it is asked for, gh runs as it would anyway,
+# with no token.
 set -eu
-if [ -z "${GH_TOKEN:-}" ] && token=$(/usr/local/bin/fern github-token 2>/dev/null); then
-	export GH_TOKEN="$token"
+if [ -z "${GH_TOKEN:-}" ]; then
+	user='' prev=''
+	for arg in "$@"; do
+		if [ "$prev" = --user ]; then user=$arg; fi
+		prev=$arg
+	done
+	if token=$(/usr/local/bin/fern github-token 2>/dev/null) ||
+		token=$(/usr/local/bin/fern github-token --account ${user:+"$user"} 2>/dev/null); then
+		export GH_TOKEN="$token"
+	fi
 fi
 exec /usr/local/libexec/gh "$@"

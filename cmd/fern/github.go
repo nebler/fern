@@ -44,8 +44,22 @@ func gitCredential(ctx context.Context, c command, cl *api.Client, std stdio) (i
 
 // githubToken prints a token for a GitHub repository, owner/repo, or the
 // one the current directory's origin remote names: fern github-token. T3's
-// gh wrapper passes it on as GH_TOKEN.
+// gh wrapper passes it on as GH_TOKEN. With --account it prints one for an
+// account the App is installed on, the one named or the only one: what T3
+// gets when it asks for its credential outside any repository.
 func githubToken(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	if c.account {
+		account := ""
+		if len(c.args) > 0 {
+			account = c.args[0]
+		}
+		token, err := cl.GitHubAccountToken(ctx, account)
+		if err != nil {
+			return 1, err
+		}
+		_, err = fmt.Fprintln(std.out, token)
+		return 0, err
+	}
 	repo := ""
 	if len(c.args) > 0 {
 		repo = c.args[0]

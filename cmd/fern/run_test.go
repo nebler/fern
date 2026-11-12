@@ -78,8 +78,12 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		})
 	})
 	mux.HandleFunc("POST /github/token", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Repository string }
+		var req struct{ Repository, Account string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Repository == "" && req.Account != "elsewhere" {
+			reply(w, map[string]string{"token": "ghs_account"})
+			return
+		}
 		if req.Repository != "owner/app" {
 			w.WriteHeader(http.StatusNotFound)
 			reply(w, api.Error{Message: "the GitHub App isn't installed on this repository"})

@@ -720,6 +720,12 @@ bye" "$(cat "$out")"
       -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$call" "http://127.0.0.1:7072/mcp/$ENV")
     check "a tool call's answer begins while its command runs, as a stream" "yes yes text/event-stream" \
       "$(awk '{ print ($1 < 2 ? "yes" : "no"), ($2 >= 4 ? "yes" : "no"), $3 }' <<<"$began")"
+    # Claude waits for a build with one call, not by looking again and again.
+    local job waited
+    job=$(mcp $ENV Bash '{"command": "sleep 3; echo built", "run_in_background": true}' | grep -o 'bash_[a-z0-9]*')
+    waited=$(mcp $ENV BashOutput "{\"bash_id\": \"$job\", \"wait_seconds\": 60}")
+    check "BashOutput waits for a background command to end, and has its output" "yes yes" \
+      "$(grep -q 'exited with code 0' <<<"$waited" && echo yes || echo no) $(grep -q built <<<"$waited" && echo yes || echo no)"
   else
     note "skipped the Bash call: no agent boxes (lab/boxes.sh agents)"
   fi
@@ -1740,12 +1746,24 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type', 'application/json'); self.end_headers()
         self.wfile.write(json.dumps(body).encode())
     def do_GET(self):
-        ok = self.path == '/repos/owner/app/installation' and self.headers.get('Authorization', '').startswith('Bearer ey')
-        self.reply(200, {'id': 42}) if ok else self.reply(404, {'message': 'Not Found'})
+        if not self.headers.get('Authorization', '').startswith('Bearer ey'):
+            self.reply(401, {'message': 'Bad credentials'})
+        elif self.path == '/repos/owner/app/installation':
+            self.reply(200, {'id': 42})
+        elif self.path.startswith('/app/installations?'):
+            self.reply(200, [{'id': 42, 'account': {'login': 'owner'}, 'permissions': {'contents': 'write', 'pull_requests': 'write'}}])
+        else:
+            self.reply(404, {'message': 'Not Found'})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        ok = self.path == '/app/installations/42/access_tokens' and body['repositories'] == ['app']
-        self.reply(201, {'token': 'ghs_check', 'expires_at': '2099-01-01T00:00:00Z'}) if ok else self.reply(400, {})
+        if self.path != '/app/installations/42/access_tokens':
+            self.reply(400, {})
+        elif body.get('repositories') == ['app']:
+            self.reply(201, {'token': 'ghs_check', 'expires_at': '2099-01-01T00:00:00Z'})
+        elif 'repositories' not in body:
+            self.reply(201, {'token': 'ghs_account', 'expires_at': '2099-01-01T00:00:00Z'})
+        else:
+            self.reply(400, {})
     def log_message(self, *a): pass
 http.server.HTTPServer(('127.0.0.1', 18080), H).serve_forever()
 PY
@@ -1758,6 +1776,10 @@ PY
     "$(in_t3 "${ask/owner\/app/owner/other} </dev/null 2>/dev/null; true" 2>&1 | grep '^password=' || true)"
   check "T3's gh gets one through its wrapper" ghs_check "$(in_t3 'fern github-token owner/app' 2>&1)"
   check "T3's image has GitHub's CLI" yes "$(succeeds in_t3 'gh --version >/dev/null')"
+  # T3 asks for its GitHub credential this way, in its own folder, once for
+  # the host, and uses it for every thread's pull requests.
+  check "T3's own question for a credential gets the account's token" ghs_account \
+    "$(in_t3 'cd /opt/t3 && gh auth token --hostname github.com' 2>&1)"
   set_daemon_args $args
   in_daemon "pkill -f $dir/fake.py; rm -rf $dir"
 }

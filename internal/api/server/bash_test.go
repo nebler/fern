@@ -374,6 +374,50 @@ func TestBashBackgroundEndedBeforeASleep(t *testing.T) {
 	}
 }
 
+// BashOutput with wait_seconds answers when the command has ended, with all
+// it printed, or after that long with what it has: one call where Claude
+// made 208 with sleep in a day's thread (VPS, 2026-11-12).
+func TestBashOutputWaits(t *testing.T) {
+	url, _, _ := newMCP(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	start := func(command string) string {
+		return jobID.FindString(call(t, s, "Bash", map[string]any{"command": command, "run_in_background": true}))
+	}
+
+	began := time.Now()
+	ends := start("sleep 1; echo built; exit 3")
+	got := call(t, s, "BashOutput", map[string]any{"bash_id": ends, "wait_seconds": 60})
+	if !strings.Contains(got, "exited with code 3") || !strings.Contains(got, "built") {
+		t.Errorf("BashOutput that waited = %q, want the command's end and its output", got)
+	}
+	if took := time.Since(began); took < time.Second || took > 30*time.Second {
+		t.Errorf("BashOutput waited %s for a command of 1 s, want about that", took)
+	}
+
+	began = time.Now()
+	runs := start("echo up; sleep 300")
+	got = call(t, s, "BashOutput", map[string]any{"bash_id": runs, "wait_seconds": 1})
+	if !strings.Contains(got, "is running") {
+		t.Errorf("BashOutput after its wait = %q, want the command still running", got)
+	}
+	if took := time.Since(began); took < time.Second || took > 30*time.Second {
+		t.Errorf("BashOutput answered after %s, want after its 1 s", took)
+	}
+	call(t, s, "KillShell", map[string]any{"shell_id": runs})
+	// One that has ended answers at once, however long it may wait.
+	began = time.Now()
+	if got := call(t, s, "BashOutput", map[string]any{"bash_id": runs, "wait_seconds": 60}); !strings.Contains(got, "is killed") {
+		t.Errorf("BashOutput of a killed command = %q", got)
+	}
+	if took := time.Since(began); took > 10*time.Second {
+		t.Errorf("BashOutput of an ended command took %s, want no wait", took)
+	}
+}
+
 type keyed struct{ token, key string }
 
 func (k keyed) RoundTrip(r *http.Request) (*http.Response, error) {

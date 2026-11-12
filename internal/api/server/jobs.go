@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/nebler/fern/internal/actor"
@@ -36,6 +37,7 @@ type job struct {
 	id     string
 	box    boxexec.JobClient
 	cancel context.CancelFunc // ends the watch of the job, not the job
+	done   chan struct{}      // closed when the job's watch has ended, its state set
 	state  atomic.Int32       // a jobState, set once by the job's watch as it ends
 	killed atomic.Bool        // KillShell stopped it: the agent's call, after which the box lingers as after a Bash call
 
@@ -148,7 +150,7 @@ func (s *Server) openJob(ctx context.Context, id, jobID string) (*job, *actor.Ex
 		cancel()
 		return nil, nil, nil, err
 	}
-	j := &job{id: jobID, box: boxexec.JobClient{HC: s.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel}
+	j := &job{id: jobID, box: boxexec.JobClient{HC: s.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel, done: make(chan struct{})}
 	return j, ex, wctx, nil
 }
 
@@ -192,6 +194,7 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 	s.jobs.mu.Unlock()
 	s.jobs.wg.Go(func() {
 		defer j.cancel()
+		defer close(j.done)
 		defer func() {
 			if j.killed.Load() {
 				ex.CloseAndSleep(bashLinger)
@@ -229,11 +232,25 @@ func (s *Server) findJob(id, jobID string) (*job, error) {
 }
 
 // readJob returns environment id's job jobID's output since the last read,
-// and whether it runs.
-func (s *Server) readJob(ctx context.Context, id, jobID string) (string, error) {
+// and whether it runs, once it has ended or wait has passed, whichever is
+// first. Someone waiting counts as a command of the box, so the box stays
+// up meanwhile: a job alone doesn't hold it past its idle times, and a build
+// Claude waits ten minutes for would end with the box's sleep after five.
+func (s *Server) readJob(ctx context.Context, id, jobID string, wait time.Duration) (string, error) {
 	j, err := s.findJob(id, jobID)
 	if err != nil {
 		return "", err
+	}
+	if wait > 0 && j.is(jobWatching) {
+		wctx, cancel := context.WithTimeout(ctx, min(wait, bashMaxTimeout))
+		if ex, err := s.envs.Exec(wctx, id, cancel); err == nil {
+			select {
+			case <-j.done:
+			case <-wctx.Done():
+			}
+			ex.CloseAndSleep(bashLinger)
+		}
+		cancel()
 	}
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil // without a call to a box that isn't there

@@ -82,7 +82,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
-		_, _ = fmt.Fprint(w, `[{"account": {"login": "owner"}, "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read", "secrets": "read"}}]`)
+		_, _ = fmt.Fprint(w, `[{"id": 42, "account": {"login": "owner"}, "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read", "secrets": "read"}}]`)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/app/installation":
 		_, _ = fmt.Fprint(w, `{"id": 42}`)
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/installation"):
@@ -189,6 +189,33 @@ func TestToken(t *testing.T) {
 	}
 }
 
+// T3 asks for its credential outside any repository: a token for the
+// account the App is installed on, all its repositories, with the same
+// permissions.
+func TestAccountToken(t *testing.T) {
+	app, fake := newApp(t, time.Hour)
+	tok, err := app.AccountToken(t.Context(), "")
+	if err != nil || tok.Token != "ghs_1" {
+		t.Fatalf("AccountToken() = %+v, %v; want ghs_1", tok, err)
+	}
+	want := []map[string]any{{
+		"permissions": map[string]any{"contents": "write", "pull_requests": "write", "metadata": "read", "workflows": "write"},
+	}}
+	if diff := cmp.Diff(want, fake.requests()); diff != "" {
+		t.Errorf("token request (-want +got):\n%s", diff)
+	}
+	if tok, err := app.AccountToken(t.Context(), "Owner"); err != nil || tok.Token != "ghs_1" {
+		t.Errorf("AccountToken(Owner) = %+v, %v; want the cached ghs_1", tok, err)
+	}
+	if _, err := app.AccountToken(t.Context(), "someone-else"); !errors.Is(err, github.ErrNoAccount) {
+		t.Errorf("AccountToken() of an account without the App error = %v, want ErrNoAccount", err)
+	}
+	// A repository's token is its own, not the account's.
+	if tok, err := app.Token(t.Context(), "owner", "app"); err != nil || tok.Token != "ghs_2" {
+		t.Errorf("Token() after AccountToken = %+v, %v; want a new one, ghs_2", tok, err)
+	}
+}
+
 // An App that may not change workflows still gets a token, without them.
 func TestTokenWithoutWorkflows(t *testing.T) {
 	app, fake := newApp(t, time.Hour)
@@ -280,6 +307,8 @@ func TestHandler(t *testing.T) {
 	}{
 		{"a token", app, `{"repository": "owner/app.git"}`, http.StatusOK},
 		{"not installed", app, `{"repository": "owner/other"}`, http.StatusNotFound},
+		{"the account's token", app, `{}`, http.StatusOK},
+		{"an account without the App", app, `{"account": "someone-else"}`, http.StatusNotFound},
 		{"a bad name", app, `{"repository": "owner/a b"}`, http.StatusBadRequest},
 		{"no App set up", nil, `{"repository": "owner/app"}`, http.StatusNotFound},
 	}

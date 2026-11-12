@@ -43,7 +43,8 @@ type bashInput struct {
 // bashOutputInput and killShellInput name a background command.
 type (
 	bashOutputInput struct {
-		ID string `json:"bash_id" jsonschema:"the ID Bash gave the background command"`
+		ID   string `json:"bash_id" jsonschema:"the ID Bash gave the background command"`
+		Wait int    `json:"wait_seconds,omitempty" jsonschema:"answer when the command has ended, or after this many seconds, whichever is first; at most 600. 0 answers at once"`
 	}
 	killShellInput struct {
 		ID string `json:"shell_id" jsonschema:"the ID Bash gave the background command"`
@@ -194,7 +195,9 @@ func (s *Server) bashServer(id string) *mcp.Server {
 			"in the workspace, and returns what it printed and its exit code. Use it as you would Bash. " +
 			"Every command starts in the workspace: put a cd in the same command if you need another folder. " +
 			"Run servers that must keep running, such as `npm run dev`, with run_in_background: they keep running " +
-			"after your turn, until KillShell stops them or the box sleeps, 20 minutes after its last use.",
+			"after your turn, until KillShell stops them or the box sleeps, 20 minutes after its last use. " +
+			"A command stops at its timeout, 10 minutes at most: run a longer build or test run with run_in_background " +
+			"too, and wait for it with BashOutput's wait_seconds, not with sleep.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in bashInput) (*mcp.CallToolResult, any, error) {
 		if in.Background {
 			jobID, err := s.startJob(ctx, id, in, callKey(req))
@@ -218,11 +221,13 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		return res, nil, nil
 	})
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "BashOutput",
-		Meta:        alwaysLoad(),
-		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs.",
+		Name: "BashOutput",
+		Meta: alwaysLoad(),
+		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs. " +
+			"With wait_seconds it answers when the command has ended, or after that long: wait for a build or a test run " +
+			"this way, with one call for up to ten minutes, instead of looking again and again with sleep.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
-		text, err := s.readJob(ctx, id, in.ID)
+		text, err := s.readJob(ctx, id, in.ID, time.Duration(in.Wait)*time.Second)
 		if err != nil {
 			return toolError(err), nil, nil
 		}

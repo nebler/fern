@@ -74,6 +74,24 @@ func (c *Client) GitHubToken(ctx context.Context, repository string) (string, er
 	return t.Token, nil
 }
 
+// GitHubAccountToken returns a token for every repository the daemon's
+// GitHub App is installed on in account, or in the only account it is
+// installed on if account is "". An *Error with status 404 means no App is
+// set up, or there is no one such account.
+func (c *Client) GitHubAccountToken(ctx context.Context, account string) (string, error) {
+	body, err := json.Marshal(map[string]string{"account": account})
+	if err != nil {
+		return "", err
+	}
+	var t struct {
+		Token string `json:"token"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/github/token", bytes.NewReader(body), "application/json", &t); err != nil {
+		return "", err
+	}
+	return t.Token, nil
+}
+
 // Backup makes a backup of the node's threads now, as the hourly ones do,
 // and returns once it is done. An *Error with status 404 means no backups
 // are set up.

@@ -42,6 +42,18 @@ func TestGitHubToken(t *testing.T) {
 	if code := run(t.Context(), d.socket, []string{"github-token", "owner/other"}, nil, &out, &errOut); code != 1 {
 		t.Errorf("fern github-token of a repository without the App = %d, want 1", code)
 	}
+	// What T3's gh gets outside a repository: the account's.
+	out.Reset()
+	if code := run(t.Context(), d.socket, []string{"github-token", "--account"}, nil, &out, &errOut); code != 0 || out.String() != "ghs_account\n" {
+		t.Errorf("fern github-token --account = %d, %q (%s); want 0, ghs_account", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := run(t.Context(), d.socket, []string{"github-token", "--account", "owner"}, nil, &out, &errOut); code != 0 || out.String() != "ghs_account\n" {
+		t.Errorf("fern github-token --account owner = %d, %q; want 0, ghs_account", code, out.String())
+	}
+	if code := run(t.Context(), d.socket, []string{"github-token", "--account", "elsewhere"}, nil, &out, &errOut); code != 1 {
+		t.Errorf("fern github-token --account of an account without the App = %d, want 1", code)
+	}
 }
 
 func TestGitHubRepository(t *testing.T) {

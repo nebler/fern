@@ -39,6 +39,11 @@ import (
 // repository doesn't exist.
 var ErrNotInstalled = errors.New("the GitHub App isn't installed on this repository")
 
+// ErrNoAccount means a token was asked for an account, not a repository,
+// and the App is installed on none by that name, or on several when none
+// was named.
+var ErrNoAccount = errors.New("no one account to give a token for")
+
 // ErrBadRepository means a name that can't be a GitHub repository's.
 var ErrBadRepository = errors.New("not a repository")
 
@@ -61,7 +66,7 @@ type App struct {
 	hc   *http.Client
 
 	mu     sync.Mutex
-	tokens map[string]Token // by owner/repo
+	tokens map[string]Token // by owner/repo, or "@account" for an account's
 }
 
 // API is GitHub's API.
@@ -154,6 +159,57 @@ func (a *App) Token(ctx context.Context, owner, repo string) (Token, error) {
 	return t, nil
 }
 
+// AccountToken returns a token for every repository the App is installed on
+// in account, or in the one account it is installed on if account is "".
+// T3's server asks for its GitHub credential once for the host, in no
+// repository (`gh auth token`), and uses it for every thread's pull
+// requests: a token for one repository can't answer that. It is no more
+// than T3 can already get, a repository at a time (Token), and it has the
+// same permissions and the same hour.
+func (a *App) AccountToken(ctx context.Context, account string) (Token, error) {
+	installations, err := a.Installations(ctx)
+	if err != nil {
+		return Token{}, err
+	}
+	var found []Installation
+	for _, inst := range installations {
+		if account == "" || strings.EqualFold(inst.Account, account) {
+			found = append(found, inst)
+		}
+	}
+	if len(found) != 1 {
+		var accounts []string
+		for _, inst := range installations {
+			accounts = append(accounts, inst.Account)
+		}
+		return Token{}, fmt.Errorf("%w: asked for %q, and the App is installed on %q", ErrNoAccount, account, accounts)
+	}
+	inst := found[0]
+	key := "@" + strings.ToLower(inst.Account)
+	a.mu.Lock()
+	t, ok := a.tokens[key]
+	a.mu.Unlock()
+	if ok && time.Until(t.Expires) > renewBefore {
+		return t, nil
+	}
+	jwt, err := a.jwt()
+	if err != nil {
+		return Token{}, err
+	}
+	path := fmt.Sprintf("/app/installations/%d/access_tokens", inst.id)
+	err = a.call(ctx, http.MethodPost, path, jwt, map[string]any{"permissions": gitPermissions}, &t)
+	if errors.Is(err, ErrNotGranted) {
+		err = a.call(ctx, http.MethodPost, path, jwt, map[string]any{"permissions": gitPermissionsNoCI}, &t)
+	}
+	if err != nil {
+		return Token{}, err
+	}
+	a.mu.Lock()
+	a.tokens[key] = t
+	a.mu.Unlock()
+	return t, nil
+}
+
 // mint returns a new token for owner/repo with permissions, narrower than
 // the App: this repository and only what it is for.
 func (a *App) mint(ctx context.Context, owner, repo string, permissions map[string]string) (Token, error) {
@@ -216,6 +272,7 @@ func (a *App) SetSecret(ctx context.Context, owner, repo, secret, value string) 
 type Installation struct {
 	Account     string
 	Permissions map[string]string // such as "secrets": "write"
+	id          int64
 }
 
 // Lacks returns which of what Fern uses the installation lacks, by the
@@ -242,6 +299,7 @@ func (a *App) Installations(ctx context.Context) ([]Installation, error) {
 		return nil, err
 	}
 	var out []struct {
+		ID      int64 `json:"id"`
 		Account struct {
 			Login string `json:"login"`
 		} `json:"account"`
@@ -252,7 +310,7 @@ func (a *App) Installations(ctx context.Context) ([]Installation, error) {
 	}
 	installations := make([]Installation, len(out))
 	for i, o := range out {
-		installations[i] = Installation{Account: o.Account.Login, Permissions: o.Permissions}
+		installations[i] = Installation{Account: o.Account.Login, Permissions: o.Permissions, id: o.ID}
 	}
 	return installations, nil
 }
@@ -317,9 +375,11 @@ func (a *App) call(ctx context.Context, method, path, bearer string, in, out any
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// TokenRequest asks the daemon for a token: POST /github/token.
+// TokenRequest asks the daemon for a token: POST /github/token. Without a
+// repository it asks for an account's (AccountToken).
 type TokenRequest struct {
-	Repository string `json:"repository"` // owner/repo
+	Repository string `json:"repository,omitempty"` // owner/repo
+	Account    string `json:"account,omitempty"`    // with no repository: the account, or "" for the only one
 }
 
 // Handler serves POST /github/token for app; with no App, every request is
@@ -340,13 +400,21 @@ func Handler(app *App) http.Handler {
 			fail(http.StatusBadRequest, err)
 			return
 		}
-		owner, repo, _ := strings.Cut(req.Repository, "/")
-		t, err := app.Token(r.Context(), owner, strings.TrimSuffix(repo, ".git"))
+		var t Token
+		var err error
+		if req.Repository == "" {
+			t, err = app.AccountToken(r.Context(), req.Account)
+		} else {
+			owner, repo, _ := strings.Cut(req.Repository, "/")
+			t, err = app.Token(r.Context(), owner, strings.TrimSuffix(repo, ".git"))
+		}
 		switch {
 		case errors.Is(err, ErrBadRepository):
 			fail(http.StatusBadRequest, err)
 		case errors.Is(err, ErrNotInstalled):
 			fail(http.StatusNotFound, fmt.Errorf("%s: %w", req.Repository, err))
+		case errors.Is(err, ErrNoAccount):
+			fail(http.StatusNotFound, err)
 		case err != nil:
 			fail(http.StatusBadGateway, err)
 		default:

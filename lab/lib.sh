@@ -159,6 +159,20 @@ restart_daemon() {
   wait_daemon
 }
 
+# turns_end waits up to $1 seconds for the turns that are running to end,
+# and fails if one still is: an agent box runs only while its Claude has
+# something to do (hibernate), and a restart of T3's server ends its turn.
+turns_end() {
+  local waited=0
+  # shellcheck disable=SC2016 # awk's, on the node
+  while [ "$(on_node sh -c 'runsc --root /run/fern/runsc list 2>/dev/null | awk "\$4 ~ /\\.agent\$/ && \$3 == \"running\"" | wc -l' </dev/null | tr -d ' ')" != 0 ]; do
+    [ "$waited" -lt "$1" ] || return 1
+    [ "$waited" != 0 ] || echo "waiting up to $1 s for running turns to end before restarting T3 (FERN_DRAIN)"
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
 # wait_t3 waits until T3's server answers on its port.
 wait_t3() {
   for _ in $(seq 180); do

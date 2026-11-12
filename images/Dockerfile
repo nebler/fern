@@ -127,6 +127,8 @@ FROM debian:trixie-slim AS fern-box
 # Postgres binaries only: clusters live in each environment's workspace.
 # Node runs the lab's toy repo, the sample without a database.
 # libatomic1: the Node builds mise installs need it from Node 26 on.
+# xz-utils and unzip: what toolchains come packed in. A thread that needed
+# LLVM first fetched xz's own package to unpack it (VPS, 2026-11-12).
 # Bootstrap HTTPS before apt installs its own CA bundle: large HTTP
 # downloads can stall on the lab's network. The upgrade is for Debian's
 # security fixes, as in fern.
@@ -137,7 +139,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
  && apt-get upgrade -y \
- && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini libatomic1 \
+ && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini libatomic1 xz-utils unzip \
  && rm /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
