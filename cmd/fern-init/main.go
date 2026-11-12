@@ -60,14 +60,25 @@ func run(ctx context.Context, log *slog.Logger) error {
 	// installs the tools they share. A golden builder's first box installs
 	// them for the repository's setup script, which comes before the
 	// services: the daemon runs it there, then wakes the box again for them.
-	switch os.Getenv("FERN_SERVICES") {
-	case "off":
+	// A golden builder's box, in either of its two kinds, has longer for it,
+	// and doesn't start without the tools: a golden that lacks them would
+	// give every thread a box that fails at its first command, with nothing
+	// to say why.
+	builder := os.Getenv("FERN_SERVICES") == "later" || os.Getenv("FERN_ON_DEMAND") == "off"
+	switch {
+	case os.Getenv("FERN_SERVICES") == "off":
 		services = nil
-	case "later":
-		services = nil
-		installTools(ctx, dir, env, log)
+	case builder:
+		if os.Getenv("FERN_SERVICES") == "later" {
+			services = nil
+		}
+		if err := installTools(ctx, dir, env, builderInstallTimeout, log); err != nil {
+			return fmt.Errorf("installing the repository's tools for its golden snapshot: %w", err)
+		}
 	default:
-		installTools(ctx, dir, env, log)
+		if err := installTools(ctx, dir, env, installTimeout, log); err != nil {
+			log.WarnContext(ctx, "installing the workspace's tools failed", slog.Any("error", err))
+		}
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint and the skills, only less well.

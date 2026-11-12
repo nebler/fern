@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,9 +15,14 @@ import (
 	"github.com/nebler/fern/internal/setup"
 )
 
-// installTimeout bounds installing a workspace's tools, inside a wake's
-// two minutes.
-const installTimeout = 90 * time.Second
+// installTimeout bounds installing a workspace's tools, inside a wake's two
+// minutes, and builderInstallTimeout inside a golden builder's eight
+// (runsc): what a builder installs, every thread of its repository starts
+// with, and a thread's box shouldn't have to.
+const (
+	installTimeout        = 90 * time.Second
+	builderInstallTimeout = 6 * time.Minute
+)
 
 // installedFile, in setup.ToolsDir, holds the setup.ToolsKey of what was
 // installed there last.
@@ -59,38 +65,37 @@ func toolsEnv(dir string, env []string) []string {
 }
 
 // installTools installs the tools workspace dir pins into setup.ToolsDir,
-// unless they are installed already: a golden snapshot brings them, so a
-// thread's box only checks a key. A failure is logged; the services start
-// anyway, and fail on their own if they need a missing tool.
-func installTools(ctx context.Context, dir string, env []string, log *slog.Logger) {
+// within limit, unless they are installed already: a golden snapshot brings
+// them, so a thread's box only checks a key. What a failure means is the
+// caller's: a thread's box starts its services anyway, which fail on their
+// own if they need a missing tool; a golden builder's doesn't start.
+func installTools(ctx context.Context, dir string, env []string, limit time.Duration, log *slog.Logger) error {
 	key, err := setup.ToolsKey(dir)
 	if err != nil {
-		log.WarnContext(ctx, "reading the workspace's tool files failed", slog.Any("error", err))
-		return
+		return fmt.Errorf("reading the workspace's tool files: %w", err)
 	}
 	if key == "" {
-		return
+		return nil
 	}
 	data := filepath.Join(dir, setup.ToolsDir)
 	if old, err := os.ReadFile(filepath.Join(data, installedFile)); err == nil && string(old) == key {
-		return
+		return nil
 	}
 	g, err := setup.MakeGuess(dir)
 	if err != nil {
-		log.WarnContext(ctx, "guessing the workspace's tools failed", slog.Any("error", err))
-		return
+		return fmt.Errorf("guessing the workspace's tools: %w", err)
 	}
 	start := time.Now()
-	if err := install(ctx, dir, data, env, key, g.Tools); err != nil {
-		log.WarnContext(ctx, "installing the workspace's tools failed", slog.Any("error", err))
-		return
+	if err := install(ctx, dir, data, env, key, g.Tools, limit); err != nil {
+		return err
 	}
 	log.InfoContext(ctx, "installed the workspace's tools", slog.Duration("took", time.Since(start)))
+	return nil
 }
 
 // install runs mise install in dir, with the guessed tools' config written
 // first if there is one.
-func install(ctx context.Context, dir, data string, env []string, key string, guessed []byte) error {
+func install(ctx context.Context, dir, data string, env []string, key string, guessed []byte, limit time.Duration) error {
 	if err := os.MkdirAll(data, 0o755); err != nil {
 		return err
 	}
@@ -103,7 +108,7 @@ func install(ctx context.Context, dir, data string, env []string, key string, gu
 			return err
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "mise", "install")
 	cmd.Dir, cmd.Env = dir, env
@@ -111,6 +116,9 @@ func install(ctx context.Context, dir, data string, env []string, key string, gu
 	out := boxexec.NewClipped(4000)
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("mise install ran past its limit of %s: %s", limit, out.String())
+		}
 		return fmt.Errorf("mise install: %w: %s", err, out.String())
 	}
 	return os.WriteFile(filepath.Join(data, installedFile), []byte(key), 0o644)

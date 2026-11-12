@@ -35,8 +35,14 @@ func TestWriteHint(t *testing.T) {
 	if got := read(); strings.Contains(got, "postgres") || strings.Contains(got, "Cloudflare") || strings.Contains(got, "setup script") {
 		t.Errorf("hint after the services went = %q, want it replaced, and nothing on Cloudflare or a setup script", got)
 	}
-	if got := read(); !strings.Contains(got, "use the `commit` tool") {
-		t.Errorf("hint = %q, want it to name the commit tool", got)
+	if got := read(); !strings.Contains(got, "use the `commit` tool") || !strings.Contains(got, "never in /tmp") || strings.Contains(got, "mise install") {
+		t.Errorf("hint = %q, want it to name the commit tool and say that /tmp doesn't last, and nothing on tools", got)
+	}
+	if err := writeHint(dir, hint{tools: true}); err != nil {
+		t.Fatalf("writeHint() with tools error: %v", err)
+	}
+	if got := read(); !strings.Contains(got, "run `mise install`") {
+		t.Errorf("hint for a repository with tools = %q, want it to say what to do when one is missing", got)
 	}
 	if err := writeHint(dir, hint{short: "4 CPUs (the box has 2)"}); err != nil {
 		t.Fatalf("writeHint() for a box with less than asked error: %v", err)

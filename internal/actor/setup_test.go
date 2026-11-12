@@ -169,3 +169,69 @@ func TestGoldenSetupScript(t *testing.T) {
 		})
 	}
 }
+
+// A golden build that failed isn't made again from the same key for a
+// quarter of an hour, however many new worktrees ask for it: a setup script
+// that fails would run again for each, as long as an hour at a time.
+func TestGoldenBuildNotRepeatedAtOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "worktrees", "sample")
+		for _, wt := range []string{"one", "two", "three"} {
+			for _, f := range []string{"services.yaml", ".fern/setup"} {
+				path := filepath.Join(repo, wt, f)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("services: {pg: {run: ./pg.sh}}\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		var mu sync.Mutex
+		runs := 0
+		cfg := actor.Config{
+			Idle: idle, Image: "box",
+			RunSetup: func(context.Context, string, string, []string, io.Writer) (int, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				runs++
+				return 1, nil
+			},
+		}
+		g := actor.New(st, drv, cfg, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { _ = g.Run(ctx); close(done) }()
+		defer func() { cancel(); <-done }()
+
+		for _, step := range []struct {
+			worktree string
+			after    time.Duration // since the one before
+			want     int           // times the script has run by then
+		}{
+			{"one", 0, 1},
+			{"two", time.Minute, 1},
+			{"three", 20 * time.Minute, 2},
+		} {
+			time.Sleep(step.after)
+			if err := g.Create(t.Context(), step.worktree, store.CreateOptions{Workspace: filepath.Join(repo, step.worktree)}); err != nil {
+				t.Fatal(err)
+			}
+			synctest.Wait()
+			mu.Lock()
+			if runs != step.want {
+				t.Errorf("after worktree %s the script has run %d times, want %d", step.worktree, runs, step.want)
+			}
+			mu.Unlock()
+			st.mu.Lock()
+			if got := st.snaps[step.worktree]; len(got) != 0 {
+				t.Errorf("%s's snapshots = %v, want its golden source gone", step.worktree, got)
+			}
+			st.mu.Unlock()
+			if got := state(t, drv, setup.ID("sample")); got != runsc.Asleep {
+				t.Errorf("the builder's box after %s: %s, want %s", step.worktree, got, runsc.Asleep)
+			}
+		}
+	})
+}

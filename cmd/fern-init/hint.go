@@ -31,6 +31,9 @@ type hint struct {
 	// short is what the repository asks for its box and doesn't get, in
 	// words (shortOf); "" if it gets what it asks for.
 	short string
+	// tools: the repository pins tools, or Fern guessed some, which the box
+	// installs with mise when it starts (setup.ToolsKey).
+	tools bool
 	// notes are the active skill packs' notes (packNotes).
 	notes []string
 }
@@ -49,6 +52,9 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	asked, err := setup.AskedLimits(dir)
 	errs = append(errs, err)
 	h.short = shortOf(asked, os.Getenv("FERN_BOX_LIMITS"))
+	toolsKey, err := setup.ToolsKey(dir)
+	errs = append(errs, err)
+	h.tools = toolsKey != ""
 	var detected []string
 	if h.cloudflare {
 		detected = append(detected, "cloudflare")
@@ -108,6 +114,10 @@ func writeHint(claudeDir string, h hint) error {
 		if h.guessed {
 			fmt.Fprintln(&b, "- The repository has no services.yaml: Fern guessed these from package.json (and docker-compose's Postgres, as DATABASE_URL). If one doesn't run right, write a services.yaml at the root to replace the guess; `cat .fern/tools/guess.toml` shows the Node and package manager it chose.")
 		}
+	}
+	fmt.Fprintln(&b, "- Only the worktree lasts. The box your Bash commands run in stops a few seconds after a command returns, unless a background command is running, and starts again at the next one with an empty /tmp and no processes. Keep anything you need later in the worktree, in a folder git ignores (such as .fern/scratch with a .gitignore of `*`), never in /tmp.")
+	if h.tools {
+		fmt.Fprintln(&b, "- The box installs the tools this repository pins (mise) when it starts, which is quick once they are there. If one is missing (`command not found`), the install failed or ran out of time: run `mise install` with Bash, with run_in_background if it is slow, and read what it says.")
 	}
 	if h.short != "" {
 		fmt.Fprintf(&b, "- services.yaml asks for more than this server gives a box: %s. Commands that need more will be slow or run out of memory. Say so to the person when it matters: they raise the most a box may have on the server, with --box-max-cpus, --box-max-memory (MiB) and --box-max-pids in FERN_DAEMON_ARGS in /etc/fern/daemon.env, then `systemctl restart fern-daemon`.\n", h.short)

@@ -58,7 +58,9 @@ func TestInstallTools(t *testing.T) {
 	install := func() []string {
 		t.Helper()
 		env := toolsEnv(dir, []string{"PATH=" + bin + ":/usr/bin:/bin"})
-		installTools(t.Context(), dir, env, log)
+		if err := installTools(t.Context(), dir, env, installTimeout, log); err != nil {
+			t.Fatal(err)
+		}
 		data, err := os.ReadFile(calls)
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
@@ -99,7 +101,9 @@ func TestInstallToolsFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := toolsEnv(dir, []string{"PATH=" + bin + ":/usr/bin:/bin"})
-	installTools(t.Context(), dir, env, slog.New(slog.DiscardHandler))
+	if err := installTools(t.Context(), dir, env, installTimeout, slog.New(slog.DiscardHandler)); err == nil {
+		t.Error("installTools with a mise that fails returned no error")
+	}
 	if _, err := os.Stat(filepath.Join(dir, setup.ToolsDir, installedFile)); !os.IsNotExist(err) {
 		t.Errorf("a failed install left %s: %v", installedFile, err)
 	}
@@ -124,7 +128,9 @@ func TestInstallGuessedTools(t *testing.T) {
 	if !slices.Contains(env, "MISE_GLOBAL_CONFIG_FILE="+config) {
 		t.Errorf("toolsEnv() = %q, want MISE_GLOBAL_CONFIG_FILE=%s", env, config)
 	}
-	installTools(t.Context(), dir, env, slog.New(slog.DiscardHandler))
+	if err := installTools(t.Context(), dir, env, installTimeout, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
 	got, err := os.ReadFile(calls)
 	if err != nil || string(got) != config+" install\n" {
 		t.Errorf("mise calls = %q, %v; want one install with the guessed config", got, err)

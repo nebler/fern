@@ -25,6 +25,23 @@ const goldenSource = "golden-source"
 // next new environment of that repository asks again.
 const buildQueue = 16
 
+// buildRetry is how long a golden build that failed isn't made again from
+// the same key. Every new worktree without a golden asks for one, and a
+// setup script that fails does so again, after as long as an hour in the
+// builder's box each time.
+const buildRetry = 15 * time.Minute
+
+// failedBuild is a builder's last golden build, if it failed: the key it
+// was for, and when.
+type failedBuild struct {
+	key string
+	at  time.Time
+}
+
+// errBuildWaits means a golden build wasn't made: the last one of the same
+// key failed less than buildRetry ago.
+var errBuildWaits = errors.New("the last build of this key failed; not built again yet")
+
 // golden returns the golden snapshot for new environment id at workspace, a
 // worktree T3 made, or nil and whether id's first workspace is to be built
 // into one: a miss doesn't make the thread wait, the next one gets it. A
@@ -149,9 +166,14 @@ func (g *Group) buildGoldens(ctx context.Context) {
 func (g *Group) build(ctx context.Context, src string) {
 	start := time.Now()
 	err := g.buildGolden(ctx, src)
-	observe(g.goldenBuilds, start, &err)
-	if err != nil {
-		g.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
+	switch {
+	case errors.Is(err, errBuildWaits):
+		g.log.InfoContext(ctx, "golden build skipped", slog.String("source", src), slog.Any("why", err))
+	default:
+		observe(g.goldenBuilds, start, &err)
+		if err != nil {
+			g.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
+		}
 	}
 	if err := g.DeleteSnapshot(ctx, src, goldenSource); err != nil && !errors.Is(err, store.ErrNotFound) {
 		g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
@@ -193,7 +215,7 @@ func (g *Group) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
 // It is three changes of the builder, not one: the script runs between them
 // as a command of the box, for up to an hour, and a change holds the
 // actor's mailbox and has ten minutes.
-func (g *Group) buildGolden(ctx context.Context, src string) error {
+func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 	srcEnv, err := g.store.Get(ctx, src)
 	if err != nil {
 		return err
@@ -210,6 +232,18 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 	// lockfile, and the golden is for the threads that start from what it
 	// was built from.
 	var key, script string
+	// failedBuilds is this goroutine's, which makes every build: the change
+	// below, on the builder's actor, gets a copy of what it reads.
+	last, waits := g.failedBuilds[id], false
+	defer func() {
+		switch {
+		case waits:
+		case err == nil:
+			delete(g.failedBuilds, id)
+		case key != "":
+			g.failedBuilds[id] = failedBuild{key: key, at: time.Now()}
+		}
+	}()
 	err = g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Create(ctx, id, store.CreateOptions{}); err != nil {
 			return err
@@ -232,6 +266,10 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 			key = "" // an earlier build made it
 			return nil
 		}
+		if last.key == key && time.Since(last.at) < buildRetry {
+			waits = true
+			return nil
+		}
 		if script, err = setup.Script(env.Workspace); err != nil || script == "" {
 			return err
 		}
@@ -245,6 +283,9 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 	})
 	if err != nil || key == "" {
 		return err
+	}
+	if waits {
+		return fmt.Errorf("%s: %w (%s ago)", id, errBuildWaits, time.Since(last.at).Round(time.Second))
 	}
 	if script != "" {
 		err := g.runSetup(ctx, id, script)

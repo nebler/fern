@@ -712,6 +712,14 @@ bye" "$(cat "$out")"
     check "a Bash call gets its command's end across the restart" yes "$(succeeds grep -q after "$out")"
     check "and its exit code" yes "$(succeeds grep -q 'exit code 4' "$out")"
     check "and the command ran once" 1 "$(fern exec $ENV -- sh -c 'wc -l < /tmp/bash.runs' | tr -d ' ')"
+    # Claude Code gives a tool's answer 60 s to begin, so the relay begins it
+    # at once, as a stream, and sends the tool's answer when it is done.
+    local call began
+    call='{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "Bash", "arguments": {"command": "sleep 4"}}}'
+    began=$(fern exec --agent $ENV -- curl -s -o /dev/null -w '%{time_starttransfer} %{time_total} %{content_type}' -m 60 \
+      -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$call" "http://127.0.0.1:7072/mcp/$ENV")
+    check "a tool call's answer begins while its command runs, as a stream" "yes yes text/event-stream" \
+      "$(awk '{ print ($1 < 2 ? "yes" : "no"), ($2 >= 4 ? "yes" : "no"), $3 }' <<<"$began")"
   else
     note "skipped the Bash call: no agent boxes (lab/boxes.sh agents)"
   fi

@@ -146,10 +146,13 @@ type Group struct {
 	goldens                                                *prometheus.CounterVec // new worktrees, by golden hit, miss or none
 	prewakeResults                                         *prometheus.CounterVec // pre-wakes, by what came of them
 
-	find     chan findRequest // to Run, for an environment's actor
-	builds   chan string      // to Run's builder, the environments whose golden source to build
-	prewakes chan string      // to Run's prewakers, environments to wake ahead
-	stopped  chan struct{}    // closed when Run returns
+	find   chan findRequest // to Run, for an environment's actor
+	builds chan string      // to Run's builder, the environments whose golden source to build
+	// failedBuilds are the builders whose last golden build failed. Only the
+	// goroutine that makes the builds (buildGoldens) touches it.
+	failedBuilds map[string]failedBuild
+	prewakes     chan string   // to Run's prewakers, environments to wake ahead
+	stopped      chan struct{} // closed when Run returns
 }
 
 type findRequest struct {
@@ -190,7 +193,8 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
 		}, []string{"result"}),
 		find: make(chan findRequest), builds: make(chan string, buildQueue), prewakes: make(chan string, prewakeQueue),
-		stopped: make(chan struct{}),
+		failedBuilds: make(map[string]failedBuild),
+		stopped:      make(chan struct{}),
 	}
 }
 

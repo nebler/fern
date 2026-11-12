@@ -114,12 +114,16 @@ type Config struct {
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
 // services' stop commands, 3 s more to kill them and 1 s to finish.
 const (
-	wakeTimeout   = 2 * time.Minute
-	stopGrace     = 15 * time.Second
-	readyFirst    = 2 * time.Millisecond
-	exitedEvery   = time.Second // how often a box that isn't ready is looked for
-	readyInterval = 50 * time.Millisecond
-	readyWait     = 5 * time.Second
+	wakeTimeout = 2 * time.Minute
+	// A golden builder's box installs the tools its repository pins before
+	// it is ready, for every thread after it: it has longer (fern-init's
+	// builderInstallTimeout), within a change's ten minutes (actor).
+	builderWakeTimeout = 8 * time.Minute
+	stopGrace          = 15 * time.Second
+	readyFirst         = 2 * time.Millisecond
+	exitedEvery        = time.Second // how often a box that isn't ready is looked for
+	readyInterval      = 50 * time.Millisecond
+	readyWait          = 5 * time.Second
 	// A box found running is kept if it is ready within adoptWait, which is
 	// longer than fern-init's longest pause before it starts a service again
 	// (30 s), and given up on once its fern-init has not answered at all for
@@ -350,7 +354,11 @@ func (d *Driver) States(ctx context.Context) (map[string]State, error) {
 // the commands running in it; anything else left from before (a crash, a
 // stop that didn't finish) is stopped first, so a wake starts clean.
 func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
+	limit := wakeTimeout
+	if box.Kind == Builder || box.Kind == Setup {
+		limit = builderWakeTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	b := d.layout(box.ID)
 	what, cs, err := d.look(ctx, b)
