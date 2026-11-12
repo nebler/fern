@@ -19,6 +19,8 @@
 //	                                         so its box sleeps, and start it again at the
 //	                                         next message (fern-claude, fern-opencode)
 //	fern sleep <env> | fern wake <env>       stop or start the box
+//	fern why <env>                           what holds its boxes awake: what runs in
+//	                                         each, and when it sleeps and by which rule
 //	fern prebuild <repo>                     build repo's golden snapshot from a tar
 //	                                         stream of its checkout on stdin
 //	fern image load                          unpack the images of a docker save stream
