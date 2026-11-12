@@ -58,6 +58,25 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 			{Box: "demo.agent", Why: "asleep"},
 		})
 	})
+	mux.HandleFunc("GET /disk", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, api.Disk{
+			Pool:  api.Volume{Path: "/var/lib/fern", Total: 50 << 30, Free: 27 << 30},
+			Under: &api.Volume{Path: "/var/lib/fern-img", Total: 75 << 30, Free: 1 << 30},
+			Least: 5 << 29,
+			Parts: []api.DiskPart{
+				{Kind: "environment", Name: "demo", Total: 10 << 30, Exclusive: 3 << 30, Note: "worktrees/app/demo"},
+				{Kind: "podman", Name: "Podman's images", Total: 31 << 30, Exclusive: 31 << 30, Unused: true, Note: "what image builds left"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /gc", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, api.Freed{
+			Removed: []string{"95 of Podman's images, which no container used"},
+			Failed:  []string{"image 3f2a: busy"},
+			Pool:    api.Volume{Path: "/var/lib/fern", Total: 50 << 30, Free: 27 << 30},
+			Under:   &api.Volume{Path: "/var/lib/fern-img", Total: 75 << 30, Free: 32 << 30},
+		})
+	})
 	mux.HandleFunc("POST /github/token", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Repository string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -128,6 +147,20 @@ func TestRun(t *testing.T) {
 		{name: "prewake", args: []string{"prewake", "demo"}, requests: []string{"POST /envs/demo/prewake"}, stdout: "prewake demo took"},
 		{name: "why", args: []string{"why", "demo"}, requests: []string{"GET /envs/demo/holds"}, stdout: "demo        awake   exec 7 (1m30s)  stays awake while a command or a preview request runs"},
 		{name: "prebuild", args: []string{"prebuild", "app"}, stdin: "a checkout", requests: []string{"PUT /goldens/app a checkout"}},
+		{
+			name: "df", args: []string{"df"}, requests: []string{"GET /disk"},
+			stdout: "the server's disk  75.0 GiB  1.0 GiB   /var/lib/fern-img  ALMOST FULL: under 2.5 GiB free, new snapshots and threads are refused",
+		},
+		{
+			name: "df, what gc removes", args: []string{"df"}, requests: []string{"GET /disk"},
+			stdout: "podman Podman's images  31.0 GiB  31.0 GiB  fern gc removes it: what image builds left",
+		},
+		{name: "df, the sum", args: []string{"df"}, requests: []string{"GET /disk"}, stdout: "fern gc would free at least 31.0 GiB."},
+		{
+			name: "gc", args: []string{"gc"}, code: 1, requests: []string{"POST /gc"},
+			stdout: "removed 95 of Podman's images, which no container used\nthe server's disk has 32.0 GiB free of 75.0 GiB\nthe pool has 27.0 GiB free of 50.0 GiB",
+			stderr: "fern gc: image 3f2a: busy",
+		},
 		{name: "no command", args: nil, code: 2, stderr: "usage: fern <create|"},
 		{name: "unknown command", args: []string{"frobnicate"}, code: 2, stderr: `unknown command "frobnicate"`},
 		{name: "image without load", args: []string{"image", "save"}, code: 2, stderr: `unknown command "save": want load`},

@@ -39,6 +39,7 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/backup"
+	"github.com/nebler/fern/internal/disk"
 	"github.com/nebler/fern/internal/github"
 	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
@@ -62,6 +63,9 @@ const (
 	runscBundles = "/run/fern/boxes"
 	// mcpPort is where agent boxes reach the daemon's MCP endpoint.
 	mcpPort = 7071
+	// diskEvery is how often the daemon looks at the free space of the pool
+	// and the disk under it (internal/disk).
+	diskEvery = time.Minute
 	// cloudflareFile holds the node's Cloudflare API token as
 	// CLOUDFLARE_API_TOKEN=…, readable by root only, if someone opted in
 	// (install.sh cloudflare): agents in Cloudflare repositories' agent
@@ -288,6 +292,26 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// fern df and fern gc: what uses the node's disk, and what nothing needs
+	// removed from it.
+	keeper := disk.New(st, envs, disk.Config{Root: pool, Proc: "/proc", Podman: disk.Podman, Sizes: store.PathUsage}, log)
+	answer := func(w http.ResponseWriter, v any, err error) {
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			v = map[string]string{"error": err.Error()}
+		}
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	api.HandleFunc("GET /disk", func(w http.ResponseWriter, r *http.Request) {
+		d, err := keeper.Usage(r.Context())
+		answer(w, d, err)
+	})
+	api.HandleFunc("POST /gc", func(w http.ResponseWriter, r *http.Request) {
+		freed, err := keeper.Free(r.Context())
+		answer(w, freed, err)
+	})
+
 	previews := preview.New(*previewHost, st, envs, log)
 	g, ctx := errgroup.WithContext(ctx)
 	apiSrv.Stopping = ctx.Done()
@@ -313,6 +337,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if backer != nil {
 		g.Go(func() error { backer.Run(ctx, *backupEvery); return nil })
 	}
+	// A disk that fills up fails every thread: free what nothing needs first.
+	g.Go(func() error { keeper.Run(ctx, diskEvery); return nil })
 	for _, s := range servers {
 		if s.lis == nil {
 			continue

@@ -81,6 +81,20 @@ func (c *Client) Backup(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/backup", nil, "", nil)
 }
 
+// Disk returns what uses the node's disk. The daemon asks btrfs for every
+// environment's size: seconds on a pool with large workspaces.
+func (c *Client) Disk(ctx context.Context) (Disk, error) {
+	var d Disk
+	return d, c.do(ctx, http.MethodGet, "/disk", nil, "", &d)
+}
+
+// GC removes from the node's disk what nothing needs, and returns what it
+// removed.
+func (c *Client) GC(ctx context.Context) (Freed, error) {
+	var f Freed
+	return f, c.do(ctx, http.MethodPost, "/gc", nil, "", &f)
+}
+
 // FindByPath returns the environment whose workspace is path or holds it.
 func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
 	var envs []Env

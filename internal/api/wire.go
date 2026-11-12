@@ -40,6 +40,48 @@ type Running struct {
 	Since time.Time `json:"since"`
 }
 
+// Disk is what uses the node's disk, as GET /disk reports it (fern df).
+type Disk struct {
+	Pool Volume `json:"pool"`
+	// Under is the server's disk, when the pool is a file on it: the pool
+	// can only grow into what that disk has free.
+	Under *Volume `json:"under,omitempty"`
+	// Least is the free space below which the daemon refuses new snapshots
+	// and environments, on the pool and on the disk under it.
+	Least uint64     `json:"least"`
+	Parts []DiskPart `json:"parts"`
+}
+
+// Volume is a filesystem's room, in bytes.
+type Volume struct {
+	Path  string `json:"path"`
+	Total uint64 `json:"total"`
+	Free  uint64 `json:"free"`
+}
+
+// DiskPart is one thing that uses disk space.
+type DiskPart struct {
+	Kind string `json:"kind"` // environment, golden, image, data or podman
+	Name string `json:"name"`
+	// Total counts blocks it shares with others (a workspace with its
+	// snapshots, a thread with its golden); Exclusive only what nothing
+	// else holds, the least that removing it frees.
+	Total     uint64 `json:"total"`
+	Exclusive uint64 `json:"exclusive"`
+	Unused    bool   `json:"unused,omitempty"` // nothing needs it: fern gc removes it
+	Note      string `json:"note,omitempty"`
+}
+
+// Freed answers POST /gc (fern gc): what was removed, what couldn't be, and
+// the room there is now. Blocks freed in a pool that is a file come back to
+// the disk under it a little later.
+type Freed struct {
+	Removed []string `json:"removed,omitempty"`
+	Failed  []string `json:"failed,omitempty"`
+	Pool    Volume   `json:"pool"`
+	Under   *Volume  `json:"under,omitempty"`
+}
+
 // SnapshotRequest is the body of POST /envs/{id}/snapshots.
 type SnapshotRequest struct {
 	ID string `json:"id"`

@@ -7,6 +7,8 @@
 #   disk         DISK_HARDWARE=1 adds CPU/I/O profiling (all, not perf default)
 #                a 100,000-file workspace: snapshot, restore (equal to its
 #                snapshot) and rm (nothing left); a seeded create; a real clone
+#   space        fern df names the pool, the disk under it and what uses
+#                them; fern gc removes an image nothing runs from
 #   stream       fern exec keeps a stream intact: bytes, stderr, exit codes,
 #                stdin, signals, cancellation
 #   idle_exec    a command that prints nothing for 3 minutes still answers
@@ -397,6 +399,33 @@ for d in range(200):
   else
     note "git clone of t3code failed"
   fi
+}
+
+# space checks fern df and fern gc on a node with an image a tag has moved
+# off, which nothing runs from.
+space() {
+  echo "== what uses the disk, and what nothing needs"
+  local old
+  old=$(printf 'e%.0s' $(seq 64))
+  fresh $ENV
+  fern exec $ENV -- sh -c 'head -c 3000000 /dev/urandom > blob'
+  fern snapshot $ENV s1 >/dev/null
+  in_daemon "mkdir -p /var/lib/fern/images/$old/root && head -c 1000000 /dev/urandom > /var/lib/fern/images/$old/root/f"
+  fern df >"$TMP/df"
+  check "df shows the pool" yes "$(succeeds grep -q '^the pool .*/var/lib/fern' "$TMP/df")"
+  check "df shows the server's disk, which the pool is a file on" yes "$(succeeds grep -q "^the server's disk .*/var/lib/fern-img" "$TMP/df")"
+  check "df lists the environment" yes "$(succeeds grep -q "^environment $ENV " "$TMP/df")"
+  check "df says gc removes an image nothing runs from" yes "$(succeeds grep -q "^image ${old:0:12} .*fern gc removes it" "$TMP/df")"
+  if in_daemon "command -v podman" >/dev/null 2>&1; then
+    note "fern gc skipped: on this node it would remove Podman's images, the next build's cache"
+    in_daemon "rm -rf /var/lib/fern/images/$old"
+    return
+  fi
+  fern gc >"$TMP/gc"
+  check "gc removes the image nothing runs from" no "$(succeeds in_daemon "test -e /var/lib/fern/images/$old")"
+  check "gc says what it removed" yes "$(succeeds grep -q "^removed image ${old:0:12}" "$TMP/gc")"
+  check "gc keeps the box image" yes "$(succeeds in_daemon "test -e /var/lib/fern/images/fern-box:dev/root")"
+  check "the environment still wakes" hi "$(fern exec $ENV -- echo hi)"
 }
 
 stream() {
@@ -1874,7 +1903,7 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode devserver turn hardware stability)
+  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.

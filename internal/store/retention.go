@@ -7,8 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 // Retention keeps the pool from filling up (architecture §9): every turn of
@@ -63,19 +61,27 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 }
 
 // checkFree returns ErrPoolFull if the pool has less free space than a new
-// snapshot or environment may leave.
+// snapshot or environment may leave, or the disk under it has: a pool that
+// is a file on that disk grows into it, and the disk filling up fails
+// everything on the node at once, T3's writes first (VPS, 2026-11-12: the
+// pool had 27 GiB free on a disk with none).
 func (s *Store) checkFree() error {
-	var st unix.Statfs_t
-	if err := unix.Statfs(s.root, &st); err != nil {
+	sp, err := s.Space()
+	if err != nil {
 		return err
 	}
-	free, total := st.Bavail*uint64(st.Bsize), st.Blocks*uint64(st.Bsize)
-	if free < max(s.minFreeBytes, uint64(float64(total)*minFreeShare)) {
+	if sp.Pool.Free < sp.Least {
 		return fmt.Errorf("%w: %.1f of %.1f GiB free; delete threads or environments you don't need",
-			ErrPoolFull, float64(free)/(1<<30), float64(total)/(1<<30))
+			ErrPoolFull, gib(sp.Pool.Free), gib(sp.Pool.Total))
+	}
+	if sp.Under != nil && sp.Under.Free < sp.Least {
+		return fmt.Errorf("%w: the pool is a file on the server's disk, which has %.1f GiB free (%s); `fern df` shows what uses it, `fern gc` frees what nothing needs",
+			ErrPoolFull, gib(sp.Under.Free), sp.Under.Path)
 	}
 	return nil
 }
+
+func gib(bytes uint64) float64 { return float64(bytes) / (1 << 30) }
 
 // Orphans returns the environments whose workspace, a worktree at a path,
 // is gone: T3 removed the worktree, as it does when its thread is deleted.

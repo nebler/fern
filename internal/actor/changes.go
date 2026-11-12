@@ -165,6 +165,29 @@ func (g *Group) Snapshot(ctx context.Context, id, snapID string, replace bool) e
 	})
 }
 
+// PruneAll applies retention to every environment, as a snapshot does to
+// its own: an environment nobody has taken a snapshot of since a revert
+// otherwise keeps the copy the revert made, past its day. One that fails is
+// logged, and the rest go on.
+func (g *Group) PruneAll(ctx context.Context) error {
+	envs, err := g.store.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, env := range envs {
+		err := g.do(ctx, "prune", env.ID, func(ctx context.Context, _ *actor) error {
+			return g.store.Prune(ctx, env.ID)
+		})
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			g.log.WarnContext(ctx, "pruning old snapshots failed", slog.String("env", env.ID), slog.Any("error", err))
+		}
+	}
+	return nil
+}
+
 // DeleteSnapshot removes snapshot snapID of environment id; removing one that
 // doesn't exist is not an error.
 func (g *Group) DeleteSnapshot(ctx context.Context, id, snapID string) error {

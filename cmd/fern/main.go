@@ -33,6 +33,10 @@
 //	                                         sets backups up; they run hourly)
 //	fern doctor                              check the node Fern runs on, as root on it,
 //	                                         and say what to do about each problem
+//	fern df                                  what uses the node's disk, and how much of
+//	                                         it nothing needs
+//	fern gc                                  remove what nothing needs: old images, what
+//	                                         image builds left, snapshots past retention
 package main
 
 import (
@@ -154,6 +158,8 @@ func subcommands() []subcommand {
 		{name: "git-credential", min: 1, max: 1, run: gitCredential},
 		{name: "github-token", max: 1, run: githubToken},
 		{name: "doctor", run: doctor},
+		{name: "df", run: diskUsage},
+		{name: "gc", run: collect},
 		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {
 			return 0, cl.Backup(ctx)
 		}},

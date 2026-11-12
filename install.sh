@@ -217,6 +217,13 @@ fern_from_release() {
     done
     changed=yes
   fi
+  # The pool has its own, unpacked copy of the images: Podman keeps this
+  # release's, to tell that nothing changed at the next run, and loses the
+  # others', or each update would leave a gigabyte on the server's disk.
+  podman images --format '{{.Repository}}:{{.Tag}}' |
+    grep -E "^$REGISTRY/(fern|fern-box|fern-t3):" | grep -vF ":$FERN_VERSION" |
+    xargs -r podman rmi >/dev/null 2>&1 || true
+  podman image prune -f >/dev/null 2>&1 || true
 
   systemctl daemon-reload
   systemctl enable -q fern-daemon fern-t3

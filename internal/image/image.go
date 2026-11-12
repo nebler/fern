@@ -414,6 +414,61 @@ func prune(dir string, keep map[string]bool) error {
 	return nil
 }
 
+// Stored is an image unpacked in a directory, with the tags that point to
+// it.
+type Stored struct {
+	ID   string
+	Tags []string // none: an image a tag pointed to before it moved
+}
+
+// List returns the images unpacked in dir, ordered by ID; none if dir
+// doesn't exist.
+func List(dir string) ([]Stored, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	tags := map[string][]string{}
+	for _, e := range entries {
+		if e.Type()&fs.ModeSymlink == 0 {
+			continue
+		}
+		if id, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil {
+			tags[id] = append(tags[id], e.Name())
+		}
+	}
+	var out []Stored
+	for _, e := range entries {
+		if e.IsDir() && isID(e.Name()) {
+			out = append(out, Stored{ID: e.Name(), Tags: tags[e.Name()]})
+		}
+	}
+	return out, nil
+}
+
+// Remove removes image id from dir. A Load keeps the image a tag pointed to
+// before, for the boxes still running from it: once none does, it is only
+// disk. The caller knows that nothing runs from it; an image a tag points to
+// is refused.
+func Remove(dir, id string) error {
+	if !isID(id) {
+		return fmt.Errorf("remove image %q: not an image's ID", id)
+	}
+	imgs, err := List(dir)
+	if err != nil {
+		return err
+	}
+	for _, img := range imgs {
+		if img.ID == id && len(img.Tags) > 0 {
+			return fmt.Errorf("remove image %.12s: %s points to it", id, img.Tags[0])
+		}
+	}
+	return os.RemoveAll(filepath.Join(dir, id))
+}
+
 // isID reports whether name is an image's ID: 64 hex digits.
 func isID(name string) bool {
 	_, err := hex.DecodeString(name)

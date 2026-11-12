@@ -85,6 +85,7 @@ Three nouns. Everything else is a property of one of them.
 | **runsc driver** | wakes and stops boxes: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
 | **setup** | reads the setup contract and computes golden keys | `internal/setup` |
 | **image** | unpacks `docker save` streams into the pool, as box and T3 roots (`fern image load`) | `internal/image` |
+| **disk** | says what uses the node's disk (`fern df`) and removes what nothing needs (`fern gc`), by itself when the pool or the disk under it is low (§9) | `internal/disk` |
 | **watch** | while an agent box is awake, watches its workspace from the host with fanotify and keeps the writes of the agent box's processes (their cgroup names the box); the actor passes them to the environment's box as touches (§10) | `internal/watch` |
 | **fern-init** | a box's main process: starts and supervises the services (on demand, §8), serves exec with PTYs (`internal/boxexec`), readiness, a graceful stop and touches | `cmd/fern-init` |
 | **hibernate** | in the CLI that T3 runs as `claude` and `opencode`: stops an idle Claude, or OpenCode server, so its box can sleep, and starts it again at the next message (§6.3) | `internal/hibernate` |
@@ -129,6 +130,8 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 | `DELETE /envs/{id}` | delete the environment, its box and snapshots | built |
 | `DELETE /envs/{id}/snapshots/{s}` | prune | built; the T3 hook calls this when checkpoints are deleted |
 | `POST /envs/{id}/fork` | `{count, snapshot?}` new environments, forks, from a snapshot or the workspace as it is; answers `{forks: [ids]}` | built (§7.4); at most 8 forks an environment (409 past that). Planned: the identity hook |
+| `GET /disk` | what uses the node's disk: the pool's room and the room of the disk under it, then each environment, golden, image and Podman's images, with what `gc` would remove | built (`fern df`); asks btrfs for each environment's size, seconds on a pool with large workspaces |
+| `POST /gc` | remove what nothing needs, and answer what was removed | built (`fern gc`, §9) |
 | `GET /events` | event stream (state changes, snapshots, wakes) | planned; for UIs and tests |
 | `PUT /goldens/{repo}` | build repo's golden from a checkout, a tar body, unless it has one for it | built; T3 sends it when a project is added (`fern prebuild REPO`). Answers before the build |
 
@@ -348,7 +351,8 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
   - keep the last N turn snapshots per environment, plus tagged snapshots, plus golden (built: the newest 50, pruned after every snapshot; no tags yet)
   - keep `pre-restore` copies (§7.3) for a day (built)
   - expire unused goldens after M days
-  - **space pressure → refuse new snapshots with a clear error** rather than fill the disk (built: below 5% of the pool and 2 GiB free, new snapshots and environments get `ErrPoolFull`, HTTP 507; restores still run)
+  - **space pressure → refuse new snapshots with a clear error** rather than fill the disk (built: below 5% of the pool and 2 GiB free, new snapshots and environments get `ErrPoolFull`, HTTP 507; restores still run). **The disk under the pool counts too (built):** the installer's pool is a sparse file on the server's disk (`/var/lib/fern-img/pool.img`), so it can only grow into what that disk has free. The store finds the file from the pool's loop device (`diskUnder`) and applies the same limit to its disk, with an error that names it and `fern gc`. Until 2026-11-12 only the pool was looked at: on the VPS it had 27 GiB free on a disk with none, Podman's build leftovers had taken 35 GB of that disk, and the first write that failed was T3's, which lost a running turn.
+  - **what nothing needs is removed (built, `internal/disk`):** `fern gc` removes the unpacked images no tag points to and nothing runs from (`fern image load` keeps a tag's previous image for the boxes still running from it; a mount table says whether one does), Podman's images that no container uses (the pool has its own copy; the next build or install fetches again what it needs) and every environment's snapshots past their retention, which otherwise go only at that environment's next snapshot. The daemon does the same by itself when, at one of its looks each minute, the pool has less than twice the limit free or the disk under it less than that or a tenth of itself, and then not again for an hour. `fern df` shows the two disks and what uses them, with what `gc` would remove. At the source: `install.sh` removes other releases' images from Podman after it has loaded one, and `lab/build.sh` on a VPS the untagged ones older than a day (`lab/check.sh space`).
   - **an environment whose worktree T3 removed** (its thread was deleted) is deleted when it is still gone an hour later (built); a worktree T3 makes again at the same path, for a thread that resumes, is adopted back with its snapshots
 - **Quotas:** btrfs qgroups per environment (cost to be measured), or cgroup-level limits on the box.
 - **Moving between machines:** `btrfs send | receive`, incremental against a shared parent. Used for backups, migration and forks on remote machines.
@@ -401,7 +405,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 | **Box crash** | the next command's dial fails and the actor wakes the box once more (built); after 3 crashes or failed wakes in 5 minutes, commands fail at once with `ErrCrashing` until the window has passed or a person wakes it (built) |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
-| **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |
+| **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the pool is, or the disk it is a file on; the daemon removes what nothing needs when either is low (§9); retention runs at every snapshot; the box keeps working (built). Not built: a limit on what one box may write, so a thread can still fill the disk faster than the daemon looks |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
 | **Machine loss** | restored on a new machine from the hourly backups (built): `install.sh` with `FERN_RESTORE_FROM` brings back each thread's workspace as of its last backup, its record, T3's data and the repositories; turns older than that backup can't be reverted to |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
@@ -507,7 +511,7 @@ A first, then propose B with what the spike learned ([history/roadmap-weeks.md](
 - **Logs:** the daemon's with `journalctl -u fern-daemon`; a box's output in `boxes/<box>/log` while it runs. Planned: `fern logs <env>`.
 - **Turn timing:** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each checkpoint span. `fern-claude` passes the flag to boxexec, which logs the process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn.
 - **The lab measures everything else:** `lab/perf.sh` gates 288 metrics against a baseline, `lab/ab.sh` compares two versions on the same machine, `lab/profile.sh` shows where an operation's time and CPU go.
-- **CLI:** `fern ls`, `fern snapshots <env>`, `fern why <env>` (what holds its boxes awake); planned: `fern inspect`, `fern top`.
+- **CLI:** `fern ls`, `fern snapshots <env>`, `fern why <env>` (what holds its boxes awake), `fern df` (what uses the disk) and `fern gc` (§9); planned: `fern inspect`, `fern top`.
 
 ## 17. Configuration
 
@@ -547,6 +551,7 @@ internal/watch/      the files an agent box writes, as the host sees them (fanot
 internal/preview/    the front door for previews
 internal/hibernate/  stops an idle Claude or OpenCode server and starts it again at the next message
 internal/image/      unpacks docker save streams into box roots
+internal/disk/       what uses the node's disk, and removing what nothing needs
 internal/setup/      setup contract, golden keys
 internal/span/       trace spans
 lab/                 the lab: setup, integration checks, perf gate, A/B, profiler

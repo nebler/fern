@@ -25,6 +25,10 @@ install_cli
 # fern:dev only carries the binaries install_cli copied.
 boxes=("${images[@]:1}")
 load_images "${boxes[@]/%/:dev}"
+# Podman keeps every build's layers, on the disk the pool is a file on: 35 GB
+# of them filled a VPS's (2026-11-12). The untagged ones a day old go; newer
+# ones are the next build's cache.
+[ -z "$FERN_HOST" ] || builder image prune -f --filter until=24h </dev/null >/dev/null
 if [ "$t3" = yes ]; then install_units t3; else install_units; fi
 restart_daemon
 echo "restarted the daemon"

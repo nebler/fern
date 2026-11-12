@@ -9,3 +9,13 @@ func SetFailAt(s *Store, failAt func(step string) error) { s.failAt = failAt }
 func SetRetention(s *Store, keepTurns int, minFreeBytes uint64) {
 	s.keepTurns, s.minFreeBytes = keepTurns, minFreeBytes
 }
+
+// SetDiskUnder makes s take dir for a folder on the disk its pool's file is
+// on.
+func SetDiskUnder(s *Store, dir string) { s.under = dir }
+
+// MountSource is mountSource.
+var MountSource = mountSource
+
+// ParseUsage is parseUsage.
+var ParseUsage = parseUsage

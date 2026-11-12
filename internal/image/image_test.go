@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -228,6 +230,48 @@ func TestLoadKeepsPrevious(t *testing.T) {
 	}
 	if img, err := image.Open(dir, "fern-box:dev"); err != nil || img.ID != ids[3] {
 		t.Errorf("Open() = %v, %v; want the last image", img, err)
+	}
+}
+
+// List names each image with its tags; Remove takes an image no tag points
+// to, and refuses one a tag does.
+func TestListAndRemove(t *testing.T) {
+	dir := t.TempDir()
+	var ids []string
+	for _, v := range []string{"V=1", "V=2"} {
+		stream, id := saved(t, "fern-box:dev", v, tarOf(t, entry{name: "f", data: v}))
+		if _, err := image.Load(t.Context(), bytes.NewReader(stream), dir); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	want := []image.Stored{{ID: ids[0]}, {ID: ids[1], Tags: []string{"fern-box:dev"}}}
+	slices.SortFunc(want, func(a, b image.Stored) int { return strings.Compare(a.ID, b.ID) })
+	got, err := image.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("List() mismatch (-want +got):\n%s", diff)
+	}
+	if err := image.Remove(dir, ids[1]); err == nil {
+		t.Error("Remove of the image its tag points to returned no error")
+	}
+	if err := image.Remove(dir, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := image.Remove(dir, "../"+ids[0]); err == nil {
+		t.Error("Remove of a path returned no error")
+	}
+	got, err = image.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]image.Stored{{ID: ids[1], Tags: []string{"fern-box:dev"}}}, got); diff != "" {
+		t.Errorf("List() after Remove mismatch (-want +got):\n%s", diff)
+	}
+	if got, err := image.List(filepath.Join(dir, "none")); err != nil || got != nil {
+		t.Errorf("List of a missing directory = %v, %v; want none", got, err)
 	}
 }
 

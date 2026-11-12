@@ -173,6 +173,9 @@ type Store struct {
 	// Retention (retention.go); tests change it.
 	keepTurns    int
 	minFreeBytes uint64
+	// under is a folder on the disk the pool's file is on, "" for a pool on
+	// a partition of its own (space.go).
+	under string
 }
 
 // step returns failAt's error for the named step, if failAt is set.
@@ -193,7 +196,7 @@ func Open(ctx context.Context, root string) (*Store, error) {
 	if fsInfo.Type != unix.BTRFS_SUPER_MAGIC {
 		return nil, fmt.Errorf("open pool: %s is not on btrfs", root)
 	}
-	s := &Store{root: root, claims: make(map[string]string), keepTurns: keepTurns, minFreeBytes: minFreeBytes}
+	s := &Store{root: root, claims: make(map[string]string), keepTurns: keepTurns, minFreeBytes: minFreeBytes, under: diskUnder(root)}
 	if err := os.MkdirAll(filepath.Join(root, "envs"), 0o755); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
