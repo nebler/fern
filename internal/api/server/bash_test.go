@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -802,6 +803,31 @@ func TestCloudflareConnect(t *testing.T) {
 				t.Errorf("secrets (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// The shell's tools come with Claude's prompt; the others are fetched at
+// their first use, as Claude Code does with an MCP server's tools.
+func TestShellToolsAlwaysLoad(t *testing.T) {
+	url, _ := newDemoBox(t).serve(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	tools, err := s.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, tool := range tools.Tools {
+		if tool.Meta["anthropic/alwaysLoad"] == true {
+			got = append(got, tool.Name)
+		}
+	}
+	slices.Sort(got)
+	if diff := cmp.Diff([]string{"Bash", "BashOutput", "KillShell"}, got); diff != "" {
+		t.Errorf("tools always loaded (-want +got):\n%s", diff)
 	}
 }
 

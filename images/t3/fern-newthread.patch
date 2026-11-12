@@ -1,0 +1,88 @@
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
+index 41ed276d..505020bb 100644
+--- a/apps/server/src/checkpointing/FernCheckpointStore.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -120,6 +120,9 @@ export const prewakeWorktree = (worktreePath: string, options: PrewakeOptions =
+     : prewake(options.socketPath ?? FERN_SOCKET, fernEnvironmentId(workspace));
+ };
+ 
++/** Whether this server is Fern's: its pool is named in FERN_POOL. */
++export const onFern = (): boolean => Boolean(process.env.FERN_POOL?.trim());
++
+ /**
+  * Sends the committed files of the project at workspaceRoot, as a new worktree has them, to
+  * Fern, which builds the project's golden snapshot from them: its services' data made once
+diff --git a/apps/server/src/project/ProjectService.test.ts b/apps/server/src/project/ProjectService.test.ts
+index 67e76bfe..08eaa0ab 100644
+--- a/apps/server/src/project/ProjectService.test.ts
++++ b/apps/server/src/project/ProjectService.test.ts
+@@ -202,6 +202,40 @@ it.layer(layerTest)("ProjectService", (it) => {
+     }),
+   );
+ 
++  it.effect("makes New worktree a new project's own default on Fern, and nowhere else", () =>
++    Effect.gen(function* () {
++      const service = yield* ProjectService.ProjectService;
++      const settings = yield* ServerSettings.ServerSettingsService;
++      const create = (name: string) =>
++        service.create({
++          commandId: CommandId.make(`command:project:create-${name}`),
++          projectId: ProjectId.make(`project:${name}`),
++          title: name,
++          workspaceRoot: `/work/${name}`,
++        });
++      const before = process.env.FERN_POOL;
++      yield* Effect.acquireUseRelease(
++        Effect.sync(() => {
++          delete process.env.FERN_POOL;
++        }),
++        () =>
++          Effect.gen(function* () {
++            yield* create("elsewhere");
++            process.env.FERN_POOL = "/var/lib/fern";
++            yield* create("on-fern");
++          }),
++        () =>
++          Effect.sync(() => {
++            if (before === undefined) delete process.env.FERN_POOL;
++            else process.env.FERN_POOL = before;
++          }),
++      );
++      assert.deepEqual((yield* settings.getSettings).projectSettingsOverrides, {
++        [ProjectId.make("project:on-fern")]: { defaultThreadEnvMode: "worktree" },
++      });
++    }),
++  );
++
+   it.effect("rejects active workspace collisions", () =>
+     Effect.gen(function* () {
+       const service = yield* ProjectService.ProjectService;
+diff --git a/apps/server/src/project/ProjectService.ts b/apps/server/src/project/ProjectService.ts
+index 972cfc78..1628ae45 100644
+--- a/apps/server/src/project/ProjectService.ts
++++ b/apps/server/src/project/ProjectService.ts
+@@ -344,6 +344,24 @@ export const make = Effect.gen(function* () {
+       yield* projectEnrichment.invalidate([workspaceRoot]);
+       // Fern builds the project's golden snapshot now, rather than with its first thread.
+       yield* FernCheckpointStore.prebuildGolden(workspaceRoot).pipe(Effect.forkDetach);
++      // On Fern only a New worktree thread gets a box. T3 starts the first thread of a project
++      // in its own projects folder as Local, whatever the environment's default, and Fern's
++      // clones are in that folder: the project's own setting is not overruled that way.
++      if (FernCheckpointStore.onFern()) {
++        yield* serverSettings
++          .updateSettings({
++            projectSettingsOverrides: { [input.projectId]: { defaultThreadEnvMode: "worktree" } },
++          })
++          .pipe(
++            Effect.asVoid,
++            Effect.catchCause((cause) =>
++              Effect.logWarning(
++                `Failed to make New worktree the default for project ${input.projectId}.`,
++                cause,
++              ),
++            ),
++          );
++      }
+       return yield* readCommitted(input.projectId);
+     },
+   );

@@ -189,6 +189,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 	})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "Bash",
+		Meta: alwaysLoad(),
 		Description: "Runs a shell command in this thread's box, where its services (databases, servers) run, " +
 			"in the workspace, and returns what it printed and its exit code. Use it as you would Bash. " +
 			"Every command starts in the workspace: put a cd in the same command if you need another folder. " +
@@ -218,6 +219,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 	})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "BashOutput",
+		Meta:        alwaysLoad(),
 		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
 		text, err := s.readJob(ctx, id, in.ID)
@@ -228,6 +230,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 	})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "KillShell",
+		Meta:        alwaysLoad(),
 		Description: "Stops a background command started by Bash, with what it started, and returns its last output.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in killShellInput) (*mcp.CallToolResult, any, error) {
 		text, err := s.killJob(ctx, id, in.ID)
@@ -240,6 +243,13 @@ func (s *Server) bashServer(id string) *mcp.Server {
 	s.addCloudflareTools(srv, id)
 	return srv
 }
+
+// alwaysLoad marks a tool whose definition Claude gets with its prompt.
+// Claude Code otherwise lists an MCP server's tools by name and fetches a
+// definition at its first use: for the shell that stands in for Claude's
+// own, that is a step at the start of every session, which Claude also
+// reports as if its shell were missing.
+func alwaysLoad() mcp.Meta { return mcp.Meta{"anthropic/alwaysLoad": true} }
 
 // addForkTools adds to srv the tools with which environment id's Claude
 // forks it, and runs commands in and deletes its forks, and only its own.
