@@ -1163,7 +1163,8 @@ except Exception as e:
 # mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell, env_fork, …) of environment
 # ENV's MCP server with ARGS, a JSON object, from its agent box, as Claude
 # there does: through the box's relay, which adds the box's token (Claude is
-# given none), and prints the answer's text; it fails if the tool did.
+# given none), and prints the answer's text; it fails if the tool did. The
+# relay answers a tool call as a stream, whose one message is the answer.
 mcp() {
   local call out
   call=$(python3 -c 'import json, sys
@@ -1175,7 +1176,8 @@ print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
     done
     printf %s "$out"' sh "$1" "$call") || return
   python3 -c 'import json, sys
-res = json.load(sys.stdin)["result"]
+data = [line[6:] for line in sys.stdin.read().splitlines() if line.startswith("data: ")]
+res = json.loads(data[-1])["result"]
 print(res["content"][0]["text"])
 sys.exit(1 if res.get("isError") else 0)' <<<"$out"
 }

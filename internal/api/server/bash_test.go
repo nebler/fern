@@ -564,50 +564,72 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	}
 }
 
-// A call cut off for any other reason ends its command.
+// A call Claude gives up on ends its command, whichever way Claude does: its
+// request goes away, or it says so (notifications/cancelled) and keeps the
+// stream the relay answered with. Either way the call gets no answer.
 func TestBashCancelledCallKillsCommand(t *testing.T) {
-	url, _, _ := newMCP(t)
-	relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), boxToken, 30*time.Second))
-	t.Cleanup(relay.Close)
-	pidfile := filepath.Join(t.TempDir(), "pid")
-	// As Claude gives up on a call: its request goes away.
-	call, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{
-		"name": "Bash", "arguments": map[string]any{"command": "echo $$ > " + pidfile + "; exec sleep 300"},
-	}})
-	if err != nil {
-		t.Fatal(err)
+	post := func(ctx context.Context, t *testing.T, url string, msg map[string]any) (*http.Response, error) {
+		t.Helper()
+		body, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		return http.DefaultClient.Do(req)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, relay.URL+"/mcp/demo", bytes.NewReader(call))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+boxToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if resp, err := http.DefaultClient.Do(req); err == nil {
+	tests := []struct {
+		name   string
+		giveUp func(t *testing.T, url string, cancel context.CancelFunc)
+	}{
+		{"its request goes away", func(_ *testing.T, _ string, cancel context.CancelFunc) { cancel() }},
+		{"Claude says so", func(t *testing.T, url string, _ context.CancelFunc) {
+			resp, err := post(t.Context(), t, url, map[string]any{
+				"jsonrpc": "2.0", "method": "notifications/cancelled", "params": map[string]any{"requestId": 7},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 			_ = resp.Body.Close()
-			t.Errorf("the call answered %s", resp.Status)
-		}
-	}()
-	var pid int
-	for deadline := time.Now().Add(20 * time.Second); pid == 0; time.Sleep(5 * time.Millisecond) {
-		data, _ := os.ReadFile(pidfile)
-		pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
-		if time.Now().After(deadline) {
-			t.Fatal("the command didn't start")
-		}
+		}},
 	}
-	cancel()
-	<-done
-	for deadline := time.Now().Add(20 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the command outlived its call")
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, _, _ := newMCP(t)
+			relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), boxToken, 30*time.Second))
+			t.Cleanup(relay.Close)
+			pidfile := filepath.Join(t.TempDir(), "pid")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			resp, err := post(ctx, t, relay.URL+"/mcp/demo", map[string]any{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": map[string]any{
+				"name": "Bash", "arguments": map[string]any{"command": "echo $$ > " + pidfile + "; exec sleep 300"},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			var pid int
+			for deadline := time.Now().Add(20 * time.Second); pid == 0; time.Sleep(5 * time.Millisecond) {
+				data, _ := os.ReadFile(pidfile)
+				pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+				if time.Now().After(deadline) {
+					t.Fatal("the command didn't start")
+				}
+			}
+			tt.giveUp(t, relay.URL+"/mcp/demo", cancel)
+			if body, _ := io.ReadAll(resp.Body); strings.Contains(string(body), "data:") {
+				t.Errorf("the call was answered: %q", body)
+			}
+			for deadline := time.Now().Add(20 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(5 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the command outlived its call")
+				}
+			}
+		})
 	}
 }
 
