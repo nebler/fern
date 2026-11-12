@@ -38,6 +38,39 @@ type job struct {
 	cancel context.CancelFunc // ends the watch of the job, not the job
 	state  atomic.Int32       // a jobState, set once by the job's watch as it ends
 	killed atomic.Bool        // KillShell stopped it: the agent's call, after which the box lingers as after a Bash call
+
+	// mu guards last: what an exited job had left to say, which its watch
+	// took from the box as it ended. The box sleeps 5 s after Claude's next
+	// Bash call and forgets its jobs, and Claude often asks later than that.
+	mu   sync.Mutex
+	last *boxexec.JobOutput
+}
+
+// keep records what the job had left to say as it ended.
+func (j *job) keep(o boxexec.JobOutput) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.last = &o
+}
+
+// kept returns what an exited job had left to say, its output once, and
+// whether its watch kept it.
+func (j *job) kept() (boxexec.JobOutput, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.last == nil {
+		return boxexec.JobOutput{}, false
+	}
+	o := *j.last
+	j.last.Output, j.last.Dropped = "", 0
+	return o, true
+}
+
+// read reports whether Claude has read all an exited job had to say.
+func (j *job) read() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.last != nil && j.last.Output == ""
 }
 
 // jobState is what the daemon knows of a background command. It leaves
@@ -48,7 +81,8 @@ const (
 	// jobWatching: it runs, as far as the daemon knows, and its box's actor
 	// counts it.
 	jobWatching jobState = iota
-	// jobExited: it ended by itself, or by KillShell. Its box has its output.
+	// jobExited: it ended by itself, or by KillShell. The daemon has what it
+	// had left to say (job.last), or its box does.
 	jobExited
 	// jobBoxStopped: its box went to sleep, was restored or deleted. There
 	// is nothing more to read.
@@ -139,10 +173,18 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 	js := s.jobs.byEnv[id]
 	js[j.id] = j
 	// The records of jobs there is nothing more to read of go, once there
-	// are many.
+	// are many; then those of ended jobs nobody read, which hold their output.
 	if len(js) > 2*boxexec.MaxJobs {
 		for jid, old := range js {
-			if old.is(jobBoxStopped) || old.is(jobLost) {
+			if old.is(jobBoxStopped) || old.is(jobLost) || old.is(jobExited) && old.read() {
+				delete(js, jid)
+			}
+		}
+		for jid, old := range js {
+			if len(js) <= 2*boxexec.MaxJobs {
+				break
+			}
+			if old.is(jobExited) {
 				delete(js, jid)
 			}
 		}
@@ -167,6 +209,10 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 			// Its box may be gone without its actor knowing yet.
 			j.state.Store(int32(jobLost))
 		default:
+			// The job still counts, so its box is up.
+			if o, err := j.box.Read(wctx, j.id); err == nil {
+				j.keep(o)
+			}
 			j.state.Store(int32(jobExited))
 		}
 	})
@@ -192,6 +238,9 @@ func (s *Server) readJob(ctx context.Context, id, jobID string) (string, error) 
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil // without a call to a box that isn't there
 	}
+	if o, ok := j.kept(); ok && j.is(jobExited) {
+		return j.report(o, nil), nil // its box may be asleep by now
+	}
 	o, err := j.box.Read(ctx, j.id)
 	if errors.Is(err, boxexec.ErrNoJob) {
 		s.forgetJob(id, j)
@@ -207,6 +256,9 @@ func (s *Server) killJob(ctx context.Context, id, jobID string) (string, error) 
 	}
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil
+	}
+	if o, ok := j.kept(); ok && j.is(jobExited) {
+		return j.report(o, nil), nil
 	}
 	j.killed.Store(true)
 	o, err := j.box.Kill(ctx, j.id)
@@ -235,7 +287,7 @@ func (j *job) stopped() string {
 func (j *job) report(o boxexec.JobOutput, err error) string {
 	switch {
 	case errors.Is(err, boxexec.ErrNoJob) && !j.is(jobBoxStopped):
-		return fmt.Sprintf("[%s has ended, and its box has dropped it to make room for newer ones]\n", j.id)
+		return fmt.Sprintf("[%s has ended, and its box no longer has it: a box keeps its newest %d, and none over a sleep]\n", j.id, boxexec.MaxJobs)
 	case err != nil || j.is(jobBoxStopped):
 		return j.stopped()
 	}

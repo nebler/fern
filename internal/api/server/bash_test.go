@@ -46,7 +46,8 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 // demoBox is environment demo, its box a real boxexec server with jobs, run
 // by a fake driver and actors.
 type demoBox struct {
-	dir  string // where the box runs commands
+	dir  string       // where the box runs commands
+	box  *swapHandler // the box's fern-init
 	st   *fakeStore
 	drv  *runsc.Fake
 	envs *actor.Group
@@ -81,7 +82,9 @@ func newDemoBoxWith(t *testing.T, relay bool) demoBox {
 	jobs := boxexec.NewJobs(boxToken, dir, nil, log)
 	jobs.Register(mux)
 	t.Cleanup(jobs.Close)
-	box := httptest.NewServer(mux)
+	init := &swapHandler{}
+	init.set(mux)
+	box := httptest.NewServer(init)
 	t.Cleanup(box.Close)
 	drv := runsc.NewFake(box.Listener.Addr().String())
 	st := newFakeStore()
@@ -94,7 +97,7 @@ func newDemoBoxWith(t *testing.T, relay bool) demoBox {
 	done := make(chan struct{})
 	go func() { _ = envs.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return demoBox{dir: dir, st: st, drv: drv, envs: envs, log: log}
+	return demoBox{dir: dir, box: init, st: st, drv: drv, envs: envs, log: log}
 }
 
 // serve serves the box's environment's MCP endpoint from a new API server,
@@ -323,6 +326,54 @@ func TestBashBackgroundEnds(t *testing.T) {
 }
 
 // keyed sends every request as the agent box's relay does a call: under key.
+// A background command that ended still has its output and exit code for
+// Claude after its box slept and woke: the box's new fern-init knows no jobs,
+// and it sleeps 5 s after a Bash call, sooner than Claude asks (VPS,
+// 2026-11-12: "its box has dropped it").
+func TestBashBackgroundEndedBeforeASleep(t *testing.T) {
+	b := newDemoBox(t)
+	url, _ := b.serve(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	// The daemon reads an ended command's last output from the box once.
+	first := *b.box.h.Load()
+	read := make(chan struct{}, 1)
+	b.box.set(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first.ServeHTTP(w, r)
+		if strings.HasSuffix(r.URL.Path, "/read") {
+			select {
+			case read <- struct{}{}:
+			default:
+			}
+		}
+	}))
+	id := jobID.FindString(call(t, s, "Bash", map[string]any{"command": "echo bye; exit 4", "run_in_background": true}))
+	select {
+	case <-read:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon didn't take the ended command's output from its box")
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, b.dir, nil, b.log))
+	jobs := boxexec.NewJobs(boxToken, b.dir, nil, b.log)
+	jobs.Register(mux)
+	t.Cleanup(jobs.Close)
+	b.box.set(mux)
+
+	got := output(t, s, id, "exited with code 4")
+	if !strings.Contains(got, "bye") {
+		t.Errorf("BashOutput = %q, want the command's output", got)
+	}
+	// Its output was said once; how it ended, every time.
+	if got := call(t, s, "BashOutput", map[string]any{"bash_id": id}); got != "["+id+" is exited with code 4]\n" {
+		t.Errorf("a second BashOutput = %q, want how it ended and no output", got)
+	}
+}
+
 type keyed struct{ token, key string }
 
 func (k keyed) RoundTrip(r *http.Request) (*http.Response, error) {
