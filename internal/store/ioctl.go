@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -23,7 +24,44 @@ const (
 	btrfsSnapCreateV2   = btrfsVolWrite | 23
 	btrfsSnapDestroy    = btrfsVolWrite | 15
 	btrfsSubvolReadOnly = 1 << 1
+	// FS_IOC_GETFLAGS supplies the _IOR direction bits the same way.
+	btrfsIoctlRead     = unix.FS_IOC_GETFLAGS & 0xe0000000
+	btrfsGetSubvolInfo = btrfsIoctlRead | (unsafe.Sizeof(btrfsSubvolInfo{}) << 16) | (0x94 << 8) | 60
 )
+
+type btrfsTimespec struct {
+	Sec  uint64
+	Nsec uint32
+	_    uint32
+}
+
+// btrfsSubvolInfo is struct btrfs_ioctl_get_subvol_info_args.
+type btrfsSubvolInfo struct {
+	TreeID                                 uint64
+	Name                                   [256]byte
+	ParentID, DirID, Generation, Flags     uint64
+	UUID, ParentUUID, ReceivedUUID         [16]byte
+	CTransID, OTransID, STransID, RTransID uint64
+	CTime, OTime, STime, RTime             btrfsTimespec
+	Reserved                               [8]uint64
+}
+
+// subvolumeCreated returns when the subvolume at path was made: for a
+// snapshot, when it was taken. btrfs keeps it in the subvolume itself, so
+// it needs no record beside it.
+func subvolumeCreated(path string) (time.Time, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = f.Close() }()
+	var info btrfsSubvolInfo
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), btrfsGetSubvolInfo, uintptr(unsafe.Pointer(&info)))
+	if errno != 0 {
+		return time.Time{}, fmt.Errorf("btrfs subvolume info %s: %w", path, errno)
+	}
+	return time.Unix(int64(info.OTime.Sec), int64(info.OTime.Nsec)).UTC(), nil
+}
 
 type btrfsVolArgs struct {
 	FD   int64

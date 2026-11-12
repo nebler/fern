@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,10 +14,11 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite" // the tests edit the index behind the store's back
+	_ "modernc.org/sqlite" // a test makes the index an earlier Fern kept
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -54,7 +56,6 @@ func openPool(t *testing.T) (*store.Store, string) {
 				t.Errorf("cleanup: Delete(%s) error: %v", env.ID, err)
 			}
 		}
-		_ = st.Close()
 		_ = os.RemoveAll(dir)
 	})
 	return st, dir
@@ -314,15 +315,10 @@ func TestReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshots(demo) error: %v", err)
 	}
-	if err := st.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
-	}
-
 	st2, err := store.Open(ctx, dir)
 	if err != nil {
 		t.Fatalf("Open(%s) again error: %v", dir, err)
 	}
-	defer func() { _ = st2.Close() }()
 	got, err := st2.Get(ctx, "demo")
 	if err != nil {
 		t.Fatalf("Get(demo) after reopen error: %v", err)
@@ -337,15 +333,16 @@ func TestReopen(t *testing.T) {
 	if diff := cmp.Diff(snaps, gotSnaps); diff != "" {
 		t.Errorf("Snapshots(demo) after reopen mismatch (-want +got):\n%s", diff)
 	}
-	if err := st2.Delete(ctx, "demo"); err != nil { // the cleanup's store is closed
+	if err := st2.Delete(ctx, "demo"); err != nil {
 		t.Errorf("Delete(demo) error: %v", err)
 	}
 }
 
 func TestOpen(t *testing.T) {
-	_, dir := openPool(t)
-	if _, _, perm := stat(t, filepath.Join(dir, "state")); perm != 0o700 {
-		t.Errorf("state/ mode = %v, want 0700: the index holds the box tokens", perm)
+	st, dir := openPool(t)
+	create(t, st, "demo", store.CreateOptions{})
+	if uid, _, perm := stat(t, filepath.Join(dir, "envs", "demo", store.RecordFile)); uid != 0 || perm != 0o600 {
+		t.Errorf("the record: owner %d, mode %v; want root's alone (0600): it holds the box token", uid, perm)
 	}
 	other := t.TempDir()
 	var fsInfo unix.Statfs_t
@@ -355,8 +352,7 @@ func TestOpen(t *testing.T) {
 	if fsInfo.Type == unix.BTRFS_SUPER_MAGIC {
 		t.Skip("the temporary directory is on btrfs")
 	}
-	if st, err := store.Open(t.Context(), other); err == nil {
-		_ = st.Close()
+	if _, err := store.Open(t.Context(), other); err == nil {
 		t.Errorf("Open(%s) on a filesystem that isn't btrfs succeeded, want an error", other)
 	}
 }
@@ -399,7 +395,7 @@ func TestNestedSubvolume(t *testing.T) {
 }
 
 // What a create or delete leaves when it stops half-way is garbage, but data
-// the index has lost is not.
+// with neither a record nor a marker is not.
 func TestCreateOverLeftovers(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
@@ -533,7 +529,7 @@ func TestCreatePathErrors(t *testing.T) {
 		{"too shallow", "b", filepath.Join(wt, "r")},
 		{"too deep", "c", filepath.Join(wt, "r", "x", "y")},
 		// Followed, the link would hand its target to the box user: T3 could
-		// point it at state/, which holds every box token.
+		// point it at another environment's folder, where its box token is.
 		{"repo folder is a symlink", "d", filepath.Join(wt, "alias", "x")},
 		{"symlink", "e", filepath.Join(wt, "r", "link")},
 		{"another environment's", "f", filepath.Join(wt, "r", "taken")},
@@ -651,38 +647,34 @@ func TestDeleteSnapshot(t *testing.T) {
 	}
 }
 
-// Reconcile finishes what a crash interrupted and keeps what the index lost.
+// Reconcile finishes what a crash interrupted and keeps data that has no
+// record.
 func TestReconcile(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	dropRow := func(id string) {
+	dropRecord := func(id string) {
 		t.Helper()
-		if _, err := db.ExecContext(ctx, `DELETE FROM environments WHERE id = ?`, id); err != nil {
+		if err := os.Remove(filepath.Join(dir, "envs", id, store.RecordFile)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// A delete that stopped after removing the row: its marker names the workspace.
+	// A delete that stopped after removing the record: its marker names the workspace.
 	goneWorkspace := filepath.Join(dir, "worktrees", "r", "gone")
 	create(t, st, "gone", store.CreateOptions{Workspace: goneWorkspace})
 	writeFile(t, filepath.Join(dir, "envs", "gone", "incomplete"), goneWorkspace)
-	dropRow("gone")
-	// A create at a caller's path that stopped before its row: T3's worktree,
+	dropRecord("gone")
+	// A create at a caller's path that stopped before its record: T3's worktree,
 	// maybe with work in it, stays for the next Create to resume.
 	half := filepath.Join(dir, "worktrees", "r", "half")
 	create(t, st, "half", store.CreateOptions{Workspace: half})
 	writeFile(t, filepath.Join(half, "work"), "kept")
 	writeFile(t, filepath.Join(dir, "envs", "half", "incomplete"), "")
-	dropRow("half")
+	dropRecord("half")
 	// A restore that stopped before removing live.new.
 	create(t, st, "kept", store.CreateOptions{})
 	next := filepath.Join(dir, "envs", "kept", "live.new")
 	subvolume(t, next)
-	// A workspace the index has lost.
+	// A workspace with neither a record nor a marker.
 	lostLive := filepath.Join(dir, "envs", "lost", "live")
 	if err := os.MkdirAll(lostLive, 0o755); err != nil {
 		t.Fatal(err)
@@ -732,23 +724,186 @@ func TestPreRestore(t *testing.T) {
 		t.Errorf("f = %q after undoing the restore, want %q", got, "v2")
 	}
 
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	if _, err := db.ExecContext(ctx, `UPDATE snapshots SET created_at = created_at - 2*86400 WHERE id LIKE 'pre-restore-%'`); err != nil {
-		t.Fatal(err)
-	}
+	// A pre-restore snapshot says in its name when its restore ran. One from
+	// two days ago goes at the next restore; today's two stay.
+	old := "pre-restore-" + time.Now().Add(-48*time.Hour).UTC().Format("20060102-150405.000000000")
+	snapshot(t, st, "demo", old)
 	if err := st.Restore(ctx, "demo", "s1"); err != nil {
 		t.Fatalf("Restore(demo, s1) a day later error: %v", err)
 	}
 	got := preRestores(t, st)
-	if len(got) != 1 || slices.Contains(pre, got[0]) {
-		t.Errorf("pre-restore snapshots %q a day later, want only the new one", got)
+	if len(got) != 3 || slices.Contains(got, old) {
+		t.Errorf("pre-restore snapshots %q after the next restore, want today's three and not %s", got, old)
 	}
-	for _, id := range pre {
-		gone(t, filepath.Join(dir, "envs", "demo", "snaps", id))
+	gone(t, filepath.Join(dir, "envs", "demo", "snaps", old))
+}
+
+// Snapshots are listed in the order they were taken, whatever their names,
+// from what btrfs keeps: nothing beside them records it.
+func TestSnapshotsOrder(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	create(t, st, "demo", store.CreateOptions{})
+	want := []string{"z-first", "m-second", "a-third"}
+	before := time.Now().Add(-time.Second)
+	for _, id := range want {
+		snapshot(t, st, "demo", id)
+	}
+	snaps, err := st.Snapshots(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, snap := range snaps {
+		got = append(got, snap.ID)
+		if snap.Created.Before(before) || snap.Created.After(time.Now().Add(time.Second)) {
+			t.Errorf("snapshot %s was taken at %v, want about now", snap.ID, snap.Created)
+		}
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Snapshots(demo) order (-want +got):\n%s", diff)
+	}
+	// A plain folder among them is no snapshot.
+	if err := os.Mkdir(filepath.Join(dir, "envs", "demo", "snaps", "not-one"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.HasSnapshot(ctx, store.SnapshotRef{Env: "demo", Snapshot: "not-one"}); err != nil || ok {
+		t.Errorf("HasSnapshot(a plain folder) = %v, %v, want false", ok, err)
+	}
+	if snaps, err := st.Snapshots(ctx, "demo"); err != nil || len(snaps) != 3 {
+		t.Errorf("Snapshots(demo) with a plain folder beside them = %v, %v, want the three", snaps, err)
+	}
+	if err := os.Remove(filepath.Join(dir, "envs", "demo", "snaps", "not-one")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An environment restored from a backup that held none of its snapshots has
+// no snaps folder: it has no snapshots, and can take one.
+func TestNoSnapsFolder(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	create(t, st, "demo", store.CreateOptions{})
+	if err := os.Remove(filepath.Join(dir, "envs", "demo", "snaps")); err != nil {
+		t.Fatal(err)
+	}
+	if snaps, err := st.Snapshots(ctx, "demo"); err != nil || len(snaps) != 0 {
+		t.Errorf("Snapshots(demo) without the folder = %v, %v, want none", snaps, err)
+	}
+	if lost, err := st.Reconcile(ctx); err != nil || len(lost) != 0 {
+		t.Errorf("Reconcile() without the folder = %v, %v, want nothing lost", lost, err)
+	}
+	snapshot(t, st, "demo", "s1")
+	if snaps, err := st.Snapshots(ctx, "demo"); err != nil || len(snaps) != 1 {
+		t.Errorf("Snapshots(demo) after taking one = %v, %v, want s1", snaps, err)
+	}
+}
+
+// An environment whose record can't be read is kept and reported, and the
+// others go on working.
+func TestBadRecord(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	create(t, st, "good", store.CreateOptions{})
+	bad := create(t, st, "bad", store.CreateOptions{})
+	writeFile(t, filepath.Join(bad.Workspace, "work"), "kept")
+	record := filepath.Join(dir, "envs", "bad", store.RecordFile)
+	saved := readFile(t, record)
+	for name, content := range map[string]string{
+		"not JSON":          "{",
+		"from a newer Fern": `{"version":99,"workspace":"/x","box_token":"t"}`,
+		"without workspace": `{"version":1,"box_token":"t"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeFile(t, record, content)
+			envs, err := st.List(ctx)
+			if err != nil || len(envs) != 1 || envs[0].ID != "good" {
+				t.Errorf("List() = %v, %v, want the one that can be read", envs, err)
+			}
+			lost, err := st.Reconcile(ctx)
+			if err != nil {
+				t.Fatalf("Reconcile() error: %v", err)
+			}
+			if diff := cmp.Diff([]string{filepath.Join(dir, "envs", "bad")}, lost); diff != "" {
+				t.Errorf("Reconcile() lost (-want +got):\n%s", diff)
+			}
+			if got := readFile(t, filepath.Join(bad.Workspace, "work")); got != "kept" {
+				t.Errorf("work = %q after Reconcile, want it kept", got)
+			}
+		})
+	}
+	writeFile(t, record, saved)
+	if _, err := st.Get(ctx, "bad"); err != nil {
+		t.Errorf("Get(bad) with its record back: %v", err)
+	}
+}
+
+// A pool an earlier Fern kept a SQLite index for gets its records from it,
+// once, and its snapshots from the disk.
+func TestImportIndex(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	env := create(t, st, "demo", store.CreateOptions{})
+	snapshot(t, st, "demo", "s1")
+	// As that Fern left the pool: the row in the index, no record.
+	if err := os.Remove(filepath.Join(dir, "envs", "demo", store.RecordFile)); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "fern.sqlite")+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, q := range []string{
+		`CREATE TABLE environments (id TEXT PRIMARY KEY, workspace TEXT NOT NULL UNIQUE, git TEXT NOT NULL, created_at INTEGER NOT NULL, box_token TEXT NOT NULL)`,
+		`CREATE TABLE snapshots (env TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (env, id))`,
+		fmt.Sprintf(`INSERT INTO environments VALUES ('demo', '%s', '/git', %d, 'old-token')`, env.Workspace, created.Unix()),
+		// A row whose folder is gone, and a snapshot row with no snapshot.
+		`INSERT INTO environments VALUES ('ghost', '/nowhere', '', 1, 'x')`,
+		`INSERT INTO snapshots VALUES ('demo', 'stale', 1)`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pass := range []string{"the first start after the upgrade", "the start after that"} {
+		st2, err := store.Open(ctx, dir)
+		if err != nil {
+			t.Fatalf("Open() at %s: %v", pass, err)
+		}
+		store.SetRetention(st2, 50, 0)
+		got, err := st2.Get(ctx, "demo")
+		if err != nil {
+			t.Fatalf("Get(demo) at %s: %v", pass, err)
+		}
+		want := store.Env{ID: "demo", Workspace: env.Workspace, Claude: env.Claude, Git: "/git", Created: created, BoxToken: "old-token"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Get(demo) at %s (-want +got):\n%s", pass, diff)
+		}
+		if envs, err := st2.List(ctx); err != nil || len(envs) != 1 {
+			t.Errorf("List() at %s = %v, %v, want demo alone", pass, envs, err)
+		}
+		if lost, err := st2.Reconcile(ctx); err != nil || len(lost) != 0 {
+			t.Errorf("Reconcile() at %s = %v, %v, want nothing lost", pass, lost, err)
+		}
+		if got := snapIDs(t, st2); len(got) != 1 || got[0] != "s1" {
+			t.Errorf("Snapshots(demo) at %s = %v, want [s1]: what is on disk", pass, got)
+		}
+	}
+	gone(t, filepath.Join(state, "fern.sqlite"))
+	if _, _, perm := stat(t, state); perm != 0o700 {
+		t.Errorf("state/ mode = %v, want 0700: the kept index holds box tokens", perm)
+	}
+	if _, err := os.Lstat(filepath.Join(state, "fern.sqlite.imported")); err != nil {
+		t.Errorf("the imported index: %v, want it kept aside", err)
 	}
 }
 

@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +14,6 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/nebler/fern/internal/store/index"
 )
 
 // Create makes an environment, its workspace filled from opts.Seed if it
@@ -55,15 +52,17 @@ func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env,
 	return env, nil
 }
 
-// create makes environment id, which has no row. The marker goes first, so
-// whatever a create that stops leaves is garbage the next one clears.
+// create makes environment id, which has no record. The marker goes first,
+// so whatever a create that stops leaves is garbage the next one clears, and
+// the record last: with it the environment exists.
 func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env, error) {
 	workspace := s.livePath(id)
 	var err error
 	if opts.Workspace != "" {
-		if workspace, err = s.checkWorkspace(ctx, opts.Workspace); err != nil {
+		if workspace, err = s.claimWorkspace(ctx, id, opts.Workspace); err != nil {
 			return Env{}, err
 		}
+		defer s.release(workspace)
 	}
 	if err := s.clearLeftovers(ctx, id); err != nil {
 		return Env{}, err
@@ -105,7 +104,7 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 		if err := untar(ctx, workspace, opts.Seed); err != nil {
 			return Env{}, err
 		}
-		// The row must not outlive a power cut that the files don't.
+		// The record must not outlive a power cut that the files don't.
 		if err := syncfs(workspace); err != nil {
 			return Env{}, err
 		}
@@ -116,20 +115,18 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err != nil {
 		return Env{}, err
 	}
-	env := Env{ID: id, Workspace: workspace, Claude: s.claudePath(id), Git: git, Created: now(), BoxToken: rand.Text()}
-	if err := s.q.InsertEnv(ctx, index.InsertEnvParams{
-		ID: env.ID, Workspace: env.Workspace, Git: env.Git, CreatedAt: env.Created.Unix(), BoxToken: env.BoxToken,
-	}); err != nil {
+	rec := record{Workspace: workspace, Git: git, Created: now(), BoxToken: rand.Text()}
+	if err := s.writeRecord(id, rec); err != nil {
 		return Env{}, err
 	}
-	if err := s.step("create: indexed"); err != nil {
+	if err := s.step("create: recorded"); err != nil {
 		return Env{}, err
 	}
-	// With the row written, the marker means nothing.
+	// With the record written, the marker means nothing.
 	if err := os.Remove(s.markerPath(id)); err != nil {
 		return Env{}, err
 	}
-	return env, nil
+	return s.env(id, rec), nil
 }
 
 // forkWorkspace makes workspace a writable copy of snapshot src, or of
@@ -178,19 +175,23 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 	if err != nil {
 		return Env{}, err
 	}
-	if err := s.q.SetEnvGit(ctx, index.SetEnvGitParams{Git: git, ID: env.ID}); err != nil {
-		return Env{}, err
+	if git != env.Git {
+		rec := record{Workspace: env.Workspace, Git: git, Created: env.Created, BoxToken: env.BoxToken}
+		if err := s.writeRecord(env.ID, rec); err != nil {
+			return Env{}, err
+		}
+		env.Git = git
 	}
-	env.Git = git
 	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, ""); err != nil {
 		return Env{}, err
 	}
 	return env, nil
 }
 
-// checkWorkspace checks that path can be a new workspace and returns it
-// cleaned.
-func (s *Store) checkWorkspace(ctx context.Context, path string) (string, error) {
+// claimWorkspace checks that path can be environment id's new workspace and
+// returns it cleaned, claimed for id until release: no other environment
+// has it, and no create under way is making one there.
+func (s *Store) claimWorkspace(ctx context.Context, id, path string) (string, error) {
 	clean := filepath.Clean(path)
 	rel, err := filepath.Rel(s.worktrees(), clean)
 	parts := strings.Split(rel, string(filepath.Separator))
@@ -203,14 +204,31 @@ func (s *Store) checkWorkspace(ctx context.Context, path string) (string, error)
 			return "", fmt.Errorf("%s is a symlink: %w", p, ErrInvalidPath)
 		}
 	}
-	other, err := s.q.EnvAt(ctx, clean)
-	if err == nil {
-		return "", fmt.Errorf("%s is environment %s's workspace: %w", path, other.ID, ErrInvalidPath)
+	// The look and the claim are one step: of two creates at one path, the
+	// second finds the first's claim or its record.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if other, ok := s.claims[clean]; ok {
+		return "", fmt.Errorf("%s is being made environment %s's workspace: %w", path, other, ErrInvalidPath)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	envs, err := s.List(ctx)
+	if err != nil {
 		return "", err
 	}
+	for _, other := range envs {
+		if other.Workspace == clean {
+			return "", fmt.Errorf("%s is environment %s's workspace: %w", path, other.ID, ErrInvalidPath)
+		}
+	}
+	s.claims[clean] = id
 	return clean, nil
+}
+
+// release ends a claim claimWorkspace made.
+func (s *Store) release(workspace string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.claims, workspace)
 }
 
 // makeWorkspace makes workspace a subvolume owned by the box user, keeping

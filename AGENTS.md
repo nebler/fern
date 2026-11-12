@@ -27,7 +27,6 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - The store's and the watch's tests: `lab/test-store.sh`, on a real btrfs, as root in a container. `go test ./...` skips them (the store's need `FERN_TEST_BTRFS`, the watch's fanotify), and so does `lab/dev.sh`: run it after a change to `internal/store` or `internal/watch`.
 - Lint: `lab/lint.sh`: golangci-lint (config in `.golangci.yml`), shellcheck on the scripts and hadolint on the Dockerfile (`.hadolint.yaml`). Fix the code, don't silence the linter.
 - Fuzz: `lab/fuzz.sh` runs every `Fuzz` test for 20 s (`FUZZTIME=5m` for longer). A failure leaves its input in the package's `testdata/fuzz/`; commit it with the fix.
-- The index's SQL: tables in `internal/store/index/schema.sql`, queries in `queries.sql`; `lab/sqlc.sh generate` writes the Go for them (`sqlc.yaml`). Never edit the generated files; CI fails if they are out of date (`lab/sqlc.sh diff`).
 - Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; in the local lab (`lab/up.sh`, a systemd node in Docker) first, then on the VPS with `FERN_HOST` (`lab/vps.sh` sets one up)
 - Perf gate: `lab/perf.sh --fast` (about 1.5 minutes, big regressions only) while working on speed or memory, and `lab/perf.sh` (about 13 minutes in the lab, 26 on the VPS) before merging anything that could change them; it fails when a metric is worse than `lab/perf/<lab|vps>.tsv`. A change that is meant to move a number updates the baseline with `lab/perf.sh --accept` in the same commit. The VPS's baseline is the one that counts.
 - Did a change move a number: `lab/ab.sh -s "box t3"` builds HEAD (A) and the working tree (B), runs the sections on each in turn on the same node (A B, then B A, 6 rounds) and gives a verdict per metric (medians, change, 95% interval, p). Trust it over a single gate run: both versions see the same machine. About 25 minutes for `box` on the VPS.
@@ -79,8 +78,8 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 - No commented-out code, no TODOs without an owner and reason.
 
 ## Fern rules
-- **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
-- **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
+- **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a directory without its record), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
+- **The disk is the only record.** An environment is its directory with its record file (`envs/<id>/env.json`); a snapshot is its subvolume. Nothing beside them says what exists: no database, no cache that outlives the daemon.
 - **Per-turn work stays on the node.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login from `/etc/fern/claude.env`.
 - **Credentials never enter `live/`, golden or snapshots.**
 - **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.

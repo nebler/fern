@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/nebler/fern/internal/store/index"
 )
 
 // Retention keeps the pool from filling up (architecture §9): every turn of
@@ -37,16 +36,28 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 	if err := s.prunePreRestores(ctx, id, ""); err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
-	old, err := s.q.SnapshotsBeyond(ctx, index.SnapshotsBeyondParams{
-		Env: id, Pattern: preRestorePrefix + "%", Keep: int64(s.keepTurns),
-	})
+	snaps, err := s.Snapshots(ctx, id)
 	if err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
-	for _, snapID := range old {
-		if err := s.DeleteSnapshot(ctx, id, snapID); err != nil {
+	// Oldest first: every one with more than keepTurns newer than it goes.
+	turns := 0
+	for _, snap := range snaps {
+		if !strings.HasPrefix(snap.ID, preRestorePrefix) {
+			turns++
+		}
+	}
+	for _, snap := range snaps {
+		if turns <= s.keepTurns {
+			break
+		}
+		if strings.HasPrefix(snap.ID, preRestorePrefix) {
+			continue
+		}
+		if err := s.DeleteSnapshot(ctx, id, snap.ID); err != nil {
 			return fmt.Errorf("prune %s: %w", id, err)
 		}
+		turns--
 	}
 	return nil
 }

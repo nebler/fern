@@ -540,7 +540,6 @@ sleeping() {
   metric sleeping.daemon_memory_mib "the daemon's memory (RSS) with 585 asleep threads, MiB more than with 1" \
     "$(awk -v a="$(in_daemon 'ps -o rss= -p "$(systemctl show -P MainPID fern-daemon)"')" -v b="$rss0" 'BEGIN { printf "%.1f", (a - b) / 1024 }')"
   metric sleeping.ls_ms "fern ls with 585 threads, ms" "$(node_ms "$FERN_CLI" ls)"
-  metric sleeping.index_kib "the index's size, KiB" "$(in_daemon "du -k /var/lib/fern/state/fern.sqlite | cut -f1")"
   local deep=$ENV-fork-5-fork-3-fork-7
   metric sleeping.wake_ms "a wake among them, ms" "$(fern wake $deep | took)"
   check "it has its own Postgres with the data (3 users)" 3 "$(sql $deep 'select count(*) from users')"
@@ -1137,9 +1136,8 @@ mcp() {
   # MCP_URL=relay goes through the box's relay, as Claude does.
   [ "${MCP_URL:-}" = relay ] && host=127.0.0.1:7072
   # shellcheck disable=SC2016 # python's, on the node
-  token=$(on_node python3 -c 'import sqlite3, sys
-db = sqlite3.connect("file:/var/lib/fern/state/fern.sqlite?mode=ro", uri=True)
-print(db.execute("select box_token from environments where id = ?", (sys.argv[1],)).fetchone()[0])' "$1" </dev/null)
+  token=$(on_node python3 -c 'import json, sys
+print(json.load(open("/var/lib/fern/envs/" + sys.argv[1] + "/env.json"))["box_token"])' "$1" </dev/null)
   call=$(python3 -c 'import json, sys
 print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$2" "$3")
   # shellcheck disable=SC2016 # the box's shell's
@@ -1662,8 +1660,8 @@ backup() {
   local snap
   snap=$(in_daemon "ls /var/lib/fern/envs/$ENV/snaps | grep '^fern-backup-' | tail -1")
   check "… the workspace file for file" "$(treehash /var/lib/fern/envs/$ENV/snaps/$snap)" "$(treehash $scratch/envs/$ENV/live)"
-  check "… and the index and T3's data with it" "yes yes" \
-    "$(in_daemon "for p in state/fern.sqlite userdata; do test -e $scratch/\$p && echo yes || echo no; done" | xargs)"
+  check "… and its record and T3's data with it" "yes yes" \
+    "$(in_daemon "for p in envs/$ENV/env.json userdata; do test -e $scratch/\$p && echo yes || echo no; done" | xargs)"
   in_daemon "umount $scratch; rm -rf $scratch $scratch.img; rm -f /etc/fern/backup.env; podman rm -f fern-s3 >/dev/null"
   set_daemon_args $args
   fern rm $ENV

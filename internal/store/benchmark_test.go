@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,10 +15,10 @@ import (
 	"github.com/nebler/fern/internal/store"
 )
 
-// BenchmarkStore exercises the real btrfs and SQLite paths. Run in the pool
+// BenchmarkStore exercises the real btrfs paths. Run in the pool
 // provided by lab/test-store.sh; fixture creation and cleanup are not timed.
 func BenchmarkStore(b *testing.B) {
-	for _, name := range []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "BuildSource20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "Reconcile100Orphans", "List", "Get", "FindByPath"} {
+	for _, name := range []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "BuildSource20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "List", "List100", "Get", "FindByPath", "FindByPath100", "Snapshots50"} {
 		b.Run(name, func(b *testing.B) { benchmarkStore(b, name) })
 	}
 }
@@ -40,6 +39,8 @@ func benchmarkStore(b *testing.B, name string) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// The test pool is smaller than the free space a real one keeps.
+	store.SetRetention(st, 50, 0)
 	b.Cleanup(func() {
 		ctx := context.WithoutCancel(b.Context())
 		envs, err := st.List(ctx)
@@ -50,9 +51,6 @@ func benchmarkStore(b *testing.B, name string) {
 			if err := st.Delete(ctx, env.ID); err != nil {
 				b.Error(err)
 			}
-		}
-		if err := st.Close(); err != nil {
-			b.Error(err)
 		}
 		if err := os.RemoveAll(dir); err != nil {
 			b.Error(err)
@@ -90,18 +88,17 @@ func benchmarkStore(b *testing.B, name string) {
 	if name == "BuildSource20000" {
 		create("builder", store.CreateOptions{})
 	}
-	var index *sql.DB
-	if name == "Reconcile100Orphans" {
-		for i := range 100 {
-			check(st.Snapshot(b.Context(), "demo", fmt.Sprintf("recover-%03d", i)))
+	// What a lookup costs on a node with a hundred threads, and a listing of
+	// a thread's snapshots at the most Prune leaves.
+	if name == "List100" || name == "FindByPath100" {
+		for i := range 99 {
+			create(fmt.Sprintf("other-%02d", i), store.CreateOptions{})
 		}
-		index, err = sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite")+"?_pragma=busy_timeout(5000)")
-		check(err)
-		b.Cleanup(func() {
-			if err := index.Close(); err != nil {
-				b.Error(err)
-			}
-		})
+	}
+	if name == "Snapshots50" {
+		for i := range 49 { // base is the fiftieth snapshot.
+			check(st.Snapshot(b.Context(), "demo", fmt.Sprintf("turn-%02d", i)))
+		}
 	}
 	dirty := make([]byte, 8<<20)
 	var samples []time.Duration
@@ -135,9 +132,6 @@ func benchmarkStore(b *testing.B, name string) {
 			check(st.Snapshot(b.Context(), "demo", id))
 		case "SnapshotDirty8MiB":
 			check(os.WriteFile(filepath.Join(env.Workspace, "dirty"), dirty, 0o644))
-		case "Reconcile100Orphans":
-			_, err := index.ExecContext(b.Context(), `DELETE FROM snapshots WHERE env = 'demo' AND id != 'base'`)
-			check(err)
 		case "Delete10Snapshots":
 			for j := range 9 { // base is the tenth snapshot.
 				check(st.Snapshot(b.Context(), "demo", fmt.Sprintf("s-%d", j)))
@@ -160,17 +154,20 @@ func benchmarkStore(b *testing.B, name string) {
 			check(st.Restore(b.Context(), "demo", "base"))
 		case "Delete10Snapshots":
 			check(st.Delete(b.Context(), "demo"))
-		case "Reconcile", "Reconcile100Orphans":
+		case "Reconcile":
 			_, err := st.Reconcile(b.Context())
 			check(err)
-		case "List":
+		case "List", "List100":
 			_, err := st.List(b.Context())
 			check(err)
 		case "Get":
 			_, err := st.Get(b.Context(), "demo")
 			check(err)
-		case "FindByPath":
+		case "FindByPath", "FindByPath100":
 			_, err := st.FindByPath(b.Context(), filepath.Join(env.Workspace, "src", "nested", "file.go"))
+			check(err)
+		case "Snapshots50":
+			_, err := st.Snapshots(b.Context(), "demo")
 			check(err)
 		}
 		elapsed := time.Since(start)
@@ -193,66 +190,5 @@ func benchmarkStore(b *testing.B, name string) {
 	b.ReportMetric(float64(samples[(len(samples)*95-1)/100].Nanoseconds()), "p95-ns")
 	for step, elapsed := range stages {
 		b.ReportMetric(float64(elapsed.Nanoseconds())/float64(b.N), strings.ReplaceAll(step, " ", "_")+"-ns/op")
-	}
-}
-
-// BenchmarkIndexCommit separates statement preparation from WAL durability.
-// NORMAL is a scratch-database experiment, not a Store setting: the index also
-// holds box tokens that cannot be recovered from workspace snapshots.
-func BenchmarkIndexCommit(b *testing.B) {
-	for _, name := range []string{"FULL", "PreparedFULL", "NORMAL"} {
-		b.Run(name, func(b *testing.B) {
-			root := os.Getenv("FERN_TEST_BTRFS")
-			if root == "" {
-				b.Skip("run lab/test-store.sh")
-			}
-			dir, err := os.MkdirTemp(root, "index-bench")
-			if err != nil {
-				b.Fatal(err)
-			}
-			b.Cleanup(func() {
-				if err := os.RemoveAll(dir); err != nil {
-					b.Error(err)
-				}
-			})
-			synchronous := "FULL"
-			if name == "NORMAL" {
-				synchronous = "NORMAL"
-			}
-			db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "index.sqlite")+"?_pragma=journal_mode(WAL)&_pragma=synchronous("+synchronous+")")
-			if err != nil {
-				b.Fatal(err)
-			}
-			db.SetMaxOpenConns(1)
-			b.Cleanup(func() {
-				if err := db.Close(); err != nil {
-					b.Error(err)
-				}
-			})
-			if _, err := db.ExecContext(b.Context(), `CREATE TABLE entries (id INTEGER PRIMARY KEY, value INTEGER)`); err != nil {
-				b.Fatal(err)
-			}
-			const query = `INSERT OR REPLACE INTO entries VALUES (1, ?)`
-			exec := db.ExecContext
-			if name == "PreparedFULL" {
-				stmt, err := db.PrepareContext(b.Context(), query)
-				if err != nil {
-					b.Fatal(err)
-				}
-				b.Cleanup(func() {
-					if err := stmt.Close(); err != nil {
-						b.Error(err)
-					}
-				})
-				exec = func(ctx context.Context, _ string, args ...any) (sql.Result, error) {
-					return stmt.ExecContext(ctx, args...)
-				}
-			}
-			for i := 0; b.Loop(); i++ {
-				if _, err := exec(b.Context(), query, i); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
 	}
 }

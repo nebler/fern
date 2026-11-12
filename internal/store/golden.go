@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -136,13 +137,36 @@ func isNotEmpty(err error) bool { return errors.Is(err, unix.ENOTEMPTY) || error
 // Sources returns the golden sources kept for builds: snapshots named name,
 // of any environment. A build queued when the daemon stopped is found here.
 func (s *Store) Sources(ctx context.Context, name string) ([]SnapshotRef, error) {
-	envs, err := s.q.EnvsWithSnapshot(ctx, name)
+	if err := checkSnapID(name); err != nil {
+		return nil, err
+	}
+	envs, err := s.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	refs := make([]SnapshotRef, len(envs))
-	for i, env := range envs {
-		refs[i] = SnapshotRef{Env: env, Snapshot: name}
+	// Oldest first, as their builds were asked for.
+	var found []Snapshot
+	for _, env := range envs {
+		ok, err := s.HasSnapshot(ctx, SnapshotRef{Env: env.ID, Snapshot: name})
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		created, err := subvolumeCreated(s.snapPath(env.ID, name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, Snapshot{ID: env.ID, Created: created})
+	}
+	slices.SortStableFunc(found, func(a, b Snapshot) int { return a.Created.Compare(b.Created) })
+	refs := make([]SnapshotRef, len(found))
+	for i, f := range found {
+		refs[i] = SnapshotRef{Env: f.ID, Snapshot: name}
 	}
 	return refs, nil
 }

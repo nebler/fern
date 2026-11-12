@@ -1,7 +1,7 @@
 // Package backup ships a node's threads to an S3-compatible object store,
 // encrypted, and brings them back on a new node: each environment's
 // workspace as btrfs send streams, incremental after the first, and the
-// state around them (the index, T3's data, the projects' repositories and
+// state around them (their records, T3's data, the projects' repositories and
 // Claude's folders) as an archive. A manifest in the bucket says what makes
 // up the latest backup; it is written last, so a backup that stops leaves
 // only objects and snapshots the next one removes.
@@ -114,7 +114,6 @@ type Store interface {
 	List(ctx context.Context) ([]store.Env, error)
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
 	SnapshotPath(id, snapID string) string
-	BackupIndex(ctx context.Context, path string) error
 }
 
 // snapPrefix starts the names of the snapshots backups take; only the last
@@ -350,10 +349,6 @@ func (b *Backer) state(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	index := filepath.Join(tmp, "fern.sqlite")
-	if err := b.store.BackupIndex(ctx, index); err != nil {
-		return "", err
-	}
 	// T3's databases are copied as SQLite copies them, not as files that
 	// may be half written.
 	t3dbs, err := copyDatabases(ctx, filepath.Join(b.pool, "userdata"), tmp)
@@ -365,7 +360,7 @@ func (b *Backer) state(ctx context.Context) (string, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pw.CloseWithError(writeState(pw, b.pool, index, t3dbs))
+		pw.CloseWithError(writeState(pw, b.pool, t3dbs))
 	}()
 	_, err = b.put(ctx, key, pr)
 	_ = pr.CloseWithError(errors.New("upload ended"))

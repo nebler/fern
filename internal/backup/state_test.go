@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
+	"github.com/nebler/fern/internal/store"
 )
 
 // The state goes up compressed and encrypted, and comes back into another
 // pool: T3's database as SQLite copied it, T3's files, the repositories,
-// the Claude folders, and the index where the daemon keeps it.
+// the Claude folders, and each environment's record in its folder.
 func TestStateRoundTrip(t *testing.T) {
 	_, s3 := newFakeS3(t)
 	cfg := &Config{S3: s3, Key: make([]byte, KeySize)}
@@ -31,6 +33,7 @@ func TestStateRoundTrip(t *testing.T) {
 	write("userdata/settings.json", `{"a":1}`)
 	write("repos/app/.git/HEAD", "ref: refs/heads/main\n")
 	write("envs/e1/claude/session.jsonl", "{}\n")
+	write("envs/e1/"+store.RecordFile, `{"version":1}`)
 	write("envs/e1/snaps/s/not-state", "x") // snapshots aren't state
 	if err := os.Symlink("settings.json", filepath.Join(pool, "userdata", "link")); err != nil {
 		t.Fatal(err)
@@ -43,10 +46,6 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	index := filepath.Join(t.TempDir(), "index")
-	if err := os.WriteFile(index, []byte("the index"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	b := &Backer{cfg: cfg, prefix: "fern/n/", pool: pool, log: slog.New(slog.DiscardHandler)}
 	tmp := t.TempDir()
@@ -55,7 +54,7 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(writeState(pw, pool, index, dbs)) }()
+	go func() { pw.CloseWithError(writeState(pw, pool, dbs)) }()
 	if _, err := b.put(t.Context(), "fern/n/state/1", pr); err != nil {
 		t.Fatal(err)
 	}
@@ -73,14 +72,14 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	got := map[string]string{}
 	files := []string{
-		"state/fern.sqlite", "userdata/settings.json", "userdata/link", "repos/app/.git/HEAD",
+		"envs/e1/" + store.RecordFile, "userdata/settings.json", "userdata/link", "repos/app/.git/HEAD",
 		"envs/e1/claude/session.jsonl", "envs/e1/snaps/s/not-state",
 	}
 	for _, rel := range files {
 		got[rel] = read(rel)
 	}
 	want := map[string]string{
-		"state/fern.sqlite": "the index", "userdata/settings.json": `{"a":1}`, "userdata/link": `{"a":1}`,
+		"envs/e1/" + store.RecordFile: `{"version":1}`, "userdata/settings.json": `{"a":1}`, "userdata/link": `{"a":1}`,
 		"repos/app/.git/HEAD": "ref: refs/heads/main\n", "envs/e1/claude/session.jsonl": "{}\n", "envs/e1/snaps/s/not-state": "missing",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {

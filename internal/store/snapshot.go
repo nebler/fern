@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/nebler/fern/internal/store/index"
 )
 
 // Snapshot freezes environment id's workspace as the read-only snapshot
@@ -39,27 +39,26 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	_, err := os.Lstat(path)
 	if err == nil {
 		// A retry, or a snapshot taken just before a crash: btrfs snapshots
-		// are atomic, so it is complete. It keeps its row if it has one.
-		return s.q.KeepSnapshot(ctx, index.KeepSnapshotParams{Env: env.ID, ID: snapID, CreatedAt: now().Unix()})
+		// are atomic, so it is complete.
+		return nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	if err := os.MkdirAll(s.snapsDir(env.ID), 0o755); err != nil {
+		return err
+	}
 	// Taking one flushes the workspace's dirty pages first, so it holds every
-	// write made before. It replaces a row whose subvolume a DeleteSnapshot
-	// that stopped half-way already removed, if Reconcile hasn't.
+	// write made before. The subvolume is the whole snapshot: there is
+	// nothing to record beside it.
 	if err := snapshotSubvolume(ctx, env.Workspace, path, true); err != nil {
 		return err
 	}
-	if err := s.step("snapshot: taken"); err != nil {
-		return err
-	}
-	return s.q.ReplaceSnapshot(ctx, index.ReplaceSnapshotParams{Env: env.ID, ID: snapID, CreatedAt: now().Unix()})
+	return s.step("snapshot: taken")
 }
 
 // DeleteSnapshot removes snapshot snapID of environment id. Deleting one
-// that doesn't exist is not an error. The subvolume goes first, so a
-// snapshot on disk without a row is always one that was being taken.
+// that doesn't exist is not an error.
 func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 	if err := checkSnapID(snapID); err != nil {
 		return err
@@ -70,28 +69,54 @@ func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 	if err := s.deleteSubvolumes(ctx, s.snapPath(id, snapID)); err != nil {
 		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
 	}
-	if err := s.step("delete snapshot: removed"); err != nil {
-		return err
-	}
-	if err := s.q.DeleteSnapshot(ctx, index.DeleteSnapshotParams{Env: id, ID: snapID}); err != nil {
-		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
-	}
 	return nil
 }
 
-// Snapshots returns environment id's snapshots, oldest first.
+// Snapshots returns environment id's snapshots, oldest first: the
+// subvolumes in its snaps folder, each with the time btrfs says it was
+// taken.
 func (s *Store) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 	if _, err := s.Get(ctx, id); err != nil {
 		return nil, err
 	}
-	rows, err := s.q.Snapshots(ctx, id)
+	dirs, err := os.ReadDir(s.snapsDir(id))
+	if errors.Is(err, fs.ErrNotExist) {
+		// An environment whose backup held no snapshot is restored without
+		// the folder.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
 	}
-	snaps := make([]Snapshot, len(rows))
-	for i, r := range rows {
-		snaps[i] = Snapshot{ID: r.ID, Created: time.Unix(r.CreatedAt, 0).UTC()}
+	snaps := make([]Snapshot, 0, len(dirs))
+	for _, d := range dirs {
+		fi, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // deleted since the folder was read
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
+		}
+		if !snapIDPattern.MatchString(d.Name()) || !isSubvolume(fi) {
+			continue
+		}
+		created, err := subvolumeCreated(s.snapPath(id, d.Name()))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
+		}
+		snaps = append(snaps, Snapshot{ID: d.Name(), Created: created})
 	}
+	// Two taken in the same instant are in the order of their names, so the
+	// order never changes between two calls.
+	slices.SortFunc(snaps, func(a, b Snapshot) int {
+		if c := a.Created.Compare(b.Created); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return snaps, nil
 }
 
@@ -163,30 +188,50 @@ const (
 // prunePreRestores deletes environment id's pre-restore snapshots that are
 // older than preRestoreKeep, except snapshot keep.
 func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
-	old, err := s.q.SnapshotsBefore(ctx, index.SnapshotsBeforeParams{
-		Env: id, Pattern: preRestorePrefix + "%", Keep: keep, Before: time.Now().Add(-preRestoreKeep).Unix(),
-	})
+	snaps, err := s.Snapshots(ctx, id)
 	if err != nil {
 		return err
 	}
-	for _, snapID := range old {
-		if err := s.DeleteSnapshot(ctx, id, snapID); err != nil {
+	before := time.Now().Add(-preRestoreKeep)
+	for _, snap := range snaps {
+		if snap.ID == keep || !strings.HasPrefix(snap.ID, preRestorePrefix) || !preRestored(snap).Before(before) {
+			continue
+		}
+		if err := s.DeleteSnapshot(ctx, id, snap.ID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// HasSnapshot reports whether snapshot ref exists.
+// preRestored returns when the restore that kept pre-restore snapshot snap
+// ran: the time in its name, or when it was taken if its name has none.
+func preRestored(snap Snapshot) time.Time {
+	if t, err := time.Parse(preRestoreTime, strings.TrimPrefix(snap.ID, preRestorePrefix)); err == nil {
+		return t
+	}
+	return snap.Created
+}
+
+// HasSnapshot reports whether snapshot ref exists: its environment does, and
+// the snapshot's subvolume is there.
 func (s *Store) HasSnapshot(ctx context.Context, ref SnapshotRef) (bool, error) {
 	if err := checkSnapID(ref.Snapshot); err != nil {
 		return false, err
 	}
-	ok, err := s.q.HasSnapshot(ctx, index.HasSnapshotParams{Env: ref.Env, ID: ref.Snapshot})
+	if _, err := s.Get(ctx, ref.Env); errors.Is(err, ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, err)
+	}
+	fi, err := os.Lstat(s.snapPath(ref.Env, ref.Snapshot))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, err)
 	}
-	return ok, nil
+	return isSubvolume(fi), nil
 }
 
 // snapshotPath returns the path of snapshot ref, which must exist.

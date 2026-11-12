@@ -1,5 +1,5 @@
 # Runs the same scripts as the lab, so CI and the Mac use the same pinned
-# containers (golang:1.27, golangci-lint, shellcheck, hadolint, sqlc).
+# containers (golang:1.27, golangci-lint, shellcheck, hadolint).
 # Actions are pinned to commits; Dependabot keeps them current.
 name: ci
 on:
@@ -67,7 +67,7 @@ jobs:
           restore-keys: go-fuzz-
       - run: lab/fuzz.sh
   checks:
-    name: lint, generated code, modules, vulnerabilities
+    name: lint, modules, vulnerabilities
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,8 +82,6 @@ jobs:
           restore-keys: go-checks-
       # golangci-lint, shellcheck and hadolint.
       - run: lab/lint.sh
-      # The store's queries are generated from internal/store/index/*.sql.
-      - run: lab/sqlc.sh diff
       - run: lab/go.sh mod tidy -diff
       - run: lab/go.sh run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
   images:

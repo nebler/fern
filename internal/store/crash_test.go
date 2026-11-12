@@ -312,7 +312,7 @@ func crashCases() []crashCase {
 			check: func(t *testing.T, st *store.Store, dir string) {
 				if _, err := st.Get(t.Context(), "demo"); err == nil {
 					if got := readFile(t, filepath.Join(live(dir), "f")); got != "x" {
-						t.Errorf("f = %q in an environment still indexed, want %q", got, "x")
+						t.Errorf("f = %q in an environment that still has its record, want %q", got, "x")
 					}
 				} else if !errors.Is(err, store.ErrNotFound) {
 					t.Fatal(err)
@@ -331,7 +331,7 @@ func crashCases() []crashCase {
 			},
 			change: func(t *testing.T, st *store.Store, _ string) error { return st.Snapshot(t.Context(), "demo", "s1") },
 			check: func(t *testing.T, st *store.Store, dir string) {
-				// Reconcile indexes a snapshot taken just before the crash.
+				// A snapshot taken just before the crash is whole, and listed.
 				if got := snapIDs(t, st); len(got) != 1 || got[0] != "s1" {
 					t.Errorf("Snapshots(demo) = %q, want [s1]", got)
 				}
@@ -369,40 +369,6 @@ func crashCases() []crashCase {
 					t.Fatalf("Delete(demo) again: %v", err)
 				}
 				gone(t, filepath.Join(dir, "envs", "demo"))
-			},
-		},
-		{
-			name: "reconcile snapshots",
-			setup: func(t *testing.T, st *store.Store, _ string) {
-				create(t, st, "demo", store.CreateOptions{})
-				snapshot(t, st, "demo", "stale")
-				store.SetFailAt(st, func(step string) error {
-					if step == "delete snapshot: removed" || step == "snapshot: taken" {
-						return errCrash
-					}
-					return nil
-				})
-				if err := st.DeleteSnapshot(t.Context(), "demo", "stale"); !errors.Is(err, errCrash) {
-					t.Fatalf("DeleteSnapshot() = %v, want crash", err)
-				}
-				for _, id := range []string{"orphan-a", "orphan-b"} {
-					if err := st.Snapshot(t.Context(), "demo", id); !errors.Is(err, errCrash) {
-						t.Fatalf("Snapshot(%s) = %v, want crash", id, err)
-					}
-				}
-				store.SetFailAt(st, nil)
-			},
-			change: func(t *testing.T, st *store.Store, _ string) error {
-				_, err := st.Reconcile(t.Context())
-				return err
-			},
-			check: func(t *testing.T, st *store.Store, _ string) {
-				if got := snapIDs(t, st); len(got) != 2 || got[0] != "orphan-a" || got[1] != "orphan-b" {
-					t.Errorf("Snapshots() = %v, want [orphan-a orphan-b]", got)
-				}
-				if _, err := st.Reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
 			},
 		},
 		{

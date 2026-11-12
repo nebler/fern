@@ -1,6 +1,7 @@
 // Package store keeps environments and their snapshots as btrfs subvolumes in
-// one pool, with a SQLite index beside them. The disk is the truth: after a
-// crash, Reconcile brings the index and the disk together.
+// one pool. The disk is the only record: an environment is its directory
+// with a record file in it, a snapshot is a subvolume, and after a crash
+// Reconcile finishes or clears what a change left half-way.
 //
 // Layout under the pool root:
 //
@@ -10,10 +11,10 @@
 //	envs/<id>/snaps/pre-restore-<time>/  the workspace a restore replaced, for a day
 //	envs/<id>/live.new/        a restore's copy before the swap, the old workspace after
 //	envs/<id>/adopt.new/       an adopt's copy before the swap, the old directory after
+//	envs/<id>/env.json         the environment's record: its workspace, git folder and box token
 //	envs/<id>/incomplete       marks a create or delete that hasn't finished
 //	worktrees/<repo>/<name>/   workspaces at a path the caller chose (T3's worktrees)
 //	repos/                     the main repositories those worktrees belong to (T3 keeps them)
-//	state/fern.sqlite          the index; it holds the box tokens
 //
 // The workspace, Claude's folder and the main repository's git folder are
 // mounted into the environment's box at the same paths, so the caller, the
@@ -22,21 +23,19 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
-
-	"github.com/nebler/fern/internal/store/index"
 )
 
 // BoxUID and BoxGID own every workspace, so the non-root box (and T3, which
@@ -54,9 +53,9 @@ var (
 	// ErrInvalidPath means a workspace path is outside worktrees/, isn't two
 	// levels below it, goes through a symlink, or is taken.
 	ErrInvalidPath = errors.New("invalid workspace path")
-	// errUnindexed means an environment directory holds data the index has
-	// lost; only a person should throw it away.
-	errUnindexed = errors.New("exists but isn't in the index")
+	// errUnrecorded means an environment directory holds data and has
+	// neither a record nor a marker; only a person should throw it away.
+	errUnrecorded = errors.New("holds data but has no record")
 )
 
 var (
@@ -162,8 +161,12 @@ func checkSnapID(id string) error {
 // Store is a btrfs pool of environments.
 type Store struct {
 	root string
-	db   *sql.DB
-	q    *index.Queries // the index's queries, on db
+	// mu guards claims: the workspaces of the creates under way, by path,
+	// each with its environment, so that two environments are never made at
+	// one path at once. Nothing else in a Store is shared: every other change
+	// is to one environment's own directory, and its actor makes them in turn.
+	mu     sync.Mutex
+	claims map[string]string
 	// failAt, if set, is called at every step of a change that has more
 	// than one; an error stops the change there, as a crash would. Crash
 	// tests set it.
@@ -181,8 +184,8 @@ func (s *Store) step(name string) error {
 	return s.failAt(name)
 }
 
-// Open opens the pool mounted at root, which must be on btrfs, creating the
-// index if needed.
+// Open opens the pool mounted at root, which must be on btrfs. A pool that an
+// earlier Fern kept an index for gets its records from it (importIndex).
 func Open(ctx context.Context, root string) (*Store, error) {
 	var fsInfo unix.Statfs_t
 	if err := unix.Statfs(root, &fsInfo); err != nil {
@@ -191,7 +194,7 @@ func Open(ctx context.Context, root string) (*Store, error) {
 	if fsInfo.Type != unix.BTRFS_SUPER_MAGIC {
 		return nil, fmt.Errorf("open pool: %s is not on btrfs", root)
 	}
-	s := &Store{root: root, keepTurns: keepTurns, minFreeBytes: minFreeBytes}
+	s := &Store{root: root, claims: make(map[string]string), keepTurns: keepTurns, minFreeBytes: minFreeBytes}
 	if err := os.MkdirAll(filepath.Join(root, "envs"), 0o755); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
@@ -202,84 +205,78 @@ func Open(ctx context.Context, root string) (*Store, error) {
 	if err := os.Chown(s.worktrees(), BoxUID, BoxGID); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
-	// Only root may read the index: it holds every box token.
-	state := filepath.Join(root, "state")
-	if err := os.MkdirAll(state, 0o700); err != nil {
+	if err := s.importIndex(ctx); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
-	if err := os.Chmod(state, 0o700); err != nil {
-		return nil, fmt.Errorf("open pool: %w", err)
-	}
-	dsn := "file:" + filepath.Join(state, "fern.sqlite") +
-		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open index: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, index.Schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("create index: %w", err)
-	}
-	s.db, s.q = db, index.New(db)
 	return s, nil
 }
 
-// Close closes the index.
-func (s *Store) Close() error { return s.db.Close() }
-
 // Get returns environment id.
-func (s *Store) Get(ctx context.Context, id string) (Env, error) {
+func (s *Store) Get(_ context.Context, id string) (Env, error) {
 	if err := CheckEnvID(id); err != nil {
 		return Env{}, err
 	}
-	e, err := s.q.Env(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
+	rec, err := s.readRecord(id)
+	if errors.Is(err, fs.ErrNotExist) {
 		return Env{}, fmt.Errorf("environment %q: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return Env{}, fmt.Errorf("get %s: %w", id, err)
 	}
-	return s.env(e), nil
+	return s.env(id, rec), nil
 }
 
 // List returns all environments, ordered by ID.
 func (s *Store) List(ctx context.Context) ([]Env, error) {
-	rows, err := s.q.Envs(ctx)
+	// ReadDir sorts by name.
+	dirs, err := os.ReadDir(filepath.Join(s.root, "envs"))
 	if err != nil {
 		return nil, fmt.Errorf("list environments: %w", err)
 	}
-	envs := make([]Env, len(rows))
-	for i, e := range rows {
-		envs[i] = s.env(e)
+	envs := make([]Env, 0, len(dirs))
+	for _, d := range dirs {
+		// A directory without a record is a create or delete under way, or
+		// what one left: Reconcile's business, and no environment. One whose
+		// record can't be read must not take the others down with it.
+		env, err := s.Get(ctx, d.Name())
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidID) || errors.Is(err, errBadRecord) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list environments: %w", err)
+		}
+		envs = append(envs, env)
 	}
 	return envs, nil
 }
 
 // FindByPath returns the environment whose workspace is path or holds it.
 func (s *Store) FindByPath(ctx context.Context, path string) (Env, error) {
+	envs, err := s.List(ctx)
+	if err != nil {
+		return Env{}, fmt.Errorf("find %s: %w", path, err)
+	}
+	at := make(map[string]Env, len(envs))
+	for _, env := range envs {
+		at[env.Workspace] = env
+	}
 	for p := filepath.Clean(path); p != s.root && p != filepath.Dir(p); p = filepath.Dir(p) {
-		e, err := s.q.EnvAt(ctx, p)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+		if env, ok := at[p]; ok {
+			return env, nil
 		}
-		if err != nil {
-			return Env{}, fmt.Errorf("find %s: %w", path, err)
-		}
-		return s.env(e), nil
 	}
 	return Env{}, fmt.Errorf("environment at %s: %w", path, ErrNotFound)
 }
 
-// env returns the environment that row e of the index describes.
-func (s *Store) env(e index.Environment) Env {
+// env returns the environment that id's record describes.
+func (s *Store) env(id string, rec record) Env {
 	return Env{
-		ID: e.ID, Workspace: e.Workspace, Claude: s.claudePath(e.ID), Git: e.Git,
-		Created: time.Unix(e.CreatedAt, 0).UTC(), BoxToken: e.BoxToken,
+		ID: id, Workspace: rec.Workspace, Claude: s.claudePath(id), Git: rec.Git,
+		Created: rec.Created.UTC(), BoxToken: rec.BoxToken,
 	}
 }
 
-// now is a creation time as the index keeps it, to the second.
+// now is a creation time as a record keeps it, to the second.
 func now() time.Time { return time.Now().UTC().Truncate(time.Second) }
 
 func (s *Store) worktrees() string            { return filepath.Join(s.root, "worktrees") }
@@ -291,6 +288,7 @@ func (s *Store) claudePath(id string) string  { return filepath.Join(s.envDir(id
 func (s *Store) restorePath(id string) string { return filepath.Join(s.envDir(id), "live.new") }
 func (s *Store) adoptPath(id string) string   { return filepath.Join(s.envDir(id), "adopt.new") }
 func (s *Store) markerPath(id string) string  { return filepath.Join(s.envDir(id), "incomplete") }
+func (s *Store) recordPath(id string) string  { return filepath.Join(s.envDir(id), RecordFile) }
 func (s *Store) snapsDir(id string) string    { return filepath.Join(s.envDir(id), "snaps") }
 
 func (s *Store) snapPath(id, snapID string) string {
@@ -300,12 +298,3 @@ func (s *Store) snapPath(id, snapID string) string {
 // SnapshotPath returns where environment id's snapshot snapID is: a
 // read-only subvolume, which btrfs send can send.
 func (s *Store) SnapshotPath(id, snapID string) string { return s.snapPath(id, snapID) }
-
-// BackupIndex writes a consistent copy of the index to path, which must not
-// exist, while the daemon runs.
-func (s *Store) BackupIndex(ctx context.Context, path string) error {
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
-		return fmt.Errorf("back up the index: %w", err)
-	}
-	return nil
-}

@@ -27,7 +27,6 @@ func (s *blockingStore) List(ctx context.Context) ([]store.Env, error) {
 
 func (s *blockingStore) Snapshots(context.Context, string) ([]store.Snapshot, error) { return nil, nil }
 func (s *blockingStore) SnapshotPath(string, string) string                          { return "" }
-func (s *blockingStore) BackupIndex(context.Context, string) error                   { return nil }
 
 // A backup asked for while one runs is refused, not run alongside it: both
 // would read one manifest and delete what the other just sent.

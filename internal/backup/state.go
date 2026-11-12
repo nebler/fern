@@ -16,11 +16,16 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite" // the "sqlite" driver, to copy T3's databases
+
+	"github.com/nebler/fern/internal/store"
 )
 
-// The state archive holds, besides the workspaces: the index as indexName,
+// The state archive holds, besides the workspaces: each environment's record,
 // T3's folders and its databases' copies, and each environment's Claude
 // folder.
+// indexName is the SQLite index an archive made before 2026-11-12 holds in
+// the records' place. A restore still unpacks it, and the daemon's store
+// makes the records from it at its next start.
 const indexName = "fern.sqlite"
 
 // stateDirs are the pool's folders the archive holds whole: T3's data and
@@ -81,13 +86,24 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// writeState writes the state archive to w: index as indexName, the pool's
-// stateDirs with T3's databases replaced by their copies (by their path in
-// userdata), and envs/*/claude.
-func writeState(w io.Writer, pool, index string, t3dbs map[string]string) error {
+// writeState writes the state archive to w: the environments' records, the
+// pool's stateDirs with T3's databases replaced by their copies (by their
+// path in userdata), and envs/*/claude. A record is replaced by a rename, so
+// one read while the daemon runs is whole.
+func writeState(w io.Writer, pool string, t3dbs map[string]string) error {
 	tw := tar.NewWriter(w)
-	if err := addFile(tw, index, indexName); err != nil {
+	records, err := filepath.Glob(filepath.Join(pool, "envs", "*", store.RecordFile))
+	if err != nil {
 		return err
+	}
+	for _, r := range records {
+		rel, err := filepath.Rel(pool, r)
+		if err != nil {
+			return err
+		}
+		if err := addFile(tw, r, rel); err != nil {
+			return err
+		}
 	}
 	for _, dir := range stateDirs {
 		if err := addTree(tw, pool, dir, dir == "userdata"); err != nil {
@@ -226,12 +242,6 @@ func Restore(ctx context.Context, cfg *Config, node, pool string, log *slog.Logg
 		log.InfoContext(ctx, "restored a workspace", slog.String("env", id), slog.String("workspace", workspace),
 			slog.Int("sends", len(eb.Chain)))
 	}
-	// A new node's daemon made an empty index at its first start.
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.Remove(filepath.Join(pool, "state", indexName+suffix)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	}
 	if err := extractState(ctx, cfg, m.State, pool); err != nil {
 		return fmt.Errorf("restore the state: %w", err)
 	}
@@ -295,6 +305,10 @@ func extractState(ctx context.Context, cfg *Config, key, pool string) error {
 		}
 		dst := filepath.Join(pool, name)
 		if name == indexName {
+			// It holds every box token: its folder is root's alone.
+			if err := os.MkdirAll(filepath.Join(pool, "state"), 0o700); err != nil {
+				return err
+			}
 			dst = filepath.Join(pool, "state", indexName)
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {

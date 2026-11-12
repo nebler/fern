@@ -162,7 +162,7 @@ func (s *Server) handle(h func(*http.Request) (any, error)) http.HandlerFunc {
 // holds that path (none if there is none).
 //
 // fern-claude looks its environment up by path before every Claude start,
-// so that answer comes from the index alone, without the box's state: a
+// so that answer comes from the records alone, without the box's state: a
 // state costs a runsc call.
 func (s *Server) list(r *http.Request) (any, error) {
 	if path := r.URL.Query().Get("path"); path != "" {

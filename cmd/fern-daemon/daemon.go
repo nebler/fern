@@ -172,14 +172,13 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = st.Close() }()
 	// Finish what a crash interrupted before anyone can see the half-done state.
 	lost, err := st.Reconcile(ctx)
 	if err != nil {
 		return err
 	}
 	for _, dir := range lost {
-		log.WarnContext(ctx, "environment directory not in the index; left for a person to remove", slog.String("dir", dir))
+		log.WarnContext(ctx, "environment directory without a record it can use; left for a person to look at", slog.String("dir", dir))
 	}
 	// T3's server runs as the box user, and uses the API too.
 	apiLis, err := listenUnix(ctx, socket, store.BoxGID)

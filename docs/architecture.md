@@ -68,7 +68,7 @@ Three nouns. Everything else is a property of one of them.
 ```
                 ┌──────────────────────────── fern-daemon (one per machine) ─────────────────────────┐
  T3 hook ──┐    │                                                                                     │
- CLI ──────┴──▶ │ api (unix socket) ──▶ actor (one per box) ──┬──▶ store (btrfs + SQLite index) │──▶ btrfs pool
+ CLI ──────┴──▶ │ api (unix socket) ──▶ actor (one per box) ──┬──▶ store (btrfs)                │──▶ btrfs pool
  agent box ───▶ │ MCP Bash (port 7071)  mailbox · one change    └──▶ runsc driver                    │──▶ boxes
                 │                       at a time; idle sleep                                          │
                 │                       Reconcile ◀── finishes or clears a change a crash stopped      │
@@ -81,7 +81,7 @@ Three nouns. Everything else is a property of one of them.
 | **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box; for agent boxes, an MCP server whose one tool, Bash, runs a command in the environment's box | `internal/api`, `internal/api/server` |
 | **actor** | one goroutine per box while it may run: makes its environment's changes **one at a time**, counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too | `internal/actor` |
 | **box policy** | decides what each box runs and gets: services or Claude, Claude's folder and login or not (`Group.boxOf`) | `internal/actor` |
-| **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and the SQLite index. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
+| **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and each environment's record. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
 | **runsc driver** | wakes and stops boxes: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
 | **setup** | reads the setup contract and computes golden keys | `internal/setup` |
 | **image** | unpacks `docker save` streams into the pool, as box and T3 roots (`fern image load`) | `internal/image` |
@@ -93,19 +93,21 @@ Three nouns. Everything else is a property of one of them.
 
 **Why an in-box agent (`fern-init`)?** Exec, services and readiness work the same however the box is run, without `docker exec`-style side channels, which are fragile for long streams. Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`). A command run as a **session** outlives its connection: both sides number their frames and keep them until acknowledged, so a new connection carries on with nothing lost or repeated: it takes over only once the connection before it has let go, and is then told where stdin got to. Each side keeps at most 1 MiB the other hasn't acknowledged, and the box acknowledges stdin when the command has taken it, not when it arrived; stdin that waits never holds up the reading of the client's acknowledgements, which come on the same connection (a command that echoed more than a few MiB of stdin hung before that). A close message means the client is done, and kills the command; a connection that just breaks means the daemon went away, and the command waits for one for 2 minutes. That is how running commands and turns get through a restart of the daemon, which is how Fern upgrades. In an agent box, Claude reaches the daemon's MCP server through a relay in fern-init, which sends a call again under the same key until a daemon answers, so a Bash call running then finds its command instead of failing or running it twice.
 
-## 4. Data model (the index, SQLite)
+## 4. Data model (the disk)
 
-The tables are in `internal/store/index/schema.sql`; [sqlc](https://sqlc.dev) generates the Go for the queries in `queries.sql`.
+There is no database. An environment is its directory, `envs/<id>/`, with a record file in it (`internal/store/record.go`):
 
-```sql
-environments(id PRIMARY KEY, workspace UNIQUE, git, created_at, box_token)
-snapshots(env REFERENCES environments ON DELETE CASCADE, id, created_at, PRIMARY KEY (env, id))
+```json
+envs/<id>/env.json   {"version": 1, "workspace": "…", "git": "…", "created": "…", "box_token": "…"}
+envs/<id>/snaps/<snapshot>/   a snapshot: a read-only subvolume, taken when btrfs says it was
 ```
 
-- **The disk is the truth; SQLite is the index.** At start the daemon **reconciles** what exists on disk with what the tables say (§12).
-- `git` is the main repository's git folder that the box gets read-only (§13); `box_token` authenticates the daemon to the environment's boxes, and is why only root may read the index.
+- **The disk is the only record.** An environment exists when its directory has its record: a create writes it last, in one flushed rename, and a delete removes it first. A snapshot exists when its subvolume does, and btrfs keeps the time it was taken. At start the daemon finishes or clears what a change left half-way (§12).
+- **Until 2026-11-12 there was a SQLite index beside the disk** (`state/fern.sqlite`), and the two had to be reconciled. A pool or a backup from before then still has one: the store reads its environments into records at its next start and moves it aside (`internal/store/import.go`).
+- `git` is the main repository's git folder that the box gets read-only (§13); `box_token` authenticates the daemon to the environment's boxes, and is why only root may read a record.
+- **No two environments share a workspace:** a create claims its path in the daemon's memory until its record is written.
 - **A restore fences stale work** by stopping the box and cancelling every command the actor counts, including one still connecting, so nothing that started before it runs after it.
-- **Golden snapshots are rows too:** a golden is a snapshot of its builder environment named `golden-<key>`, and a build waiting at a restart is a snapshot named `golden-source` (§7.5).
+- **Golden snapshots are snapshots too:** a golden is a snapshot of its builder environment named `golden-<key>`, and a build waiting at a restart is a snapshot named `golden-source` (§7.5).
 - **Planned:** tags, a snapshot's parent and size, and timers as rows. Idle clocks survive a restart in the box instead: fern-init keeps when it was last used (`GET /activity`), and the next daemon reads it.
 
 ## 5. API
@@ -115,7 +117,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 | Call | Meaning | Notes |
 |---|---|---|
 | `PUT /envs/{id}?path=P` | get-or-create an environment; a tar body fills its workspace | built; its box comes with the first wake. Planned: from golden, `{repo, class, retention, from?}` |
-| `GET /envs` / `GET /envs?path=P` | list with box states / the environment whose workspace holds P | built; a lookup by path answers from the index alone (fern-claude does one per Claude start) |
+| `GET /envs` / `GET /envs?path=P` | list with box states / the environment whose workspace holds P | built; a lookup by path reads the records alone (fern-claude does one per Claude start) |
 | `GET /envs/{id}/exec` | run a command (optional PTY) over a WebSocket | built; wakes the environment if asleep; with `?then=sleep` the box sleeps as soon as the command ends, unless another runs (a hibernating Claude, §6.3) |
 | `POST /envs/{id}/snapshots` | take a snapshot `{id, replace?}` | built; the T3 hook uses the checkpoint ref as the ID, and `replace` after a revert. Planned: `tags` |
 | `GET /envs/{id}/snapshots` | list snapshots | built |
@@ -222,7 +224,7 @@ The diagrams above are how an environment looks from outside. In the code, each 
 | A service | running, waiting to start again, stopped | its supervisor | `cmd/fern-init` |
 | A service started on demand | listening, starting, ready, failed (and back to starting) | its lock | `cmd/fern-init` |
 
-Each type's comment lists its transitions and the function that makes each. The store's states stay on disk (a marker file, a leftover copy, a snapshot without its row, §9): there the disk is the record, and `Reconcile` reads it.
+Each type's comment lists its transitions and the function that makes each. The store's states stay on disk (a marker file, a leftover copy, a directory without its record, §9): there the disk is the record, and `Reconcile` reads it.
 
 ## 7. Main flows
 
@@ -269,7 +271,7 @@ Each type's comment lists its transitions and the function that makes each. The 
 **Built,** one build at a time, in the daemon (`internal/actor/golden.go`): the repository's builder environment (`golden-<repo>-<hash>`, listed by `fern ls`) gets a fresh workspace with a copy of the `golden-source` checkout, wakes, so it installs the tools the repository pins (§8) and its services make their first start (`initdb`, seed), sleeps, which stops them cleanly, and loses every file the copy brought in; what is left is snapshotted as `golden-<key>`, and the builder keeps the newest 50. A build that stops leaves no snapshot, and the next starts afresh. A golden holds what the repository's code made, so it is the agent's: a new worktree goes onto it through `os.Root`s on both sides (no symlink in the golden or the worktree leads a file, as root, out of them; files are opened without following symlinks or blocking), and a build starts from an empty workspace rather than the last one's. The builder's box gets no Claude login and no Claude folder, so no credential can reach a golden. The key is computed again from the builder's copy of the source snapshot, which can't change, so a golden is published under the key of what it was built from; a source still waiting at a restart is built then; a build that stopped half-way leaves its builder a workspace (`Reconcile`); a new environment whose golden can't be used (pruned since it was looked up) starts without one. **Not built yet:** running `.agents/setup` (only services' first start is), step 2's scan, the `goldens` table (the builder's snapshots are the index), incremental builds. Build output that names its absolute path (a Python venv's scripts) points at the builder's workspace, not the thread's, and caches keyed on it are rebuilt in each thread (Vite's dependency optimizer). mise's tools don't name it.
 
 ### 7.6 Delete
-Stop the session → delete `live/` → apply retention to snapshots (keep tagged) → remove rows.
+Stop the session → delete `live/` → apply retention to snapshots (keep tagged) → remove the record.
 
 ---
 
@@ -325,8 +327,8 @@ limits:                  # built: the box's size, each up to the node's most (§
       <repo files> node_modules/ .fern/pg/
   envs/<id>/snaps/<snapshot>/    read-only
   envs/<id>/claude/              Claude's state (CLAUDE_CONFIG_DIR): never snapshotted, so a restore keeps the transcripts
+  envs/<id>/env.json             the environment's record (outside the workspace, so in no snapshot; root only)
   worktrees/<repo>/<name>/       writable workspace of an environment at a path: T3's worktrees
-  state/fern.sqlite              the index (on the same disk, not inside any snapshot; root only)
   boxes/<box>/                   a box's /tmp and log while it may run (its bundle is on the node's tmpfs)
   images/<id>/  images/<tag>     the box and T3 images, unpacked (fern image load)
   userdata/ caches/ tools/       T3's own state: T3's home is the pool, so its worktrees land in worktrees/
@@ -391,13 +393,13 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 
 | Failure | What happens |
 |---|---|
-| **Daemon crash** | on restart, `Reconcile` reads what each half-done change left on disk (markers, `live.new`, snapshots without rows) and finishes or clears it; boxes left running get an actor, so they still sleep when idle (built) |
+| **Daemon crash** | on restart, `Reconcile` reads what each half-done change left on disk (markers, `live.new`, a directory without its record) and finishes or clears it; boxes left running get an actor, so they still sleep when idle (built) |
 | **Box crash** | the next command's dial fails and the actor wakes the box once more (built); after 3 crashes or failed wakes in 5 minutes, commands fail at once with `ErrCrashing` until the window has passed or a person wakes it (built) |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
 | **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
-| **Machine loss** | restored on a new machine from the hourly backups (built): `install.sh` with `FERN_RESTORE_FROM` brings back each thread's workspace as of its last backup, the index, T3's data and the repositories; turns older than that backup can't be reverted to |
+| **Machine loss** | restored on a new machine from the hourly backups (built): `install.sh` with `FERN_RESTORE_FROM` brings back each thread's workspace as of its last backup, its record, T3's data and the repositories; turns older than that backup can't be reverted to |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
 
 ---
@@ -451,7 +453,7 @@ One remote Linux machine running two systemd services. `lab/setup.sh` (with `FER
 
 The local lab is the same machine as a systemd container in Docker (`lab/up.sh`). Your Mac or phone only runs the T3 app. Against the earlier k3s install, this saves what k3s and containerd cost while idle: about 780 MiB and 9% of a core.
 
-**Backups (built):** with `/etc/fern/backup.env` (root only; `install.sh` writes it), the daemon backs up hourly (`--backup-every`), and `fern backup` now (`internal/backup`). Each environment whose workspace's btrfs generation moved since its last backup gets a snapshot through its actor (`fern-backup-<time>`), sent with `btrfs send`, incremental from the last one (which is then deleted; a full send every 168, or when the parent was pruned). Around them goes an archive of the state: the index (`VACUUM INTO`), T3's data with its databases copied by SQLite (its `server-owner.sqlite` is only a lock), the projects' repositories and each environment's Claude folder. Everything is gzipped and encrypted on the node (AES-256-GCM in 64 KiB chunks, the STREAM construction) with a key the person's Mac keeps, and uploaded to an S3 bucket in parts by a small SigV4 client (no SDK). A manifest, written last, names what makes up the backup; what a backup that stopped left (objects, snapshots) the next one deletes. `fern-daemon restore NODE` receives each workspace's chain into a new pool, then the state. `lab/check.sh backup` runs it against versitygw on the node: a backup, an incremental one, none for an unchanged thread, and a restore into another pool that matches the snapshot file for file.
+**Backups (built):** with `/etc/fern/backup.env` (root only; `install.sh` writes it), the daemon backs up hourly (`--backup-every`), and `fern backup` now (`internal/backup`). Each environment whose workspace's btrfs generation moved since its last backup gets a snapshot through its actor (`fern-backup-<time>`), sent with `btrfs send`, incremental from the last one (which is then deleted; a full send every 168, or when the parent was pruned). Around them goes an archive of the state: each environment's record, T3's data with its databases copied by SQLite (its `server-owner.sqlite` is only a lock), the projects' repositories and each environment's Claude folder. Everything is gzipped and encrypted on the node (AES-256-GCM in 64 KiB chunks, the STREAM construction) with a key the person's Mac keeps, and uploaded to an S3 bucket in parts by a small SigV4 client (no SDK). A manifest, written last, names what makes up the backup; what a backup that stopped left (objects, snapshots) the next one deletes. `fern-daemon restore NODE` receives each workspace's chain into a new pool, then the state. `lab/check.sh backup` runs it against versitygw on the node: a backup, an incremental one, none for an unchanged thread, and a restore into another pool that matches the snapshot file for file.
 
 **Scaling (planned):** boxes scale within a machine, since they sleep when idle; more machines, each with its own pool and T3, form cells, and a thread's disk moves with `btrfs send`.
 
@@ -534,7 +536,7 @@ cmd/fern-init/       the main process inside boxes
 internal/api/        socket protocol and client
 internal/api/server/ socket API server, the agent box's MCP Bash
 internal/actor/      per-environment actors, idle rule, the box policy, golden builds
-internal/store/      btrfs pool, snapshots, retention, the SQLite index, Reconcile
+internal/store/      btrfs pool, snapshots, retention, the environments' records, Reconcile
 internal/runsc/      boxes as gVisor sandboxes: bundle, network, firewall (+ a fake for unit tests)
 internal/boxexec/    the exec protocol: fern-init's server, the client, the daemon's relay; touches
 internal/watch/      the files an agent box writes, as the host sees them (fanotify)

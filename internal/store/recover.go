@@ -8,17 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/nebler/fern/internal/store/index"
 )
 
-// Delete removes environment id's index rows and disk, its workspace
-// included. Deleting an environment that doesn't exist is not an error. Its
-// box must be gone.
+// Delete removes environment id's record and disk, its workspace included.
+// Deleting an environment that doesn't exist is not an error. Its box must
+// be gone.
 //
-// It marks the environment and drops its rows, so it is never listed without
-// its workspace, then clears the disk the way Reconcile or the next Create
-// would after a crash.
+// It marks the environment and removes its record, so it is never listed
+// without its workspace, then clears the disk the way Reconcile or the next
+// Create would after a crash.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	env, err := s.Get(ctx, id)
 	switch {
@@ -29,10 +27,10 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		if err := s.step("delete: marked"); err != nil {
 			return err
 		}
-		if err := s.q.DeleteEnv(ctx, id); err != nil {
+		if err := os.Remove(s.recordPath(id)); err != nil {
 			return fmt.Errorf("delete %s: %w", id, err)
 		}
-		if err := s.step("delete: unindexed"); err != nil {
+		if err := s.step("delete: unrecorded"); err != nil {
 			return err
 		}
 	case !errors.Is(err, ErrNotFound):
@@ -44,11 +42,11 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Reconcile brings the disk and the index together after a crash: it finishes
-// the creates and deletes that stopped half-way, removes the leftovers of
-// restores and adopts, brings the snapshot rows in line with the snapshots on
-// disk, prunes old pre-restore snapshots, and returns the environment directories it keeps
-// because the index has lost them.
+// Reconcile finishes or clears what a crash left half-way: the creates and
+// deletes that stopped, and the leftovers of restores and adopts. It prunes
+// old pre-restore snapshots, and returns the environment directories it
+// keeps and can't use: they hold data and have neither a record nor a
+// marker, or their record can't be read.
 func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 	dirs, err := os.ReadDir(filepath.Join(s.root, "envs"))
 	if err != nil {
@@ -64,33 +62,35 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 		switch {
 		case errors.Is(err, ErrNotFound):
 			err := s.clearLeftovers(ctx, id)
-			if errors.Is(err, errUnindexed) {
+			if errors.Is(err, errUnrecorded) {
 				lost = append(lost, s.envDir(id))
 			} else if err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
+		case errors.Is(err, errBadRecord):
+			lost = append(lost, s.envDir(id))
 		case err != nil:
 			return lost, fmt.Errorf("reconcile: %w", err)
 		default:
 			// A restore that stopped left live.new. So can an adopt its
 			// adopt.new, when a power cut undoes the cleanup that came before
-			// the row; the copy is garbage either way. A create or delete
-			// that stopped next to its row left the marker.
+			// the record; the copy is garbage either way. A create or delete
+			// that stopped next to its record left the marker, and a record
+			// being replaced its new copy.
 			if err := s.deleteSubvolumes(ctx, s.restorePath(id), s.adoptPath(id)); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := os.RemoveAll(s.adoptPath(id)); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
-			if err := os.Remove(s.markerPath(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return lost, fmt.Errorf("reconcile %s: %w", id, err)
-			}
-			if err := s.reconcileSnapshots(ctx, id); err != nil {
-				return lost, fmt.Errorf("reconcile %s: %w", id, err)
+			for _, p := range []string{s.markerPath(id), s.recordPath(id) + ".new"} {
+				if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return lost, fmt.Errorf("reconcile %s: %w", id, err)
+				}
 			}
 			// A golden build's BuildSource replaces its builder's live/; one
 			// that stopped in between left none, and the next build makes it
-			// afresh. Only that leaves an indexed environment without one.
+			// afresh. Only that leaves an environment with a record without one.
 			if _, err := os.Lstat(env.Workspace); errors.Is(err, fs.ErrNotExist) && env.Workspace == s.livePath(id) {
 				if err := s.makeWorkspace(ctx, id, env.Workspace, ""); err != nil {
 					return lost, fmt.Errorf("reconcile %s: %w", id, err)
@@ -106,83 +106,11 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 	return lost, nil
 }
 
-// reconcileSnapshots makes environment id's snapshot rows match its
-// snapshots on disk. A snapshot without a row was taken just before a crash;
-// btrfs snapshots are atomic, so it is complete, and it gets the time it is
-// found. A row without a snapshot is from a DeleteSnapshot that stopped
-// half-way.
-func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
-	snaps, err := s.Snapshots(ctx, id)
-	if err != nil {
-		return err
-	}
-	indexed := make(map[string]bool, len(snaps))
-	for _, snap := range snaps {
-		indexed[snap.ID] = true
-	}
-	dirs, err := os.ReadDir(s.snapsDir(id))
-	if err != nil {
-		return err
-	}
-	var missing []string
-	for _, d := range dirs {
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !snapIDPattern.MatchString(d.Name()) || !isSubvolume(fi) {
-			continue
-		}
-		if indexed[d.Name()] {
-			delete(indexed, d.Name())
-			continue
-		}
-		missing = append(missing, d.Name())
-	}
-	if len(missing) == 0 && len(indexed) == 0 {
-		return nil
-	}
-	// The disk has already decided the result. Recover all rows atomically
-	// and pay for one durable WAL commit, rather than one per snapshot.
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := s.indexRecoveredSnapshots(ctx, s.q.WithTx(tx), id, missing, indexed); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return s.step("reconcile: snapshot rows committed")
-}
-
-func (s *Store) indexRecoveredSnapshots(ctx context.Context, q *index.Queries, id string, missing []string, stale map[string]bool) error {
-	created := now().Unix()
-	for _, snapID := range missing {
-		if err := q.KeepSnapshot(ctx, index.KeepSnapshotParams{Env: id, ID: snapID, CreatedAt: created}); err != nil {
-			return err
-		}
-		if err := s.step("reconcile: indexed " + snapID); err != nil {
-			return err
-		}
-	}
-	for snapID := range stale {
-		if err := q.DeleteSnapshot(ctx, index.DeleteSnapshotParams{Env: id, ID: snapID}); err != nil {
-			return err
-		}
-		if err := s.step("reconcile: unindexed " + snapID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // clearLeftovers removes what a create or delete of environment id, which has
-// no row, left when it stopped: a marked directory is garbage, and so is the
-// workspace its marker names. It refuses an unmarked directory that holds
-// data: then the index has lost it, and only a person should throw it away.
+// no record, left when it stopped: a marked directory is garbage, and so is
+// the workspace its marker names. It refuses an unmarked directory that holds
+// data: then its record was lost some other way, and only a person should
+// throw it away.
 func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 	dir := s.envDir(id)
 	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
@@ -197,7 +125,7 @@ func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 			return err
 		}
 		if kept {
-			return fmt.Errorf("%s: %w", dir, errUnindexed)
+			return fmt.Errorf("%s: %w", dir, errUnrecorded)
 		}
 	} else if err != nil {
 		return err

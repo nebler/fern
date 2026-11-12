@@ -29,7 +29,7 @@ flowchart LR
 
         subgraph daemon["fern-daemon.service"]
             api["API<br/>unix socket"] --> actors["actors<br/>one per environment"]
-            actors --> store["store<br/>btrfs + SQLite index"]
+            actors --> store["store<br/>btrfs"]
             actors --> runsc["box driver<br/>runsc"]
             mcp["MCP Bash"]
         end
@@ -44,7 +44,7 @@ flowchart LR
 ```
 
 - **The daemon** (`fern-daemon`) owns the environments. Each one has an **actor**, a goroutine that makes its changes one at a time, counts the commands running in its boxes and puts them to sleep when idle.
-- **The store** keeps each workspace as a btrfs subvolume. A snapshot is a btrfs snapshot (milliseconds, no copy), and a revert swaps the workspace for a copy of one in a single atomic rename. SQLite is only the index: the disk is the truth.
+- **The store** keeps each workspace as a btrfs subvolume. A snapshot is a btrfs snapshot (milliseconds, no copy), and a revert swaps the workspace for a copy of one in a single atomic rename. The disk is the only record: an environment is its folder with a small record file in it, and there is no database beside them.
 - **Boxes** are [gVisor](https://gvisor.dev) sandboxes the daemon starts itself with `runsc`, each with its own network namespace, an nftables firewall (internet only) and cgroup limits. Claude runs in an **agent box** of its own; its shell commands go through the daemon to the **environment box**, where the services are. The environment box never sees Claude's login.
 - **Golden snapshots** hold a repository's built setup (its pinned tools, installed dependencies, an initialised database), so a new thread starts from one instead of running setup again.
 - **The front door** (`:30780`) serves each box's ports as previews by host name, waking an asleep box; a request in progress, such as a live reload's WebSocket, keeps it awake. A fanotify watch on the host passes Claude's edits on to the dev servers in the environment's box, which gVisor would otherwise hide from them.
@@ -101,10 +101,9 @@ How each number was measured: [`lab/RESULTS.md`](lab/RESULTS.md).
 
 ## Engineering
 
-- **Crash-safe by construction.** Every multi-step change leaves the disk showing how far it got (a marker file, a copy beside the workspace, a snapshot without its row), and `Reconcile` finishes or clears it on start. Crash tests stop each change at every one of its steps, on a real btrfs filesystem in CI.
+- **Crash-safe by construction.** Every multi-step change leaves the disk showing how far it got (a marker file, a copy beside the workspace, a folder without its record), and `Reconcile` finishes or clears it on start. Crash tests stop each change at every one of its steps, on a real btrfs filesystem in CI.
 - **Actors, tested with a fake clock.** One goroutine per environment, talked to through its mailbox. Idle sleeps, pre-wakes and concurrent changes are tested in `testing/synctest` bubbles, with `goleak` checking for leaked goroutines.
 - **Performance is gated.** `lab/perf.sh` fails a change that makes any of its 288 metrics worse than the baseline (time, CPU, memory, disk and network). `lab/ab.sh` runs two versions in alternation on the same machine and gives each metric's change with a 95% interval and a p-value. `lab/profile.sh` traces an operation with OpenTelemetry and draws flamegraphs of the whole node.
-- **Typed SQL.** The index's queries are plain SQL; [sqlc](https://sqlc.dev) generates the Go for them.
 - **Sandboxing in depth.** gVisor, no capabilities, a read-only root, the repository's git folder mounted read-only, a firewall that allows only the internet, and the login kept out of every box that runs the repository's code. Threat model: [`docs/briefs/claude-outside-the-box.md`](docs/briefs/claude-outside-the-box.md); reporting: [`SECURITY.md`](SECURITY.md).
 - **Checked on every pull request.** Unit, btrfs and fuzz tests; golangci-lint, shellcheck and hadolint; govulncheck on the Go and Trivy on the images; generated code and `go.mod` up to date. Actions are pinned to commits, and OpenSSF Scorecard grades the repository weekly.
 
@@ -141,7 +140,7 @@ Choose a server's once: `FERN_SKILLS="beginner design engineering safety"` with 
 
 **Claude's pause:** Fern stops a thread's Claude after 30 seconds with nothing to do, so its box can sleep, and starts it again at the next message, which then takes about 3 seconds longer. To keep it for the messages that follow, at about 160 MiB a thread meanwhile, give T3's service a longer one on the server: `Environment=FERN_HIBERNATE=5m` under `[Service]` in `/etc/systemd/system/fern-t3.service.d/hibernate.conf`, then `systemctl daemon-reload && systemctl restart fern-t3`.
 
-**Backups:** hourly to an S3 bucket (Hetzner Object Storage, R2, any S3), encrypted before they leave the server with a key that stays on your Mac (`~/.config/fern/backup-key`; keep a copy). Each thread's workspace goes as a btrfs send stream, incremental after the first, with the index, T3's data and the projects' repositories. Create a bucket and an access key, then run the install again with `FERN_BACKUP_ENDPOINT=https://fsn1.your-objectstorage.com FERN_BACKUP_REGION=fsn1 FERN_BACKUP_BUCKET=… FERN_BACKUP_ACCESS_KEY=… FERN_BACKUP_SECRET_KEY=…`. To bring a lost server's threads onto a new one, install the new one with the same settings and `FERN_RESTORE_FROM=<old server's hostname>`.
+**Backups:** hourly to an S3 bucket (Hetzner Object Storage, R2, any S3), encrypted before they leave the server with a key that stays on your Mac (`~/.config/fern/backup-key`; keep a copy). Each thread's workspace goes as a btrfs send stream, incremental after the first, with each thread's record, T3's data and the projects' repositories. Create a bucket and an access key, then run the install again with `FERN_BACKUP_ENDPOINT=https://fsn1.your-objectstorage.com FERN_BACKUP_REGION=fsn1 FERN_BACKUP_BUCKET=… FERN_BACKUP_ACCESS_KEY=… FERN_BACKUP_SECRET_KEY=…`. To bring a lost server's threads onto a new one, install the new one with the same settings and `FERN_RESTORE_FROM=<old server's hostname>`.
 
 **Working on Fern itself:** `lab/setup.sh` builds everything from your working tree, in a local lab (a systemd Linux node in Docker) or on a VPS with `FERN_HOST=1.2.3.4`; it needs Docker for the local lab and bash 5 (`brew install bash`). After a change, `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks. [AGENTS.md](AGENTS.md) lists every command.
 
