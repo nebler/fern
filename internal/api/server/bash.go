@@ -69,8 +69,8 @@ type (
 // box's Claude. Its tool Bash runs a command in the environment's own box,
 // where the services are, waking it first; the box sleeps bashLinger after
 // the last. A command run in the background goes on after the call (jobs),
-// and BashOutput and KillShell read and stop it. A request must carry the environment's box token, which
-// only its boxes have.
+// and BashOutput and KillShell read and stop it. A request must carry the token
+// of the environment's running agent box, which the relay in that box adds.
 func (s *Server) MCPHandler() http.Handler {
 	mux := http.NewServeMux()
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {

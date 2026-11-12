@@ -15,8 +15,8 @@ func shutdown(token, wakeID string, cancel context.CancelFunc) http.HandlerFunc 
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// An environment keeps its token across wakes. A delayed request to
-		// an address its next wake reuses must not stop that one.
+		// A second fence behind the token, which is this wake's own: a delayed
+		// request to an address the next wake reuses must not stop that one.
 		if wakeID == "" || r.Header.Get("If-Match") != strconv.Quote(wakeID) {
 			http.Error(w, "another wake of the box", http.StatusPreconditionFailed)
 			return
