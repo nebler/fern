@@ -1906,8 +1906,15 @@ build 4.6 s, create from golden 38 ms, with the thread's builds running
 beside). `fern gc` removed 141 of Podman's images: 11.6 → 29.4 GiB free on
 the server's disk; it kept the box image the thread's boxes still ran from.
 `fern df` took 48 s there, most of it btrfs sizing the thread's 8 GB
-workspace and its snapshots. Not yet there: T3's image (the first-thread
-patch, `ps`, the account's GitHub token), which waits for the thread. The lab's timings
+workspace and its snapshots. T3's image followed at 23:04 UTC, once the thread's turn had ended (a cold
+build of 7 minutes; `lab/build.sh t3` waited for the turn itself). In the
+running T3, `gh auth token --hostname github.com` in its own folder answers
+with a token, and T3's log has no warning since its start, where it had two
+a minute. `lab/check.sh slice box stream restore paths golden t3 commit
+space upgrade` on the idle server: 115 checks pass. `lab/perf.sh --fast`
+there: PASS against `lab/perf/vps.tsv` (a golden build from a project's
+checkout 3,327 ms against 3,397; a restore 80.6 ms against 86.1). The whole
+gate has not run. The lab's timings
 that day mean nothing: the Mac's load average was between 30 and 90, and
 `devserver` failed once because installing Node took longer than the 90 s a
 wake gives it.
