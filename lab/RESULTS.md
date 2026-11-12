@@ -1871,6 +1871,21 @@ results matched the Mac's on every count.
 - **A repository that asked for a bigger box than the server gives got the
   smaller one with no word of it.** Claude's hint now says what falls short
   and which flags raise it.
+- **Two of three Bash calls were waits.** Over the whole day 208 of the
+  thread's 324 Bash calls began with `sleep`: Claude had no way to wait for a
+  background command, and its context ran out twice (15:56, 19:31).
+  BashOutput now takes `wait_seconds`.
+- **T3 had no GitHub credential.** It asks `gh auth token --hostname
+  github.com` in its own folder; tried on the VPS as T3's user, that exits 1
+  there and 0 in a worktree. 367 "pull request lookup failed" warnings in
+  T3's log between 19:00 and 22:00 UTC. Outside a repository the wrapper now
+  gives the token of the account the App is installed on. With an App's token
+  GitHub answered a GraphQL query with `viewer` and the repository's pull
+  requests, and refused `GET /user` (403). Not tried: a pull request from the
+  T3 app.
+- **The box slept 36 times and woke 37 during the thread**, 59.6 s of wakes in
+  all, 52.7 s of it the first, which installed the tools while the golden
+  builder did the same.
 - **Not fixed:** T3 treats one failed event write as a failed turn and stops
   listening while the agent runs on; a build that fails is only in the
   daemon's log.
