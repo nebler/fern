@@ -10,7 +10,10 @@ source "$(dirname "$0")/lib.sh"
 lab_lock
 images=(fern fern-box)
 t3=no
-if [ "${1:-}" = t3 ] || { lab_up && t3_installed; }; then
+# FERN_T3=skip leaves T3's image and server as they are: the daemon and the
+# box image alone, for a node whose T3 holds a turn that must not end, and
+# whose memory T3's build would take from that turn's box.
+if [ "${FERN_T3:-}" != skip ] && { [ "${1:-}" = t3 ] || { lab_up && t3_installed; }; }; then
   t3=yes
   images+=(fern-t3)
 fi
