@@ -57,10 +57,16 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 	// An agent box runs Claude next to the box that runs the services, which
-	// installs the tools they share.
-	if os.Getenv("FERN_SERVICES") == "off" {
+	// installs the tools they share. A golden builder's first box installs
+	// them for the repository's setup script, which comes before the
+	// services: the daemon runs it there, then wakes the box again for them.
+	switch os.Getenv("FERN_SERVICES") {
+	case "off":
 		services = nil
-	} else {
+	case "later":
+		services = nil
+		installTools(ctx, dir, env, log)
+	default:
 		installTools(ctx, dir, env, log)
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {

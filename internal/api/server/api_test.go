@@ -66,6 +66,8 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) Prune(context.Context, string) error { return nil }
 
+func (f *fakeStore) PruneGoldens(context.Context, string) error { return nil }
+
 func (f *fakeStore) Orphans(context.Context) ([]string, error) { return nil, nil }
 
 func (f *fakeStore) BuildSource(context.Context, string, store.SnapshotRef) error { return nil }

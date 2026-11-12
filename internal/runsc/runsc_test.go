@@ -90,6 +90,7 @@ func TestBoxVars(t *testing.T) {
 			[]string{"FERN_SERVICES=off", "FERN_MCP=http://fern-daemon:7071", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
 		},
 		{"builder", Box{ID: "golden-r", Kind: Builder, Env: noClaude}, []string{"FERN_ON_DEMAND=off"}},
+		{"builder, for the setup script", Box{ID: "golden-r", Kind: Setup, Env: noClaude}, []string{"FERN_SERVICES=later"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			login := ""
@@ -107,7 +108,7 @@ func TestBoxVars(t *testing.T) {
 // Only an agent box's /etc/hosts names the daemon.
 func TestHostsFile(t *testing.T) {
 	host := netip.MustParseAddr("10.89.0.1")
-	for _, kind := range []Kind{Services, Agent, Builder} {
+	for _, kind := range []Kind{Services, Agent, Builder, Setup} {
 		got := strings.Contains(hostsFile(Box{ID: "demo", Kind: kind}, host), "10.89.0.1\t"+DaemonHost)
 		if want := kind == Agent; got != want {
 			t.Errorf("kind %d: hosts names the daemon = %t, want %t", kind, got, want)
@@ -180,7 +181,8 @@ func TestBoxOfCgroup(t *testing.T) {
 }
 
 // A services' box gets the configured limits, or what its repository asks
-// for up to the most it may; an agent box gets the defaults.
+// for up to the most it may, and so do a golden builder's; an agent box gets
+// the defaults.
 func TestLimitsOf(t *testing.T) {
 	big := Limits{CPUs: 4, Memory: 8 << 30, Pids: 9000}
 	all := setup.Limits{CPUs: 3, Memory: 4096, Pids: 6000}
@@ -195,6 +197,8 @@ func TestLimitsOf(t *testing.T) {
 		{name: "unset", kind: Services, want: DefaultLimits},
 		{name: "set", cfg: Config{Limits: big}, kind: Services, want: big},
 		{name: "an agent box", cfg: Config{Limits: big, MaxLimits: big}, kind: Agent, asked: all, want: DefaultLimits},
+		{name: "a builder", cfg: Config{MaxLimits: big}, kind: Builder, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
+		{name: "a builder's box for the setup script", cfg: Config{MaxLimits: big}, kind: Setup, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
 		{name: "asked for less", kind: Services, asked: setup.Limits{Memory: 512}, want: Limits{CPUs: 2, Memory: 512 << 20, Pids: 4096}},
 		{name: "asked for more than the node gives", kind: Services, asked: all, want: DefaultLimits},
 		{name: "asked for more, under the most", cfg: Config{MaxLimits: big}, kind: Services, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},

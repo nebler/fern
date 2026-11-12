@@ -46,6 +46,22 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+// A builder keeps its newest three golden snapshots: each can be gigabytes
+// of a setup script's output.
+func TestPruneGoldens(t *testing.T) {
+	st, _ := openPool(t)
+	create(t, st, "demo", store.CreateOptions{})
+	for _, id := range []string{"golden-1", "golden-2", "golden-3", "golden-4", "golden-5"} {
+		snapshot(t, st, "demo", id)
+	}
+	if err := st.PruneGoldens(t.Context(), "demo"); err != nil {
+		t.Fatalf("PruneGoldens(demo) error: %v", err)
+	}
+	if diff := cmp.Diff([]string{"golden-3", "golden-4", "golden-5"}, snapIDs(t, st)); diff != "" {
+		t.Errorf("goldens after PruneGoldens mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // Below the free space it must leave, the pool refuses new snapshots and
 // environments, but an environment that exists still answers.
 func TestPoolFull(t *testing.T) {

@@ -3,12 +3,14 @@ package actor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
 	"time"
 
+	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
@@ -182,10 +184,15 @@ func (g *Group) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
 
 // buildGolden makes a golden snapshot from environment src's golden source
 // in its repository's builder environment (architecture §7.5): the
-// checkout, then its services' first start (such as Postgres's initdb and
-// seed), stopped cleanly, then the checkout stripped, so that the snapshot
-// holds only what the build made. A build that stops leaves no snapshot,
-// and the next one starts afresh.
+// checkout, then the repository's setup script, if it has one, in a box with
+// the tools and no services, then its services' first start (such as
+// Postgres's initdb and seed), stopped cleanly, then the checkout stripped,
+// so that the snapshot holds only what the build made. A build that stops
+// leaves no snapshot, and the next one starts afresh.
+//
+// It is three changes of the builder, not one: the script runs between them
+// as a command of the box, for up to an hour, and a change holds the
+// actor's mailbox and has ten minutes.
 func (g *Group) buildGolden(ctx context.Context, src string) error {
 	srcEnv, err := g.store.Get(ctx, src)
 	if err != nil {
@@ -199,10 +206,15 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 		repo = filepath.Base(filepath.Dir(srcEnv.Workspace))
 		id = setup.ID(repo)
 	}
-	return g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
+	// The key is of the checkout as it came: a setup script may change a
+	// lockfile, and the golden is for the threads that start from what it
+	// was built from.
+	var key, script string
+	err = g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Create(ctx, id, store.CreateOptions{}); err != nil {
 			return err
 		}
+		a.setup = false
 		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
@@ -213,14 +225,38 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 		if err != nil {
 			return err
 		}
-		key, err := setup.Key(env.Workspace, g.cfg.Image)
-		if err != nil {
+		if key, err = setup.Key(env.Workspace, g.cfg.Image); err != nil {
 			return err
 		}
 		if g.hasSnapshot(ctx, id, key) {
-			return nil // an earlier build made it
+			key = "" // an earlier build made it
+			return nil
 		}
-		err = a.wake(ctx)
+		if script, err = setup.Script(env.Workspace); err != nil || script == "" {
+			return err
+		}
+		// The box for the script: the tools, and no services yet.
+		a.setup = true
+		return a.wake(ctx)
+	})
+	if err != nil || key == "" {
+		return err
+	}
+	if script != "" {
+		err := g.runSetup(ctx, id, script)
+		stopErr := g.do(ctx, "golden_setup_end", id, func(ctx context.Context, a *actor) error {
+			a.setup = false
+			return a.stopBox(ctx)
+		})
+		if err != nil {
+			return err
+		}
+		if stopErr != nil {
+			return stopErr
+		}
+	}
+	return g.do(ctx, "golden_finish", id, func(ctx context.Context, a *actor) error {
+		err := a.wake(ctx)
 		if stopErr := a.stopBox(ctx); err == nil {
 			err = stopErr
 		}
@@ -234,9 +270,63 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 			return err
 		}
 		g.log.InfoContext(ctx, "golden built", slog.String("repo", repo), slog.String("key", key))
-		if err := g.store.Prune(ctx, id); err != nil {
+		if err := g.store.PruneGoldens(ctx, id); err != nil {
 			g.log.WarnContext(ctx, "pruning old goldens failed", slog.String("env", id), slog.Any("error", err))
 		}
 		return nil
 	})
+}
+
+// setupOutput is how much of what a setup script printed a failed build's
+// error quotes, its start and its end.
+const setupOutput = 4 << 10
+
+// runSetup runs the setup script at path script of builder id's workspace
+// in its box, which the build has woken for it, as a command of the box: it
+// keeps the box awake, and the box's stop ends it. The script runs as a
+// program if it may, with /bin/sh if not, in the workspace, with the
+// repository's tools on its PATH. A script that fails, or runs past the
+// limit, fails the build with what it printed.
+func (g *Group) runSetup(ctx context.Context, id, script string) error {
+	limit := g.cfg.SetupTimeout
+	if limit <= 0 {
+		limit = DefaultSetupTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	ex, err := g.Exec(ctx, id, cancel)
+	if err != nil {
+		return err
+	}
+	defer ex.Close()
+	run := g.cfg.RunSetup
+	if run == nil {
+		run = runInBox
+	}
+	start := time.Now()
+	out := boxexec.NewClipped(setupOutput)
+	argv := []string{"/bin/sh", "-c", `if [ -x "$1" ]; then exec "./$1"; else exec /bin/sh "$1"; fi`, "setup", script}
+	code, err := run(ctx, ex.Addr, ex.Token, argv, out)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("%s ran past its limit of %s and was stopped; it had printed: %s", script, limit, out)
+	case err != nil:
+		return fmt.Errorf("running %s: %w", script, err)
+	case code != 0:
+		return fmt.Errorf("%s exited with code %d after %s; it printed: %s", script, code, time.Since(start).Round(time.Second), out)
+	}
+	g.log.InfoContext(ctx, "setup script ran", slog.String("env", id), slog.String("script", script), slog.Duration("took", time.Since(start)))
+	return nil
+}
+
+// runInBox runs argv in the box at addr over boxexec, with what it prints
+// written to out.
+func runInBox(ctx context.Context, addr, token string, argv []string, out io.Writer) (int, error) {
+	conn, err := boxexec.Dial(ctx, "ws://"+addr+boxexec.Path, token, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = conn.CloseNow() }()
+	// Both streams are written from one goroutine.
+	return boxexec.Run(ctx, conn, boxexec.Request{Argv: argv}, boxexec.Streams{Stdout: out, Stderr: out})
 }

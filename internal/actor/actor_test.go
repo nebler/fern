@@ -142,6 +142,8 @@ func (f *fakeStore) Prune(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) PruneGoldens(ctx context.Context, id string) error { return f.Prune(ctx, id) }
+
 func (f *fakeStore) BuildSource(_ context.Context, id string, src store.SnapshotRef) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -191,9 +191,11 @@ FROM t3-src AS t3-deps
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --prod --filter-prod "t3..."
 
+# procps: T3 asks ps once a minute what its terminals run, and logged a
+# warning each time it found none (VPS, 2026-11-12).
 FROM node:24-trixie-slim AS fern-t3
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git \
+ && apt-get install -y --no-install-recommends ca-certificates git procps \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/t3
 COPY --from=t3-deps /t3/node_modules node_modules

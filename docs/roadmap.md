@@ -10,6 +10,7 @@
 - **Agents:** Claude in an agent box of its own; its Bash runs in the environment's box, which never sees the login.
 - **Golden snapshots:** a repository's setup (tools, dependencies, an initialised database) built once and shared by every thread.
 - **Web development** (2026-10-31): dev servers hear Claude's edits, keep running, and are reachable as previews that wake the box; tools a repository pins (mise).
+- **Heavier repositories** (2026-11-12, after a compiler's repository was worked on in a box for a day): a golden build runs the repository's setup script, for up to an hour; Bash commands run past a minute; Claude commits with a tool; the daemon guards the disk under the pool and frees what nothing needs (`fern df`, `fern gc`).
 - **Install** (`v0.2.0`, 2026-11-01): one command from a Mac sets up a server from released images, Claude's login, a tunnel and the T3 pairing.
 
 ## Next, in order

@@ -225,3 +225,43 @@ func TestAskedLimits(t *testing.T) {
 		})
 	}
 }
+
+// A repository's setup script is .fern/setup, else .agents/setup, and only a
+// regular file: the workspace is the agent's.
+func TestScript(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []string
+		link  string // a symlink at this path, to a script outside
+		want  string
+	}{
+		{name: "none"},
+		{name: "Fern's", files: []string{".fern/setup"}, want: ".fern/setup"},
+		{name: "Amp's and Delta's", files: []string{".agents/setup"}, want: ".agents/setup"},
+		{name: "Fern's replaces the other", files: []string{".agents/setup", ".fern/setup"}, want: ".fern/setup"},
+		{name: "a link isn't one", link: ".fern/setup"},
+		{name: "a link, and a file in the other place", files: []string{".agents/setup"}, link: ".fern/setup", want: ".agents/setup"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				write(t, dir, f, "#!/bin/sh\n")
+			}
+			if tt.link != "" {
+				outside := filepath.Join(t.TempDir(), "setup")
+				write(t, filepath.Dir(outside), "setup", "#!/bin/sh\n")
+				if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(tt.link)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(dir, tt.link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := setup.Script(dir)
+			if err != nil || got != tt.want {
+				t.Errorf("Script() = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}

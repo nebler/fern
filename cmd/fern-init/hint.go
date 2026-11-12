@@ -25,6 +25,9 @@ type hint struct {
 	// {port} for the port; "" if they can't.
 	preview    string
 	cloudflare bool // the repository deploys to Cloudflare (setup.IsCloudflare)
+	// setup is the repository's setup script, which a golden build runs
+	// (setup.Script); "" if it has none.
+	setup string
 	// notes are the active skill packs' notes (packNotes).
 	notes []string
 }
@@ -38,6 +41,8 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	cloudflare, err := setup.IsCloudflare(dir)
 	errs = append(errs, err)
 	h.cloudflare = cloudflare
+	h.setup, err = setup.Script(dir)
+	errs = append(errs, err)
 	var detected []string
 	if h.cloudflare {
 		detected = append(detected, "cloudflare")
@@ -73,6 +78,9 @@ func writeHint(claudeDir string, h hint) error {
 		if h.guessed {
 			fmt.Fprintln(&b, "- The repository has no services.yaml: Fern guessed these from package.json (and docker-compose's Postgres, as DATABASE_URL). If one doesn't run right, write a services.yaml at the root to replace the guess; `cat .fern/tools/guess.toml` shows the Node and package manager it chose.")
 		}
+	}
+	if h.setup != "" {
+		fmt.Fprintf(&b, "- This repository has a setup script, %s: Fern runs it once, into the snapshot every new thread starts from, so what it installs and builds is normally here already. If it isn't (the snapshot was still being built when this thread started, or the script failed there), run it yourself, with Bash's run_in_background if it takes long: it is safe to rerun. When you change it, say so: threads started before the next snapshot don't have the change.\n", h.setup)
 	}
 	fmt.Fprintln(&b, "- Start dev servers and other commands that must keep running (`npm run dev`) with Bash's run_in_background, not with `&` or `nohup`: what a command leaves running ends with it.")
 	if h.preview != "" {

@@ -115,9 +115,11 @@ func (l Limits) Check() error {
 // limitsOf returns the limits of a box of kind. An agent box has the
 // defaults. A services' box has the configured ones, or what its repository
 // asked for, up to the configured most: the workspace's services.yaml is
-// the agent's to write, so it must not be able to take the whole node.
+// the agent's to write, so it must not be able to take the whole node. A
+// golden builder's boxes have the same: a setup script builds what a thread
+// would, and one sized for the repository's box doesn't fit a smaller one.
 func (c Config) limitsOf(kind Kind, asked setup.Limits) (Limits, error) {
-	if kind != Services {
+	if kind == Agent {
 		return DefaultLimits, nil
 	}
 	lim := c.Limits
@@ -217,6 +219,8 @@ func boxVars(box Box, wakeID, token, login string, mcpPort int) []string {
 		vars = append(vars, "FERN_SERVICES=off", "FERN_MCP=http://"+net.JoinHostPort(DaemonHost, strconv.Itoa(mcpPort)))
 	case Builder:
 		vars = append(vars, "FERN_ON_DEMAND=off")
+	case Setup:
+		vars = append(vars, "FERN_SERVICES=later")
 	}
 	if box.Env.Claude != "" {
 		vars = append(vars, "CLAUDE_CONFIG_DIR="+box.Env.Claude)

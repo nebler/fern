@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -39,6 +40,7 @@ type Store interface {
 	HasSnapshot(ctx context.Context, ref store.SnapshotRef) (bool, error)
 	Restore(ctx context.Context, id, snapID string) error
 	Prune(ctx context.Context, id string) error
+	PruneGoldens(ctx context.Context, id string) error
 	Orphans(ctx context.Context) ([]string, error)
 	BuildSource(ctx context.Context, id string, src store.SnapshotRef) error
 	StripSource(ctx context.Context, id string) error
@@ -74,7 +76,20 @@ type Config struct {
 	// default preview can be rendered ahead (preview.Server.Warm). A full
 	// channel drops it.
 	Woken chan<- string
+	// SetupTimeout is how long a repository's setup script may run in a
+	// golden build; 0 means DefaultSetupTimeout.
+	SetupTimeout time.Duration
+	// RunSetup runs argv in the box at addr, which token opens, with what it
+	// prints written to out, and returns its exit code: a golden build's
+	// setup script. nil means over boxexec, as every command; tests have no
+	// box to connect to.
+	RunSetup func(ctx context.Context, addr, token string, argv []string, out io.Writer) (int, error)
 }
+
+// DefaultSetupTimeout is how long a setup script may run. The contract asks
+// for 20 minutes (architecture §8); a native toolchain built in a box, at
+// about twice the CPU cost, took 25 (lab/RESULTS.md, 2026-11-12).
+const DefaultSetupTimeout = time.Hour
 
 // Idle says when a box with no command running goes to sleep: Agent after
 // its last command ended, and Human after its last command started. Zero
@@ -398,6 +413,10 @@ type actor struct {
 	// crashes are when the box was found dead or failed to wake, within
 	// crashWindow; Run reads them once the actor is done, for the next.
 	crashes []time.Time
+	// setup makes the next wake of a golden builder's box the one for its
+	// repository's setup script (runsc.Setup): a build sets it for that
+	// step (buildGolden).
+	setup bool
 }
 
 // recent returns the times in ts within crashWindow of now.
@@ -473,7 +492,11 @@ func (a *actor) wake(ctx context.Context) error {
 	a.phase = boxMaybeUp
 	start := time.Now()
 	ctx, sp := span.Start(ctx, a.g.tracer, "box.wake", a.id)
-	addr, err := a.g.driver.Wake(ctx, a.g.boxOf(a.id, env))
+	box := a.g.boxOf(a.id, env)
+	if a.setup && box.Kind == runsc.Builder {
+		box.Kind = runsc.Setup
+	}
+	addr, err := a.g.driver.Wake(ctx, box)
 	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {

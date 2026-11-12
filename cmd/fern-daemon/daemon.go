@@ -147,6 +147,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags.DurationVar(&cfg.Idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&cfg.Idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
 	flags.DurationVar(&cfg.Idle.Prewake, "idle-prewake", 2*time.Minute, "sleep a box woken ahead this long after its wake, unless a command comes (0: no pre-wakes)")
+	flags.DurationVar(&cfg.SetupTimeout, "setup-timeout", actor.DefaultSetupTimeout, "stop a repository's setup script that runs longer than this in a golden build")
 	flags.BoolVar(&cfg.Agents, "agent-boxes", true, "run Claude in a box of its own per environment, whose Bash runs in the environment's box (docs/briefs/claude-outside-the-box.md)")
 	// Localhost only: Go's profiles cost CPU on demand, and nothing but the
 	// node itself needs them. A scraper elsewhere sets an address.

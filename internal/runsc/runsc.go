@@ -67,6 +67,10 @@ const (
 	// Builder makes a golden snapshot: its services start with it, since
 	// their first start is what it builds.
 	Builder
+	// Setup is a golden builder's box before that, for the repository's
+	// setup script: it installs the tools and runs no services, which the
+	// script comes before.
+	Setup
 )
 
 // Box is a box to wake.
@@ -564,7 +568,7 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
 	}
 	var asked setup.Limits
-	if box.Kind == Services {
+	if box.Kind != Agent {
 		if asked, err = setup.AskedLimits(box.Env.Workspace); err != nil {
 			return err
 		}

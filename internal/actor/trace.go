@@ -87,6 +87,13 @@ func (t tracedStore) Prune(ctx context.Context, id string) error {
 	return err
 }
 
+func (t tracedStore) PruneGoldens(ctx context.Context, id string) error {
+	ctx, sp := span.Start(ctx, t.tr, "store.prune_goldens", id)
+	err := t.st.PruneGoldens(ctx, id)
+	span.End(sp, err)
+	return err
+}
+
 func (t tracedStore) Orphans(ctx context.Context) ([]string, error) {
 	ctx, sp := t.tr.Start(ctx, "store.orphans")
 	ids, err := t.st.Orphans(ctx)

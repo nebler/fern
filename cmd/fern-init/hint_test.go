@@ -30,8 +30,17 @@ func TestWriteHint(t *testing.T) {
 	if err := writeHint(dir, hint{}); err != nil {
 		t.Fatalf("writeHint() again error: %v", err)
 	}
-	if got := read(); strings.Contains(got, "postgres") || strings.Contains(got, "Cloudflare") {
-		t.Errorf("hint after the services went = %q, want it replaced, and nothing on Cloudflare", got)
+	if got := read(); strings.Contains(got, "postgres") || strings.Contains(got, "Cloudflare") || strings.Contains(got, "setup script") {
+		t.Errorf("hint after the services went = %q, want it replaced, and nothing on Cloudflare or a setup script", got)
+	}
+	if got := read(); !strings.Contains(got, "use the `commit` tool") {
+		t.Errorf("hint = %q, want it to name the commit tool", got)
+	}
+	if err := writeHint(dir, hint{setup: ".fern/setup"}); err != nil {
+		t.Fatalf("writeHint() with a setup script error: %v", err)
+	}
+	if got := read(); !strings.Contains(got, "a setup script, .fern/setup") || !strings.Contains(got, "run it yourself") {
+		t.Errorf("hint for a repository with a setup script = %q, want it to name the script and say when to run it", got)
 	}
 	if err := writeHint(dir, hint{cloudflare: true}); err != nil {
 		t.Fatalf("writeHint() for Cloudflare error: %v", err)

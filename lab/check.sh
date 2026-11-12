@@ -1167,6 +1167,35 @@ golden() {
     "$(in_daemon "test -e $W/one/.fern/seeded" && echo yes || echo no)"
   for e in gold3 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
+
+  # A repository's setup script runs in the build, before its services'
+  # first start, and what it makes is in the golden.
+  W=/var/lib/fern/worktrees/golden-setup
+  G=$(golden_id golden-setup)
+  for e in gold4 gold5 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  for wt in one two; do
+    tar_dir lab/sample-repo | in_daemon "rm -rf $W/$wt && mkdir -p $W/$wt/.fern && tar -x -C $W/$wt -f - &&
+      printf '%s\n' '#!/bin/sh' 'set -eu' 'mkdir -p .fern/built' \
+        'if test -e .fern/seeded; then echo after; else echo before; fi > .fern/built/services' \
+        'echo by-setup > .fern/built/artifact' > $W/$wt/.fern/setup &&
+      chmod +x $W/$wt/.fern/setup && chown -R 1000:1000 $W/$wt"
+  done
+  fern create gold4 --path $W/one >/dev/null
+  key=
+  for _ in $(seq 120); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  check "a golden is built from a repository with a setup script" 1 "$(grep -c . <<<"$key")"
+  fern create gold5 --path $W/two >/dev/null
+  check "the next worktree has what the script made, and the seeded database" "by-setup yes" \
+    "$(in_daemon "cat $W/two/.fern/built/artifact; test -e $W/two/.fern/seeded && echo yes || echo no" | xargs)"
+  check "the script ran before the services' first start" before "$(in_daemon "cat $W/two/.fern/built/services")"
+  check "and the worktree's own script is its checkout's" yes "$(succeeds in_daemon "test -x $W/two/.fern/setup")"
+  check "Postgres runs on it (3 users)" 3 "$(sql gold5 'select count(*) from users')"
+  for e in gold4 gold5 "$G"; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
 }
 
 claude() {

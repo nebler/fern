@@ -236,6 +236,35 @@ func PreviewPort(dir string) (int, error) {
 	return 0, nil
 }
 
+// setupScripts are where a repository keeps its setup script, the first that
+// exists: a file in .fern/ replaces the .agents/ one (architecture §8).
+var setupScripts = []string{".fern/setup", ".agents/setup"}
+
+// Script returns the path, in the repository checked out at dir, of its
+// setup script: what a golden build runs once, after the tools are installed
+// and before the services' first start, so that every thread starts with
+// what it installs and builds. "" means it has none. Only a regular file
+// counts: the script runs in a box, but the workspace is the agent's, and
+// the daemon follows no link of its own to learn of it.
+func Script(dir string) (string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	for _, p := range setupScripts {
+		fi, err := root.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) || err == nil && !fi.Mode().IsRegular() {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return p, nil
+	}
+	return "", nil
+}
+
 // fileSum returns the SHA-256 of file p in dir, or "missing".
 func fileSum(dir, p string) (string, error) {
 	data, err := readFile(dir, p)

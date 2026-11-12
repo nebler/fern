@@ -16,6 +16,11 @@ const (
 	// newest first. pre-restore ones aren't counted; preRestoreKeep (in
 	// snapshot.go) bounds those.
 	keepTurns = 50
+	// keepGoldens is how many golden snapshots PruneGoldens keeps of a
+	// repository, newest first: the one its threads start from, and the two
+	// before, for a worktree made from an older commit. A golden with a
+	// setup script's output can be gigabytes, and each is a full copy.
+	keepGoldens = 3
 	// New snapshots and environments are refused when less than
 	// minFreeShare of the pool, and at least minFreeBytes, is free: a box
 	// keeps working, but the disk never fills.
@@ -31,6 +36,18 @@ var ErrPoolFull = errors.New("the pool is almost full")
 // keepTurns, and its pre-restore ones older than preRestoreKeep. A revert to
 // a turn whose snapshot is gone is refused with the reason.
 func (s *Store) Prune(ctx context.Context, id string) error {
+	return s.prune(ctx, id, s.keepTurns)
+}
+
+// PruneGoldens deletes builder environment id's oldest golden snapshots
+// beyond the newest keepGoldens. A thread that started from one that goes
+// keeps its files: its workspace is a copy, which shares the blocks.
+func (s *Store) PruneGoldens(ctx context.Context, id string) error {
+	return s.prune(ctx, id, min(s.keepTurns, keepGoldens))
+}
+
+// prune is Prune, keeping the newest keep snapshots.
+func (s *Store) prune(ctx context.Context, id string, keep int) error {
 	if err := s.prunePreRestores(ctx, id, ""); err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
@@ -38,7 +55,7 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
-	// Oldest first: every one with more than keepTurns newer than it goes.
+	// Oldest first: every one with more than keep newer than it goes.
 	turns := 0
 	for _, snap := range snaps {
 		if !strings.HasPrefix(snap.ID, preRestorePrefix) {
@@ -46,7 +63,7 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 		}
 	}
 	for _, snap := range snaps {
-		if turns <= s.keepTurns {
+		if turns <= keep {
 			break
 		}
 		if strings.HasPrefix(snap.ID, preRestorePrefix) {
