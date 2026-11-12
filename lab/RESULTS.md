@@ -40,6 +40,12 @@ restore, a corrupt Postgres on a swapped workspace, credentials in the image;
 4.2 s); both boxes in one sandbox, so dev servers hear Claude's edits (gVisor delivers inotify
 only inside the sandbox that wrote; [spike/watch/RESULTS.md](spike/watch/RESULTS.md)).
 
+**Tried, not built** (local lab, 2026-11-12): freezing an idle box with
+`runsc pause` instead of stopping it. An Astro site's first page: 9 s from
+asleep, 0.2 s from paused, 0.5 to 0.8 s from paused with its memory in swap.
+Not yet tried with Claude or on the VPS
+([spike/pause/RESULTS.md](spike/pause/RESULTS.md)).
+
 The early sections below are from the local lab: their timings come from
 Docker Desktop's virtual disk and VM, and were taken as wall clock by the CLI
 inside the daemon's pod.
