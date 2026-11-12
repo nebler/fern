@@ -24,6 +24,7 @@ type node struct {
 	etc, pool, proc, bin string // /etc/fern, /var/lib/fern, /proc, /usr/local/bin
 	poolImage            string // the pool's sparse file's folder, /var/lib/fern-img
 	t3                   string // T3's server, http://127.0.0.1:30773
+	git                  string // the node's git, which makes Claude's commits
 	github, cloudflare   string // GitHub's and Cloudflare's APIs
 }
 
@@ -31,7 +32,7 @@ type node struct {
 func thisNode() node {
 	return node{
 		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
-		t3: "http://127.0.0.1:30773", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
+		t3: "http://127.0.0.1:30773", git: "git", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
 	}
 }
 
@@ -171,6 +172,10 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		})
 	}
 
+	// Commits: the node's git makes Claude's (its box can't write to git),
+	// as the author T3's git has.
+	add(n.checkCommits(ctx))
+
 	// Backups, which are optional.
 	if _, err := os.Stat(filepath.Join(n.etc, "backup.env")); err != nil {
 		add(finding{name: "backups", info: true, detail: "none: if this server is lost, its threads are (README: backups)"})
@@ -199,6 +204,28 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(n.checkCloudflare(ctx, token))
 	}
 	return out
+}
+
+// checkCommits says whether Claude's commit tool can commit: the node needs
+// git, and T3's git config, in its home in the pool, an author. Without
+// either, threads still work, and the person commits elsewhere.
+func (n node) checkCommits(ctx context.Context) finding {
+	if _, err := exec.LookPath(n.git); err != nil {
+		return finding{name: "commits", info: true, detail: "the server has no git: Claude can't commit its work (apt-get install git, or run the install again)"}
+	}
+	config := filepath.Join(n.pool, "projects", ".gitconfig")
+	author := func(key string) string {
+		out, _ := exec.CommandContext(ctx, n.git, "config", "--file", config, "--get", key).Output()
+		return strings.TrimSpace(string(out))
+	}
+	name, email := author("user.name"), author("user.email")
+	if name == "" || email == "" {
+		return finding{
+			name: "commits", info: true,
+			detail: "git has no author: Claude can't commit its work, nor T3 (run the install again from your computer, which copies yours)",
+		}
+	}
+	return finding{name: "commits", ok: true, detail: fmt.Sprintf("Claude and T3 commit as %s <%s>", name, email)}
 }
 
 // checkGitHub asks GitHub what each account the App is installed on lets it

@@ -34,6 +34,8 @@ func TestDoctor(t *testing.T) {
 		"proc/sys/net/ipv4/ip_forward":    "0\n",
 		"proc/meminfo":                    "MemTotal: 8000000 kB\nMemAvailable:    2048000 kB\n",
 		"bin/runsc":                       "#!/bin/sh\necho 'runsc version release-20261012'\n",
+		// A git that knows an author's name, and no e-mail.
+		"bin/git": "#!/bin/sh\ncase $5 in user.name) echo Ada ;; esac\n",
 	} {
 		p := filepath.Join(root, path)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -58,6 +60,7 @@ func TestDoctor(t *testing.T) {
 	}))
 	defer cf.Close()
 	n.cloudflare = cf.URL
+	n.git = filepath.Join(root, "bin/git")
 
 	got := make(map[string]string)
 	for _, f := range n.check(t.Context(), api.NewClient(d.socket)) {
@@ -75,7 +78,7 @@ func TestDoctor(t *testing.T) {
 	want := map[string]string{
 		"daemon": "ok", "T3": "ok", "Claude login": "ok", "pool": "fail", "gVisor": "ok", "box image": "ok",
 		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info", "backups": "info",
-		"Cloudflare": "info",
+		"Cloudflare": "info", "commits": "info",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)

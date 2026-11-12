@@ -39,6 +39,7 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/backup"
+	"github.com/nebler/fern/internal/commit"
 	"github.com/nebler/fern/internal/disk"
 	"github.com/nebler/fern/internal/github"
 	"github.com/nebler/fern/internal/preview"
@@ -251,6 +252,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
 	apiSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
 	apiSrv.T3 = *t3
+	// Claude's commits: the node's git as T3's user, with T3's home, whose
+	// .gitconfig names the author.
+	apiSrv.Git = &commit.Committer{
+		Git: "git", User: &syscall.Credential{Uid: store.BoxUID, Gid: store.BoxGID}, Home: filepath.Join(pool, "projects"),
+	}
 	app, err := github.Load(*githubApp, *githubAPI)
 	if err != nil {
 		return fmt.Errorf("the GitHub App: %w", err)

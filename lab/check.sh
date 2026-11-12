@@ -56,6 +56,9 @@
 #                the agent box; uses a fake login, so no subscription (with
 #                agent boxes)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
+#   commit       Claude's commit tool commits a thread's changes on its
+#                branch, on the node, where a box can't write to git; no hook
+#                runs (with agent boxes)
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
 #                and serves them, and runs on through a daemon restart (with
@@ -1211,6 +1214,38 @@ print(res["content"][0]["text"])
 sys.exit(1 if res.get("isError") else 0)' <<<"$out"
 }
 
+# commit checks Claude's commit tool on a worktree as T3 makes them: the box
+# has the repository's git folder read-only, so the daemon commits on the
+# node, as T3's user and with the repository's hooks off.
+commit() {
+  echo "== Claude commits through the daemon"
+  if [ "${AGENTS:-0}" != 1 ]; then
+    note "skipped: no agent boxes (lab/boxes.sh agents)"
+    return
+  fi
+  local R=/var/lib/fern/repos/ck-commit W=/var/lib/fern/worktrees/ck-commit/one out
+  local as="setpriv --reuid 1000 --regid 1000 --clear-groups env HOME=/var/lib/fern/projects"
+  fern rm $ENV 2>/dev/null || true
+  in_daemon "rm -rf $R /var/lib/fern/worktrees/ck-commit && install -d -o 1000 -g 1000 $R /var/lib/fern/worktrees/ck-commit /var/lib/fern/projects &&
+    cd $R && $as git init -q -b main . && $as git config user.name Check && $as git config user.email check@fern &&
+    $as sh -c 'echo v0 > a.txt' && $as git add a.txt && $as git commit -qm init && $as git worktree add -q -b t3/one $W &&
+    $as sh -c 'printf \"#!/bin/sh\\ntouch $R/hook-ran\\n\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit'"
+  fern create $ENV --path $W >/dev/null
+  fern exec $ENV -- sh -c 'echo v1 > a.txt && echo new > b.txt'
+  check "git in the box can't commit: its git folder is read-only" no \
+    "$(succeeds fern exec $ENV -- git -c user.name=x -c user.email=x@x commit -qam x)"
+  out=$(mcp $ENV commit '{"message": "from the thread\n\nWith a body."}')
+  check "the commit tool says what it committed" yes "$(succeeds grep -q '^Committed 2 files to t3/one as ' <<<"$out")"
+  check "the commit is on the thread's branch, by the repository's author" "from the thread Check <check@fern>" \
+    "$(in_daemon "cd $R && $as git log -1 --format='%s %an <%ae>' t3/one")"
+  check "main is untouched" init "$(in_daemon "cd $R && $as git log -1 --format=%s main")"
+  check "the repository's hook didn't run" no "$(succeeds in_daemon "test -e $R/hook-ran")"
+  check "the git folder is still all T3's user's" 0 "$(in_daemon "find $R/.git ! -user 1000 | wc -l" | tr -d ' ')"
+  check "the box sees the commit" "from the thread" "$(fern exec $ENV -- git log -1 --format=%s)"
+  check "and a worktree with nothing left to commit" "" "$(fern exec $ENV -- git status --short)"
+  check "which the tool says too" "Nothing to commit: the worktree has no changes." "$(mcp $ENV commit '{"message": "again"}')"
+}
+
 # devserver starts Vite in the environment's box as Claude does, with MCP
 # Bash's run_in_background, and checks that it keeps running after the call
 # (a Bash call alone lets the box sleep 5 s later), then changes files from
@@ -1903,7 +1938,7 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode devserver turn hardware stability)
+  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode commit devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.

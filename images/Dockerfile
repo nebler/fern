@@ -223,12 +223,13 @@ ENTRYPOINT ["node", "/opt/t3/apps/server/dist/bin.mjs"]
 CMD ["serve"]
 
 # The local lab's node (lab/up.sh): Debian with systemd as PID 1, as a VPS
-# runs Fern, and what the daemon runs on its node: btrfs-progs, iproute2 and
-# nftables. gVisor is installed at every start, from the lab's volume.
+# runs Fern, and what the daemon runs on its node: btrfs-progs, iproute2,
+# nftables and git (Claude's commits). gVisor is installed at every start,
+# from the lab's volume.
 FROM debian:trixie AS lab-node
 RUN apt-get update \
  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus btrfs-progs iproute2 nftables \
-      ca-certificates curl procps psmisc util-linux kmod less python3 \
+      ca-certificates curl procps psmisc util-linux kmod less python3 git \
  && rm -rf /var/lib/apt/lists/* \
  && systemctl mask getty.target systemd-firstboot.service systemd-logind.service console-getty.service \
       systemd-networkd-wait-online.service

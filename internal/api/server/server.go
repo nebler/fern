@@ -24,6 +24,7 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/commit"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
@@ -88,6 +89,9 @@ type Server struct {
 	// GitHub sets repositories' Actions secrets (cloudflare_connect). May be
 	// nil: no GitHub App.
 	GitHub Secrets
+	// Git makes commits in threads' worktrees, for Claude, whose box can't
+	// (the commit tool). May be nil: no tool.
+	Git *commit.Committer
 
 	// Stopping is closed when the daemon begins to stop. May be nil. Then the
 	// commands running in boxes are left to run: the next daemon's clients

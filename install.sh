@@ -65,12 +65,12 @@ trap 'printf "fern install: failed at line %s (%s); running it again is safe\n" 
 # settings and gVisor.
 node() {
   export DEBIAN_FRONTEND=noninteractive
-  { command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter && command -v podman && { command -v netavark || [ -x /usr/lib/podman/netavark ]; } && command -v curl && command -v sysctl; } >/dev/null ||
-    { say "installing btrfs-progs, nftables and podman"
+  { command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter && command -v podman && { command -v netavark || [ -x /usr/lib/podman/netavark ]; } && command -v curl && command -v sysctl && command -v git; } >/dev/null ||
+    { say "installing btrfs-progs, nftables, git and podman"
       # A new cloud server updates itself at its first boot, holding apt's
       # lock for a few minutes: wait for it rather than fail.
       local apt=(apt-get -o DPkg::Lock::Timeout=600)
-      "${apt[@]}" update -qq && "${apt[@]}" install -yqq btrfs-progs bzip2 nftables iproute2 util-linux procps curl ca-certificates >/dev/null &&
+      "${apt[@]}" update -qq && "${apt[@]}" install -yqq btrfs-progs bzip2 nftables iproute2 util-linux procps curl ca-certificates git >/dev/null &&
       "${apt[@]}" install -yqq --no-install-recommends podman netavark >/dev/null; }
 
   # The firewall: from the public interface, only SSH may open a connection,
@@ -441,6 +441,24 @@ cloudflare_token() {
   echo "the daemon has a Cloudflare token: Claude gets Cloudflare's MCP server in repositories that deploy to Cloudflare"
 }
 
+# git_author gives T3's git an author, unless it has one: the person's own,
+# from their computer. Commits made on the server are then theirs: T3's, and
+# Claude's, which the daemon makes with the same git config (the commit
+# tool). T3's home is projects/ in the pool.
+git_author() {
+  local name=$1 email=$2 home=/var/lib/fern/projects
+  [ -n "$name" ] && [ -n "$email" ] || die "usage: install.sh git-author NAME EMAIL"
+  install -d -o 1000 -g 1000 "$home"
+  local as=(setpriv --reuid 1000 --regid 1000 --clear-groups env "HOME=$home" git config --global)
+  if [ -n "$("${as[@]}" user.email 2>/dev/null || true)" ]; then
+    echo "git on the server keeps its author: $("${as[@]}" user.name) <$("${as[@]}" user.email)>"
+    return
+  fi
+  "${as[@]}" user.name "$name"
+  "${as[@]}" user.email "$email"
+  echo "git on the server commits as $name <$email>"
+}
+
 # ---------------------------------------------------------------- your Mac
 
 # tunnel keeps an SSH tunnel to T3 and the previews running in the
@@ -534,6 +552,15 @@ remote() {
     # The token goes on stdin, never in a command line.
     ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh cloudflare; else sudo -n bash /tmp/fern-install.sh cloudflare; fi" <"$FERN_CLOUDFLARE_TOKEN_FILE"
   fi
+  # Commits made on the server, by T3 and by Claude, are yours: your git's
+  # author goes along, if the server's git has none.
+  local author_name author_email
+  author_name=$(git config user.name 2>/dev/null || true)
+  author_email=$(git config user.email 2>/dev/null || true)
+  if [ -n "$author_name" ] && [ -n "$author_email" ]; then
+    run="bash /tmp/fern-install.sh git-author $(printf %q "$author_name") $(printf %q "$author_email")"
+    ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then $run; else sudo -n $run; fi"
+  fi
   local link
   link=$(tr -d '\r' <"$out" | sed -n 's/^pairing link: //p' | tail -1)
   rm -f "$out"
@@ -589,6 +616,7 @@ case "${1:-}" in
   doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
   github) github_app "${2:-}" ;;
   cloudflare) cloudflare_token ;;
+  git-author) git_author "${2:-}" "${3:-}" ;;
   skills) skills "${2-}" ;;
   backup-config) backup_config ;;
   server) server ;;

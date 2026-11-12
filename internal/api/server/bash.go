@@ -239,6 +239,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		}
 		return toolText(text), nil, nil
 	})
+	s.addCommitTool(srv, id)
 	s.addForkTools(srv, id)
 	s.addCloudflareTools(srv, id)
 	return srv

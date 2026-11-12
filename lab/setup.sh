@@ -38,6 +38,15 @@ if ! on_node test -s /etc/fern/claude.env </dev/null; then
   lab/claude-login.sh
 fi
 
+# Commits made on the node, by T3 and by Claude, are yours: your git's
+# author, unless the node's git has one (install.sh does the same).
+if name=$(git config user.name) && email=$(git config user.email); then
+  # shellcheck disable=SC2016 # the node's shell's
+  on_node sh -c 'h=/var/lib/fern/projects; install -d -o 1000 -g 1000 $h
+    g() { setpriv --reuid 1000 --regid 1000 --clear-groups env HOME=$h git config --global "$@"; }
+    [ -n "$(g user.email 2>/dev/null)" ] || { g user.name "$1" && g user.email "$2"; }' sh "$name" "$email" </dev/null
+fi
+
 echo "== quick checks"
 lab/check.sh | grep -E '^(FAIL|check:)'
 

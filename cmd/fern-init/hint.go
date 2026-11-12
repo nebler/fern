@@ -85,7 +85,7 @@ func writeHint(claudeDir string, h hint) error {
 		fmt.Fprintln(&b, "- If you have the `cloudflare` MCP server's tools, they act on the person's real Cloudflare account: use them to create a D1 database or an R2 bucket for production, read a deploy's build logs, or check what is live. Ask before deleting or changing anything there.")
 	}
 	fmt.Fprintln(&b, "- Every turn is snapshotted. T3's \"Revert files too\" brings back the files and the services' data together, so changing data is safe.")
-	fmt.Fprintln(&b, "- Don't commit or push: the repository's git folder is read-only here. The person commits from T3.")
+	fmt.Fprintln(&b, "- To commit, use the `commit` tool (mcp__fern__commit), not `git commit`: the repository's git folder is read-only in this box, so git can read (`git status`, `git diff`, `git log`) but not write. Commit when a piece of work is done and checked, with a message that says what and why. You can't push, fetch or change branches: the person pushes from T3.")
 	for _, n := range h.notes {
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, n)
