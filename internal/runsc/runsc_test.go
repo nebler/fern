@@ -105,6 +105,14 @@ func TestBoxVars(t *testing.T) {
 	}
 }
 
+// An agent box learns what its environment's own box gets.
+func TestBoxLimitsVar(t *testing.T) {
+	got := boxLimitsVar(Limits{CPUs: 2.5, Memory: 5 << 30, Pids: 8192})
+	if want := "FERN_BOX_LIMITS=2.5:5120:8192"; got != want {
+		t.Errorf("boxLimitsVar() = %q, want %q", got, want)
+	}
+}
+
 // Only an agent box's /etc/hosts names the daemon.
 func TestHostsFile(t *testing.T) {
 	host := netip.MustParseAddr("10.89.0.1")

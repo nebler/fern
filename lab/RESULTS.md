@@ -1815,3 +1815,72 @@ The same day, with tests that hadn't run before:
 - `BenchmarkMCPCall`: an MCP request to the daemon took 4.1 ms and 8,496
   allocations, tools/list with the client's side; with the SDK's schema
   cache, 2.45 ms and 2,450.
+
+## A compiler's repository in a box, VPS, 2026-11-12
+
+The first repository on Fern that is not a web application: a private copy of
+scriptc with a prototype in its C runtime, which needs LLVM 22, Zig, CMake and
+a sysroot, and has no dev server. One thread worked in it for a day. What it
+measured, read from Claude's transcript in its agent box
+(`envs/<id>/claude/projects/`), the daemon's log and T3's:
+
+| | |
+|---|---:|
+| the repository's own setup (`pnpm install`, TypeScript build) | 42 s |
+| LLVM 22.1.8 unpacked into the workspace, 4.5 GB, no root | 86 s |
+| LLVM helper built | 43 s |
+| runtime pack built (1,739 artifacts) | 1,066 s |
+| four programs, plain / AddressSanitizer / ThreadSanitizer | 58 / 103 / 110 s |
+| the first turn, all of it toolchain | 39 min |
+| the thread's worktree | 8.2 GB |
+
+AddressSanitizer, LeakSanitizer and ThreadSanitizer run under gVisor. The
+results matched the Mac's on every count.
+
+**What it found in Fern**, each fixed the same day unless it says otherwise:
+
+- **A Bash command stopped after 60 s, whatever its `timeout`.** 6 calls ended
+  with "The operation timed out." at 60 s, among them `sleep 100` with a limit
+  of 150 s. Claude took it for a slow clock and polled its background commands
+  with `sleep 57`: 60 such calls in two turns, and the context ran out after
+  an hour. Cause: Claude Code gives the answer to an MCP POST 60 s to begin,
+  and the daemon answers when the tool is done. Reproduced with Claude Code
+  2.1.319 and a tool that waits 75 s: straight to a server that answers as the
+  daemon does, "The operation timed out." after 60 s; through the relay, which
+  now answers at once with a stream, the tool's answer after 75 s.
+- **A finished background command was gone when Claude asked.** A download
+  ended at 14:56:26; the box slept 5 s after the next Bash call, at 14:56:49;
+  BashOutput at 14:57:30 said "its box has dropped it". The daemon now takes
+  an ended command's last output from the box as it ends.
+- **The server's disk filled while the pool reported 27 GiB free.** The pool
+  is a 50 GB sparse file on a 75 GB disk; Podman held 31.6 GB of images (431,
+  none in use) and 4 GB of volumes from image builds. At 16:02:49 UTC the disk
+  had none left, T3's write of one event failed ("database or disk is full"),
+  T3 marked the turn failed and held its queue, and Claude worked on for 35
+  minutes unseen. The guard now covers the disk under the pool; `fern df`,
+  `fern gc`.
+- **No setup script ran.** The golden held the tools (48 s to build). Golden
+  builds now run `.fern/setup`.
+- **Claude could not commit**, and neither could T3: the server's git had no
+  author. The `commit` tool.
+- **A project's first thread started in Local mode** and was refused, with no
+  reason shown: T3 starts Claude with its stderr discarded
+  (`spawnClaudeProcessGroup`), so the wrapper's message can't be shown. The
+  first thread is now a worktree; the message is still not shown to someone
+  who picks Local.
+- **A repository that asked for a bigger box than the server gives got the
+  smaller one with no word of it.** Claude's hint now says what falls short
+  and which flags raise it.
+- **Not fixed:** T3 treats one failed event write as a failed turn and stops
+  listening while the agent runs on; a build that fails is only in the
+  daemon's log.
+
+**Checked in the local lab** (unit tests, and `lab/check.sh slice box stream
+restore paths golden t3 commit space fork settings upgrade devserver`, 142
+checks): the commit tool, `fern df` and `fern gc`, a golden with a setup
+script, the limits in Claude's hint, and Bash through the relay's stream,
+across a daemon restart too. T3's image builds with the eight patches and its
+own tests. Not yet on the VPS: a thread was working there. The lab's timings
+that day mean nothing: the Mac's load average was between 30 and 90, and
+`devserver` failed once because installing Node took longer than the 90 s a
+wake gives it.

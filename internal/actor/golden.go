@@ -237,7 +237,11 @@ func (g *Group) buildGolden(ctx context.Context, src string) error {
 		}
 		// The box for the script: the tools, and no services yet.
 		a.setup = true
-		return a.wake(ctx)
+		if err := a.wake(ctx); err != nil {
+			a.setup = false
+			return err
+		}
+		return nil
 	})
 	if err != nil || key == "" {
 		return err

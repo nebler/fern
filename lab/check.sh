@@ -1261,6 +1261,13 @@ commit() {
     $as sh -c 'printf \"#!/bin/sh\\ntouch $R/hook-ran\\n\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit'"
   fern create $ENV --path $W >/dev/null
   fern exec $ENV -- sh -c 'echo v1 > a.txt && echo new > b.txt'
+  # A repository that asks for a bigger box than the node gives: Claude is
+  # told, in its hint, at its box's next start.
+  fern exec $ENV -- sh -c 'printf "limits:\n  cpus: 64\n" > services.yaml'
+  fern sleep $ENV >/dev/null
+  check "Claude is told its box has fewer CPUs than the repository asks for" yes \
+    "$(fern exec --agent $ENV -- cat /var/lib/fern/envs/$ENV/claude/CLAUDE.md | grep -q '64 CPUs (the box has' && echo yes || echo no)"
+  fern exec $ENV -- rm services.yaml
   check "git in the box can't commit: its git folder is read-only" no \
     "$(succeeds fern exec $ENV -- git -c user.name=x -c user.email=x@x commit -qam x)"
   out=$(mcp $ENV commit '{"message": "from the thread\n\nWith a body."}')

@@ -28,6 +28,9 @@ type hint struct {
 	// setup is the repository's setup script, which a golden build runs
 	// (setup.Script); "" if it has none.
 	setup string
+	// short is what the repository asks for its box and doesn't get, in
+	// words (shortOf); "" if it gets what it asks for.
+	short string
 	// notes are the active skill packs' notes (packNotes).
 	notes []string
 }
@@ -43,6 +46,9 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	h.cloudflare = cloudflare
 	h.setup, err = setup.Script(dir)
 	errs = append(errs, err)
+	asked, err := setup.AskedLimits(dir)
+	errs = append(errs, err)
+	h.short = shortOf(asked, os.Getenv("FERN_BOX_LIMITS"))
 	var detected []string
 	if h.cloudflare {
 		detected = append(detected, "cloudflare")
@@ -51,6 +57,30 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	h.notes, err = packNotes(skillPacks, packs)
 	errs = append(errs, err, writeHint(claudeDir, h), linkSkills(claudeDir, skillPacks, packs))
 	return errors.Join(errs...)
+}
+
+// shortOf returns what a repository asks for its box (services.yaml's
+// limits) and doesn't get, given what the box has, as the daemon passes it
+// to an agent box (FERN_BOX_LIMITS, CPUs:MiB:processes): such as "4 CPUs
+// (the box has 2)". "" means it has what was asked, or the daemon didn't
+// say.
+func shortOf(asked setup.Limits, given string) string {
+	var cpus float64
+	var memory, pids int64
+	if n, err := fmt.Sscanf(given, "%g:%d:%d", &cpus, &memory, &pids); err != nil || n != 3 {
+		return ""
+	}
+	var short []string
+	if asked.CPUs > cpus {
+		short = append(short, fmt.Sprintf("%g CPUs (the box has %g)", asked.CPUs, cpus))
+	}
+	if asked.Memory > memory {
+		short = append(short, fmt.Sprintf("%d MiB of memory (the box has %d)", asked.Memory, memory))
+	}
+	if asked.Pids > pids {
+		short = append(short, fmt.Sprintf("%d processes (the box has %d)", asked.Pids, pids))
+	}
+	return strings.Join(short, ", ")
 }
 
 // writeHint tells Claude where it runs: the user-level CLAUDE.md in Claude's
@@ -78,6 +108,9 @@ func writeHint(claudeDir string, h hint) error {
 		if h.guessed {
 			fmt.Fprintln(&b, "- The repository has no services.yaml: Fern guessed these from package.json (and docker-compose's Postgres, as DATABASE_URL). If one doesn't run right, write a services.yaml at the root to replace the guess; `cat .fern/tools/guess.toml` shows the Node and package manager it chose.")
 		}
+	}
+	if h.short != "" {
+		fmt.Fprintf(&b, "- services.yaml asks for more than this server gives a box: %s. Commands that need more will be slow or run out of memory. Say so to the person when it matters: they raise the most a box may have on the server, with --box-max-cpus, --box-max-memory (MiB) and --box-max-pids in FERN_DAEMON_ARGS in /etc/fern/daemon.env, then `systemctl restart fern-daemon`.\n", h.short)
 	}
 	if h.setup != "" {
 		fmt.Fprintf(&b, "- This repository has a setup script, %s: Fern runs it once, into the snapshot every new thread starts from, so what it installs and builds is normally here already. If it isn't (the snapshot was still being built when this thread started, or the script failed there), run it yourself, with Bash's run_in_background if it takes long: it is safe to rerun. When you change it, say so: threads started before the next snapshot don't have the change.\n", h.setup)

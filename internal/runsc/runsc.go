@@ -567,11 +567,17 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 		// {port} is for the box to fill in.
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
 	}
-	var asked setup.Limits
-	if box.Kind != Agent {
-		if asked, err = setup.AskedLimits(box.Env.Workspace); err != nil {
-			return err
+	asked, askedErr := setup.AskedLimits(box.Env.Workspace)
+	if box.Kind == Agent {
+		// Claude's box doesn't depend on the repository's services.yaml, which
+		// Claude may be there to mend. It learns what the services' box gets,
+		// to say so when the repository asks for more (fern-init's hint).
+		if services, err := d.cfg.limitsOf(Services, asked); askedErr == nil && err == nil {
+			vars = append(vars, boxLimitsVar(services))
 		}
+		asked = setup.Limits{}
+	} else if askedErr != nil {
+		return askedErr
 	}
 	lim, err := d.cfg.limitsOf(box.Kind, asked)
 	if err != nil {

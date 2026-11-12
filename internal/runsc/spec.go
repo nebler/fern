@@ -204,6 +204,12 @@ func boxSpec(box Box, b layout, image, vars []string, lim Limits) spec {
 	}
 }
 
+// boxLimitsVar tells an agent box's fern-init what its environment's own box
+// gets: CPUs, MiB of memory and processes, as FERN_BOX_LIMITS=2:2048:4096.
+func boxLimitsVar(lim Limits) string {
+	return fmt.Sprintf("FERN_BOX_LIMITS=%g:%d:%d", lim.CPUs, lim.Memory>>20, lim.Pids)
+}
+
 // boxVars are the variables fern-init needs: the token that authenticates
 // the daemon, the wake's ID (stop requests name it), the workspace, what
 // box's kind turns off, and Claude's folder and login if it gets them.

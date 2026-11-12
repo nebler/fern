@@ -238,8 +238,11 @@ func (s *Server) readJob(ctx context.Context, id, jobID string) (string, error) 
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil // without a call to a box that isn't there
 	}
-	if o, ok := j.kept(); ok && j.is(jobExited) {
-		return j.report(o, nil), nil // its box may be asleep by now
+	// Its state first: the watch keeps the output before it says it ended.
+	if j.is(jobExited) {
+		if o, ok := j.kept(); ok {
+			return j.report(o, nil), nil // its box may be asleep by now
+		}
 	}
 	o, err := j.box.Read(ctx, j.id)
 	if errors.Is(err, boxexec.ErrNoJob) {
@@ -257,8 +260,10 @@ func (s *Server) killJob(ctx context.Context, id, jobID string) (string, error) 
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil
 	}
-	if o, ok := j.kept(); ok && j.is(jobExited) {
-		return j.report(o, nil), nil
+	if j.is(jobExited) {
+		if o, ok := j.kept(); ok {
+			return j.report(o, nil), nil
+		}
 	}
 	j.killed.Store(true)
 	o, err := j.box.Kill(ctx, j.id)

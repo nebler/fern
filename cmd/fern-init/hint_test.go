@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nebler/fern/internal/setup"
 )
 
 // The hint names the services, is replaced at every start, and leaves a
@@ -36,6 +38,12 @@ func TestWriteHint(t *testing.T) {
 	if got := read(); !strings.Contains(got, "use the `commit` tool") {
 		t.Errorf("hint = %q, want it to name the commit tool", got)
 	}
+	if err := writeHint(dir, hint{short: "4 CPUs (the box has 2)"}); err != nil {
+		t.Fatalf("writeHint() for a box with less than asked error: %v", err)
+	}
+	if got := read(); !strings.Contains(got, "asks for more than this server gives a box: 4 CPUs (the box has 2).") || !strings.Contains(got, "--box-max-cpus") {
+		t.Errorf("hint for a box with less than asked = %q, want it to say what is short and how the person raises it", got)
+	}
 	if err := writeHint(dir, hint{setup: ".fern/setup"}); err != nil {
 		t.Fatalf("writeHint() with a setup script error: %v", err)
 	}
@@ -56,5 +64,33 @@ func TestWriteHint(t *testing.T) {
 	}
 	if got := read(); got != "my own notes\n" {
 		t.Errorf("CLAUDE.md = %q after writeHint, want someone's own notes kept", got)
+	}
+}
+
+// Claude is told what its repository asks for its box and doesn't get.
+func TestShortOf(t *testing.T) {
+	tests := []struct {
+		name  string
+		asked setup.Limits
+		given string
+		want  string
+	}{
+		{name: "nothing asked", given: "2:2048:4096"},
+		{name: "asked for what it gets", asked: setup.Limits{CPUs: 2, Memory: 2048}, given: "2:2048:4096"},
+		{name: "asked for less", asked: setup.Limits{CPUs: 0.5, Memory: 512, Pids: 100}, given: "2:2048:4096"},
+		{
+			name: "asked for more of each", asked: setup.Limits{CPUs: 4, Memory: 5120, Pids: 8192}, given: "2:2048:4096",
+			want: "4 CPUs (the box has 2), 5120 MiB of memory (the box has 2048), 8192 processes (the box has 4096)",
+		},
+		{name: "asked for more memory", asked: setup.Limits{CPUs: 2, Memory: 5120}, given: "2.5:2048:4096", want: "5120 MiB of memory (the box has 2048)"},
+		{name: "a daemon that doesn't say", asked: setup.Limits{CPUs: 4}},
+		{name: "a value that isn't the daemon's", asked: setup.Limits{CPUs: 4}, given: "lots"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shortOf(tt.asked, tt.given); got != tt.want {
+				t.Errorf("shortOf(%+v, %q) = %q, want %q", tt.asked, tt.given, got, tt.want)
+			}
+		})
 	}
 }
