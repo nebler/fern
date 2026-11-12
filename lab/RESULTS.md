@@ -1895,7 +1895,19 @@ restore paths golden t3 commit space fork settings upgrade devserver`, 142
 checks): the commit tool, `fern df` and `fern gc`, a golden with a setup
 script, the limits in Claude's hint, and Bash through the relay's stream,
 across a daemon restart too. T3's image builds with the eight patches and its
-own tests. Not yet on the VPS: a thread was working there. The lab's timings
+own tests.
+
+**On the VPS, with the thread still working** (22:50 UTC): the daemon and the
+box image, built there in 2 minutes with `FERN_T3=skip lab/build.sh`; T3 was
+left as it was. The new daemon adopted the thread's running background
+command and both its boxes, and the turn went on. `lab/check.sh commit space
+golden`: 27 checks pass, a golden with a setup script among them (golden
+build 4.6 s, create from golden 38 ms, with the thread's builds running
+beside). `fern gc` removed 141 of Podman's images: 11.6 → 29.4 GiB free on
+the server's disk; it kept the box image the thread's boxes still ran from.
+`fern df` took 48 s there, most of it btrfs sizing the thread's 8 GB
+workspace and its snapshots. Not yet there: T3's image (the first-thread
+patch, `ps`, the account's GitHub token), which waits for the thread. The lab's timings
 that day mean nothing: the Mac's load average was between 30 and 90, and
 `devserver` failed once because installing Node took longer than the 90 s a
 wake gives it.
