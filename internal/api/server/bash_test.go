@@ -102,6 +102,23 @@ func connect(t *testing.T, url, token string) (*mcp.ClientSession, error) {
 	return c.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: &http.Client{Transport: bearer{token}}}, nil)
 }
 
+// The server says it has tools and sends nothing by itself: a server that
+// says its list may change has Claude open a stream to listen on, which the
+// endpoint holds like any answer, and Claude waited 25 s for it at every
+// start.
+func TestMCPSendsNothingItself(t *testing.T) {
+	url, _, _ := newMCP(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	caps := s.InitializeResult().Capabilities
+	if caps.Tools == nil || caps.Tools.ListChanged || caps.Prompts != nil || caps.Resources != nil {
+		t.Errorf("capabilities = %+v (tools %+v), want tools alone, with a list that doesn't change", caps, caps.Tools)
+	}
+}
+
 // Bash runs the command in the environment's box, waking it, and returns
 // its output and exit code.
 func TestBash(t *testing.T) {

@@ -172,7 +172,14 @@ func (h *heldAnswer) send(w http.ResponseWriter) {
 }
 
 func (s *Server) bashServer(id string) *mcp.Server {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "fern", Version: "1"}, &mcp.ServerOptions{SchemaCache: s.schemas})
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fern", Version: "1"}, &mcp.ServerOptions{
+		SchemaCache: s.schemas,
+		// Tools only, and a list that never changes: the server sends nothing
+		// by itself. Saying it might (the SDK's default) has Claude open a
+		// stream to listen on, which this endpoint holds like any answer, so
+		// every Claude waited 25 s for it at its start before its first turn.
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
+	})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "Bash",
 		Description: "Runs a shell command in this thread's box, where its services (databases, servers) run, " +
