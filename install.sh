@@ -252,7 +252,12 @@ fern_from_release() {
   systemctl enable -q fern-daemon fern-t3
   # A run that failed may have left them past systemd's start limit.
   systemctl reset-failed fern-daemon fern-t3 2>/dev/null || true
-  if [ "$changed" = yes ]; then
+  if [ -e /var/lib/fern/restoring.json ]; then
+    # A restore that stopped: neither runs on the half-restored pool (the
+    # daemon refuses to) until restore, below, has finished it.
+    [ -n "$FERN_RESTORE_FROM" ] || die "a restore into /var/lib/fern hasn't ended: run the install again with the same FERN_RESTORE_FROM"
+    systemctl stop fern-t3 fern-daemon
+  elif [ "$changed" = yes ]; then
     # Running commands and turns carry on through the daemon's restart.
     systemctl restart fern-daemon
     wait_daemon
@@ -262,7 +267,7 @@ fern_from_release() {
   else
     systemctl start fern-daemon fern-t3
   fi
-  wait_t3
+  [ -e /var/lib/fern/restoring.json ] || wait_t3
   printf '%s, installed %s\n' "$FERN_VERSION" "$(date -u '+%F %H:%M UTC')" >"$FERN_LIB/release.new"
   [ "$changed" = no ] && [ -s "$FERN_LIB/release" ] || mv "$FERN_LIB/release.new" "$FERN_LIB/release"
   rm -f "$FERN_LIB/release.new" "$FERN_LIB/updating"

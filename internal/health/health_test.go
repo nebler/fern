@@ -2,6 +2,8 @@ package health_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,10 +59,20 @@ func TestProblems(t *testing.T) {
 		every  time.Duration // how often backups are due; 0: none set up
 		backup string        // the pool's backup.json; "": none yet
 		boxes  fakeBoxes     // the boxes that keep crashing
+		t3     int           // T3's answer; 0: no T3, -1: it is down
 		want   []string      // each problem's name and the start of its detail
 		fix    string        // a part of the first problem's fix
 	}{
 		{name: "nothing wrong", store: fakeStore{envs: []string{"t3-1", "golden-app-12345678"}, space: roomy}, every: hour},
+		{name: "T3 answers", store: fakeStore{space: roomy}, t3: http.StatusOK},
+		{
+			name:  "T3 answers with an error, before a backup that fails",
+			store: fakeStore{space: roomy}, every: hour, t3: http.StatusServiceUnavailable,
+			backup: `{"at":"` + time.Now().UTC().Format(time.RFC3339) + `","error":"x","good":"2026-11-10T08:00:00Z"}`,
+			want:   []string{"t3: T3 doesn't answer at http://", "backups: the last backup failed"},
+			fix:    "`systemctl status fern-t3` and `journalctl -u fern-t3` say why; `systemctl restart fern-t3` starts it again",
+		},
+		{name: "T3 is down", store: fakeStore{space: roomy}, t3: -1, want: []string{"t3: T3 doesn't answer at http://"}},
 		{
 			name: "a pool that takes no more snapshots",
 			store: fakeStore{space: store.Space{
@@ -143,7 +155,23 @@ func TestProblems(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := health.Checker{Store: tt.store, Pool: pool, BackupEvery: tt.every, Boxes: tt.boxes}.Problems(t.Context())
+			c := health.Checker{Store: tt.store, Pool: pool, BackupEvery: tt.every, Boxes: tt.boxes}
+			if tt.t3 != 0 {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/.well-known/t3/environment" {
+						http.NotFound(w, r)
+						return
+					}
+					w.WriteHeader(tt.t3)
+				}))
+				c.T3 = &health.T3{URL: srv.URL}
+				if tt.t3 < 0 {
+					srv.Close() // nothing listens
+				} else {
+					defer srv.Close()
+				}
+			}
+			got, err := c.Problems(t.Context())
 			if err != nil {
 				t.Fatalf("Problems() error: %v", err)
 			}

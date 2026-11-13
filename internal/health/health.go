@@ -45,20 +45,28 @@ type Checker struct {
 	// Memory knows what the boxes use together. May be nil: it isn't looked
 	// at.
 	Memory *Memory
+	// T3 is T3's server, asked whether it answers. May be nil: there is no
+	// T3.
+	T3 *T3
 }
 
 // lateBackups is how many backups may be missed before it is a problem:
 // one that runs long, or a restart, misses one.
 const lateBackups = 3
 
-// Problems returns what is wrong now, the most pressing first: a pool that
-// takes no more snapshots, one with no room left for btrfs's records,
+// Problems returns what is wrong now, the most pressing first: a T3 that
+// doesn't answer, a pool that takes no more snapshots, one with no room left for btrfs's records,
 // boxes that have nearly used up their memory or were killed for it,
 // backups that fail or have stopped, boxes that aren't woken because they
 // keep crashing, environments whose last snapshot failed, and golden builds
 // that failed. No problems is an empty list.
 func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	out := []api.Problem{} // an empty list on the wire, not null
+	if c.T3 != nil {
+		if p, ok := c.T3.problem(ctx); ok {
+			out = append(out, p)
+		}
+	}
 	sp, err := c.Store.Space()
 	if err != nil {
 		return nil, err

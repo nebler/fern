@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -22,6 +23,26 @@ type fakeS3 struct {
 	objects map[string][]byte
 	uploads map[string]map[int][]byte
 	next    int
+	// failPut, if set, refuses the uploads of the keys it returns true for.
+	failPut func(key string) bool
+}
+
+// failPuts makes the uploads of the keys that contain part fail; "" makes
+// them all work again.
+func (f *fakeS3) failPuts(part string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failPut = nil
+	if part != "" {
+		f.failPut = func(key string) bool { return strings.Contains(key, part) }
+	}
+}
+
+// keys returns the bucket's objects' keys.
+func (f *fakeS3) keys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(maps.Keys(f.objects))
 }
 
 func newFakeS3(t *testing.T) (*fakeS3, S3) {
@@ -47,6 +68,8 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
+	case r.Method == http.MethodPost && q.Has("uploads") && f.failPut != nil && f.failPut(key):
+		http.Error(w, "refused for the test", http.StatusServiceUnavailable)
 	case r.Method == http.MethodPost && q.Has("uploads"):
 		f.next++
 		id := "u" + strconv.Itoa(f.next)

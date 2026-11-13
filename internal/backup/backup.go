@@ -3,8 +3,11 @@
 // workspace as btrfs send streams, incremental after the first, and the
 // state around them (their records, T3's data, the projects' repositories and
 // Claude's folders) as an archive. A manifest in the bucket says what makes
-// up the latest backup; it is written last, so a backup that stops leaves
-// only objects and snapshots the next one removes.
+// up the latest backup, a generation: it is written last, in one put, and
+// nothing it names (an object, the snapshot an environment's next send is
+// from) is deleted or replaced before the next manifest is in its place. A
+// backup that stops leaves the last one whole, and objects and snapshots
+// the next one removes.
 package backup
 
 import (
@@ -21,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,6 +108,19 @@ type Store interface {
 	SnapshotPath(id, snapID string) string
 }
 
+// sender reads and sends the pool's subvolumes: btrfs on a node, a fake in
+// tests.
+type sender interface {
+	// Generation returns subvolume dir's btrfs generation, which grows with
+	// every change to it.
+	Generation(ctx context.Context, dir string) (uint64, error)
+	// CreatedAt returns the generation snapshot dir was taken at.
+	CreatedAt(ctx context.Context, dir string) (uint64, error)
+	// Send writes snapshot snap to w as a send stream, incremental from
+	// snapshot parent if it isn't "".
+	Send(ctx context.Context, w io.Writer, snap, parent string) error
+}
+
 // snapPrefix starts the names of the snapshots backups take; only the last
 // one sent is kept, as the next send's parent.
 const snapPrefix = "fern-backup-"
@@ -120,7 +137,12 @@ type Backer struct {
 	pool   string
 	store  Store
 	envs   Envs
+	vol    sender
 	log    *slog.Logger
+
+	// failAt, if set, is called at every step of a backup, which stops
+	// with its error: the tests' crash at that step.
+	failAt func(step string) error
 
 	// running is held by the backup under way. Two at once would each read
 	// the same manifest and delete what the other just sent.
@@ -132,7 +154,15 @@ var ErrBusy = errors.New("a backup is already running: try again when it ends")
 
 // New returns a Backer of node's pool.
 func New(cfg *Config, node, pool string, st Store, envs Envs, log *slog.Logger) *Backer {
-	return &Backer{cfg: cfg, prefix: nodePrefix(node), pool: pool, store: st, envs: envs, log: log}
+	return &Backer{cfg: cfg, prefix: nodePrefix(node), pool: pool, store: st, envs: envs, vol: btrfs{}, log: log}
+}
+
+// step returns failAt's error for the named step, if failAt is set.
+func (b *Backer) step(name string) error {
+	if b.failAt == nil {
+		return nil
+	}
+	return b.failAt(name)
 }
 
 // Run backs up every interval until ctx is done.
@@ -170,8 +200,13 @@ func (b *Backer) Once(ctx context.Context) error {
 	return err
 }
 
+// once makes a backup: every environment's send and the state, then the
+// manifest that names them, and only then deletes what the last manifest
+// alone named. An environment that fails fails the backup: a manifest
+// that named its older workspace beside the newer state would restore the
+// two apart.
 func (b *Backer) once(ctx context.Context) error {
-	m, err := b.manifest(ctx)
+	last, err := b.manifest(ctx)
 	if err != nil {
 		return err
 	}
@@ -179,78 +214,94 @@ func (b *Backer) once(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	live := make(map[string]bool)
-	var errs []error
+	next := Manifest{Envs: make(map[string]EnvBackup)}
 	for _, env := range envs {
 		// A golden builder's work is built again from its repository.
 		if store.IsBuilder(env.ID) {
 			continue
 		}
-		live[env.ID] = true
-		eb, err := b.env(ctx, env, m.Envs[env.ID])
+		eb, err := b.env(ctx, env, last.Envs[env.ID])
+		if errors.Is(err, store.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("back up %s: %w", env.ID, err))
-			continue
+			return fmt.Errorf("back up %s: %w", env.ID, err)
 		}
-		m.Envs[env.ID] = eb
-		if err := b.save(ctx, m); err != nil {
-			return err
-		}
+		next.Envs[env.ID] = eb
 	}
-	for id := range m.Envs {
-		if !live[id] {
-			delete(m.Envs, id)
-		}
+	if err := b.step("state"); err != nil {
+		return err
 	}
 	state, err := b.state(ctx)
 	if err != nil {
-		return errors.Join(append(errs, err)...)
-	}
-	m.State, m.Time = state, time.Now().UTC()
-	if err := b.save(ctx, m); err != nil {
 		return err
 	}
-	errs = append(errs, b.sweep(ctx, m))
-	return errors.Join(errs...)
+	next.State, next.Time = state, time.Now().UTC()
+	if err := b.step("manifest"); err != nil {
+		return err
+	}
+	if err := b.save(ctx, next); err != nil {
+		return err
+	}
+	if err := b.step("sweep"); err != nil {
+		return err
+	}
+	return b.sweep(ctx, next)
 }
 
-// env sends environment env's workspace if it changed since eb, its last
-// backup, and returns its backup now.
+// env sends environment env's workspace if it changed since eb, its backup
+// in the last manifest, and returns its backup now. It deletes no snapshot
+// that manifest names, and takes one for the next: the next manifest's
+// sweep deletes the one it replaces.
 func (b *Backer) env(ctx context.Context, env store.Env, eb EnvBackup) (EnvBackup, error) {
-	gen, err := generation(ctx, env.Workspace)
+	// Also says whether env is still there.
+	snaps, err := b.store.Snapshots(ctx, env.ID)
+	if err != nil {
+		return eb, err
+	}
+	gen, err := b.vol.Generation(ctx, env.Workspace)
 	if err != nil {
 		return eb, err
 	}
 	if len(eb.Chain) > 0 && gen == eb.Generation {
 		return eb, nil
 	}
-	snaps, err := b.store.Snapshots(ctx, env.ID)
-	if err != nil {
-		return eb, err
+	// The last manifest's snapshot is the next send's parent, unless the
+	// chain is long enough to start again with a full one. It stays either
+	// way: the manifest is the backup until the next one is written.
+	last, parent := "", ""
+	if n := len(eb.Chain); n > 0 {
+		last = eb.Chain[n-1].Snapshot
+		if n < maxChain {
+			parent = last
+		}
 	}
-	parent := ""
-	if n := len(eb.Chain); n > 0 && n < maxChain {
-		parent = eb.Chain[n-1].Snapshot
-	}
-	// Leftovers of a backup that stopped, and a parent pruned since.
-	hasParent := false
+	// Leftovers of a backup that stopped go; a parent pruned since makes
+	// the send full.
+	hasLast := false
 	for _, s := range snaps {
 		switch {
 		case !strings.HasPrefix(s.ID, snapPrefix):
-		case s.ID == parent:
-			hasParent = true
+		case s.ID == last:
+			hasLast = true
 		default:
 			if err := b.envs.DeleteSnapshot(ctx, env.ID, s.ID); err != nil {
 				return eb, err
 			}
 		}
 	}
-	if !hasParent {
+	if !hasLast {
 		parent = ""
 	}
 
+	if err := b.step("snapshot " + env.ID); err != nil {
+		return eb, err
+	}
 	name := snapPrefix + strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := b.envs.BackupSnapshot(ctx, env.ID, name); err != nil {
+		return eb, err
+	}
+	if err := b.step("send " + env.ID); err != nil {
 		return eb, err
 	}
 	key := b.prefix + "envs/" + env.ID + "/" + name
@@ -261,56 +312,47 @@ func (b *Backer) env(ctx context.Context, env store.Env, eb EnvBackup) (EnvBacku
 	}
 	// The snapshot moved the workspace's generation to its own: a write
 	// since moves it past.
-	taken, err := createdAt(ctx, b.store.SnapshotPath(env.ID, name))
+	taken, err := b.vol.CreatedAt(ctx, b.store.SnapshotPath(env.ID, name))
 	if err != nil {
 		return eb, err
-	}
-	send := Send{Snapshot: name, Key: key, Size: size}
-	if parent == "" {
-		eb.Chain = []Send{send} // the old chain's objects go with the sweep
-	} else {
-		eb.Chain = append(eb.Chain, send)
-		if err := b.envs.DeleteSnapshot(ctx, env.ID, parent); err != nil {
-			b.log.WarnContext(ctx, "deleting a backup's parent snapshot failed", slog.String("env", env.ID), slog.Any("error", err))
-		}
 	}
 	rel, err := filepath.Rel(b.pool, env.Workspace)
 	if err != nil || !filepath.IsLocal(rel) {
 		return eb, fmt.Errorf("workspace %s isn't in the pool", env.Workspace)
 	}
-	eb.Workspace, eb.Generation = rel, taken
+	send := Send{Snapshot: name, Key: key, Size: size}
+	next := EnvBackup{Workspace: rel, Generation: taken}
+	if parent == "" {
+		next.Chain = []Send{send} // the old chain's objects go with the sweep
+	} else {
+		next.Chain = append(slices.Clone(eb.Chain), send)
+	}
 	b.log.InfoContext(ctx, "backed up a workspace", slog.String("env", env.ID), slog.Bool("full", parent == ""), slog.Int64("bytes", size))
-	return eb, nil
+	return next, nil
 }
 
 // send uploads btrfs send of environment id's snapshot name, from parent if
 // it isn't "", compressed and encrypted, as key.
 func (b *Backer) send(ctx context.Context, id, name, parent, key string) (int64, error) {
-	args := []string{"send", "-q"}
 	if parent != "" {
-		args = append(args, "-p", b.store.SnapshotPath(id, parent))
+		parent = b.store.SnapshotPath(id, parent)
 	}
-	// A failed upload kills the send, which would block on its full pipe.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "btrfs", append(args, b.store.SnapshotPath(id, name))...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.StdoutPipe()
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	// The send ends when its stream does, or the upload stops reading,
+	// which closes pr.
+	go func() {
+		err := b.vol.Send(ctx, pw, b.store.SnapshotPath(id, name), parent)
+		pw.CloseWithError(err)
+		done <- err
+	}()
+	size, err := b.put(ctx, key, pr)
+	_ = pr.CloseWithError(errors.New("upload ended"))
+	serr := <-done
 	if err != nil {
 		return 0, err
 	}
-	if err := cmd.Start(); err != nil {
-		return 0, err
-	}
-	size, perr := b.put(ctx, key, out)
-	if perr != nil {
-		cancel()
-	}
-	if err := cmd.Wait(); err != nil && perr == nil {
-		return 0, fmt.Errorf("btrfs send: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return size, perr
+	return size, serr
 }
 
 // put uploads r, compressed and encrypted, as key.
@@ -367,9 +409,28 @@ func (b *Backer) state(ctx context.Context) (string, error) {
 	return key, err
 }
 
-// sweep deletes the objects under the node's prefix that m doesn't name:
-// earlier chains and states, and what a backup that stopped uploaded.
+// sweep deletes what m, the manifest just written, doesn't name: in the
+// pool the backup snapshots other than each environment's last, and in the
+// bucket the objects under the node's prefix (earlier chains and states,
+// and what a backup that stopped uploaded).
 func (b *Backer) sweep(ctx context.Context, m Manifest) error {
+	var errs []error
+	for id, eb := range m.Envs {
+		last := eb.Chain[len(eb.Chain)-1].Snapshot
+		snaps, err := b.store.Snapshots(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, s := range snaps {
+			if strings.HasPrefix(s.ID, snapPrefix) && s.ID != last {
+				errs = append(errs, b.envs.DeleteSnapshot(ctx, id, s.ID))
+			}
+		}
+	}
 	keep := map[string]bool{b.prefix + "manifest.json": true, m.State: true}
 	for _, eb := range m.Envs {
 		for _, s := range eb.Chain {
@@ -378,9 +439,8 @@ func (b *Backer) sweep(ctx context.Context, m Manifest) error {
 	}
 	keys, err := b.cfg.S3.List(ctx, b.prefix)
 	if err != nil {
-		return err
+		return errors.Join(append(errs, err)...)
 	}
-	var errs []error
 	for _, k := range keys {
 		if !keep[k] {
 			errs = append(errs, b.cfg.S3.Delete(ctx, k))
@@ -429,13 +489,16 @@ func (b *Backer) save(ctx context.Context, m Manifest) error {
 	return err
 }
 
+// btrfs is the node's btrfs, through its command.
+type btrfs struct{}
+
 // transid is btrfs subvolume find-new's last line: the subvolume's current
 // generation.
 var transid = regexp.MustCompile(`transid marker was (\d+)`)
 
-// generation returns subvolume dir's btrfs generation, which grows with
-// every change to it.
-func generation(ctx context.Context, dir string) (uint64, error) {
+// Generation runs btrfs subvolume find-new past the last generation, which
+// prints only the current one.
+func (btrfs) Generation(ctx context.Context, dir string) (uint64, error) {
 	out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "find-new", dir, "18446744073709551615").Output()
 	if err != nil {
 		return 0, fmt.Errorf("btrfs subvolume find-new %s: %w", dir, err)
@@ -451,8 +514,8 @@ func generation(ctx context.Context, dir string) (uint64, error) {
 // snapshot was taken in.
 var genAtCreation = regexp.MustCompile(`Gen at creation:\s*(\d+)`)
 
-// createdAt returns the btrfs generation snapshot dir was taken at.
-func createdAt(ctx context.Context, dir string) (uint64, error) {
+// CreatedAt reads the generation from btrfs subvolume show.
+func (btrfs) CreatedAt(ctx context.Context, dir string) (uint64, error) {
 	out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "show", dir).Output()
 	if err != nil {
 		return 0, fmt.Errorf("btrfs subvolume show %s: %w", dir, err)
@@ -462,6 +525,39 @@ func createdAt(ctx context.Context, dir string) (uint64, error) {
 		return 0, fmt.Errorf("btrfs subvolume show %s: no generation in %q", dir, out)
 	}
 	return strconv.ParseUint(string(m[1]), 10, 64)
+}
+
+// Send runs btrfs send. A writer that fails kills it, which would otherwise
+// block on its full pipe.
+func (btrfs) Send(ctx context.Context, w io.Writer, snap, parent string) error {
+	args := []string{"send", "-q"}
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "btrfs", append(args, snap)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	_, cerr := io.Copy(w, out)
+	if cerr != nil {
+		cancel()
+	}
+	werr := cmd.Wait()
+	if cerr != nil {
+		return cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("btrfs send: %w: %s", werr, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // nodePrefix is where node's backups are in the bucket.

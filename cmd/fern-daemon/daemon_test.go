@@ -6,8 +6,33 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/runsc"
 )
+
+// The daemon doesn't start on a pool a restore hasn't finished.
+func TestRestored(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		marker bool
+		ok     bool
+	}{
+		{name: "no restore", ok: true},
+		{name: "a restore under way or stopped", marker: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := t.TempDir()
+			if tc.marker {
+				if err := os.WriteFile(filepath.Join(pool, backup.RestoringFile), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := restored(pool); (err == nil) != tc.ok {
+				t.Errorf("restored() = %v, want ok: %t", err, tc.ok)
+			}
+		})
+	}
+}
 
 func TestFileVar(t *testing.T) {
 	dir := t.TempDir()

@@ -13,7 +13,7 @@ For the owner of one server installed with `install.sh`. Commands marked *server
 | `fern df` | server | what uses the pool and the disk under it, and what `fern gc` would free |
 | `journalctl -u fern-daemon -n 100`, `journalctl -u fern-t3 -n 100` | server | the daemon's and T3's own logs |
 
-With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to your phone, and so does a daemon or T3 that systemd gives up on; with `FERN_HEARTBEAT_URL`, a watcher tells you when the server goes quiet.
+With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to your phone, and so does a daemon or T3 that systemd gives up on; with `FERN_HEARTBEAT_URL`, a watcher tells you when the server goes quiet, or T3 stops answering.
 
 ## When something is wrong, in order
 
@@ -63,7 +63,7 @@ With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to you
 - one release back only, and only to one `install.sh` installed (not one `lab/build.sh` did).
 
 **The server is lost**
-- With backups: a new server, then `FERN_RESTORE_FROM=<old hostname>` and the same `FERN_BACKUP_*` settings with the install (`curl … | bash -s -- root@NEW`). It runs `fern-daemon restore`, which brings back each thread's workspace as of its last backup (at most an hour old), its record, T3's data and the projects' repositories. Your Mac must still have `~/.config/fern/backup-key`.
+- With backups: a new server, then `FERN_RESTORE_FROM=<old hostname>` and the same `FERN_BACKUP_*` settings with the install (`curl … | bash -s -- root@NEW`). It runs `fern-daemon restore`, which brings back each thread's workspace as of its last backup (at most an hour old), its record, T3's data and the projects' repositories. Your Mac must still have `~/.config/fern/backup-key`. A restore that stopped (the connection dropped, the server rebooted) leaves `/var/lib/fern/restoring.json`, and Fern doesn't start until it is finished: run the same install again, which finishes it.
 - Without backups: everything on it is gone: every thread, its workspace, its snapshots, its database and the projects' repositories. What survives is what was pushed to GitHub. `fern doctor` says how much is at stake (`backups`).
 
 **Claude's login has expired** (Claude in a thread says it isn't logged in)

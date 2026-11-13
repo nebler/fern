@@ -170,7 +170,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
 	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
 	notifyURL := flags.String("notify-url", "", "POST a short text to this URL when something goes wrong on the node, and when all is well again, such as https://ntfy.sh/TOPIC (\"\": don't)")
-	heartbeatURL := flags.String("heartbeat-url", "", "GET this URL every --heartbeat-every while the daemon runs and its store answers, for a watcher that tells when the GETs stop, such as https://hc-ping.com/UUID (\"\": don't)")
+	heartbeatURL := flags.String("heartbeat-url", "", "GET this URL every --heartbeat-every while the daemon runs and its store and T3 (--t3) answer, for a watcher that tells when the GETs stop, such as https://hc-ping.com/UUID (\"\": don't)")
 	heartbeatEvery := flags.Duration("heartbeat-every", 5*time.Minute, "how often to GET --heartbeat-url")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -200,6 +200,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return err
 	}
 
+	// A half-restored pool isn't served: Reconcile would take its
+	// environments without a record for leftovers.
+	if err := restored(pool); err != nil {
+		return err
+	}
 	st, err := store.Open(ctx, pool)
 	if err != nil {
 		return err
@@ -331,6 +336,10 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}
+	// T3 can hang or die while the daemon is fine: it is asked too.
+	if *t3 != "" {
+		checker.T3 = &health.T3{URL: *t3}
+	}
 	apiSrv.Health = checker
 	registerGauges(ctx, reg, checker, st, drv)
 
@@ -369,7 +378,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// And a watcher outside the server hears when the daemon, or the server,
 	// has stopped: the beats stop.
 	if *heartbeatURL != "" {
-		heartbeat := health.Heartbeat{Store: st, URL: *heartbeatURL, Log: log}
+		heartbeat := health.Heartbeat{Store: st, T3: checker.T3, URL: *heartbeatURL, Log: log}
 		g.Go(func() error { heartbeat.Run(ctx, *heartbeatEvery); return nil })
 	}
 	for _, s := range servers {
@@ -588,4 +597,17 @@ func restoreBackup(ctx context.Context, node, into string, log *slog.Logger) err
 		return fmt.Errorf("%s is missing: it says where the backups are", backupConfig)
 	}
 	return backup.Restore(ctx, cfg, node, into, log)
+}
+
+// restored returns an error if a restore into pool is under way, or stopped
+// before it ended (backup.RestoringFile).
+func restored(pool string) error {
+	_, err := os.Lstat(filepath.Join(pool, backup.RestoringFile))
+	switch {
+	case err == nil:
+		return fmt.Errorf("a restore into %s hasn't ended (%s): run `fern-daemon restore NODE` again to finish it, then start the daemon", pool, backup.RestoringFile)
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	}
+	return err
 }
