@@ -1,6 +1,6 @@
 # Claude outside the box: threat model (Phase 4, #10)
 
-**Decided 2026-10-27, and built** (`--agent-boxes`, with `--boxes=runsc`): Claude
+**Decided 2026-10-27, and built** (`--agent-boxes`, on by default): Claude
 runs in **a small sandbox of its own per thread, its agent box** (option 1b
 below), not in T3's pod. That changes the plan's #8: with Claude sandboxed,
 its own Read, Edit, Write, Glob and Grep run safely in the agent box, on the
@@ -8,7 +8,9 @@ workspace, so the daemon serves no file tools; only shell commands move.
 Claude's shell tools (Bash, BashOutput, KillShell, KillBash, Monitor) are off,
 and the daemon's MCP endpoint gives it **Bash, which runs each command in the
 environment's own box**, where the services are, waking it; that box sleeps
-5 s after the last call. WebFetch and WebSearch stay on in the agent box, whose
+5 s after the last call (`bashLinger` in `internal/tools`), or, with a
+background command running, on the idle clocks (`--idle-agent`, 5 min after
+the last command; `--idle-human`, 20 min after the last use). WebFetch and WebSearch stay on in the agent box, whose
 firewall gives it the internet and nothing else. What is built, against the
 threats below:
 
@@ -24,13 +26,61 @@ threats below:
   box has a token of its own, made at its start: the box with the services
   can't open this endpoint with its own, and Claude is given none, as the relay
   in its box adds it. Tests: `internal/tools/bash_test.go`.
-- T1, T3, T8 and T9 no longer apply as written: Claude is in a box, not in T3's
-  pod.
+- T1, T3 and T8 no longer apply as written: Claude is in a box, not in T3's
+  pod. T9 was wrong, and so was the read-only git folder as the whole answer
+  to git: see the holes below.
 - Measured in the lab (`lab/t3-run.sh toy 1`, `lab/boxes.sh agents`): the run
   passes; Claude's commands reach the environment's box through Bash; both boxes
   sleep 29 s after a turn; the turn after resumes Claude in 3.7 s, its box
   woken in 157 ms. `check.sh` quick sections pass. A service box can't reach the
   MCP port; an agent box gets 401 without its token.
+
+## Holes found on 2026-11-13, and what closed each
+
+A review on 2026-11-13 found four ways for the box with the services to get
+its code run outside it: on the node, or in Claude's box beside the login.
+Each is closed; architecture §13 has the details and the tests.
+
+- **A repository in a folder of the worktree runs git's filters.** The box
+  can `git init vendor/x` with a config of its own. Once the index holds the
+  folder as a submodule (one `git add --all`, or a repository that has
+  submodules), `git status`, `diff`, `add` and `commit` start a git in it,
+  which runs what that config names: in T3's service on the node, and in
+  Claude's box, where Claude Code runs `git status` by itself. No git
+  setting stops it. Closed twice:
+  - **`cmd/fern-git`** is the git of T3's service and of Claude's box: on
+    the PATH and, through `GIT_EXEC_PATH`, the git that git starts. In a
+    thread's folder it pins `GIT_DIR` and `GIT_WORK_TREE` to the repository
+    the worktree's read-only `.git` file names (in `repos/` or `projects/`),
+    refuses quietly a git started for a folder's own repository
+    (`GIT_DIR=.git` or `.`), refuses `--git-dir`, `--work-tree`, `--bare`
+    and `--exec-path=`, and applies `-C` itself, so git can't be sent
+    elsewhere between the look and the run. A first version in shell was got
+    past the same day (a `.git` file ending in CR LF, and one swapped between
+    two looks).
+  - **Claude's commits are plumbing only** (`internal/commit`): no `git add`
+    or `git commit`, but `diff-files --ignore-submodules=all`, `ls-files`,
+    `update-index`, `write-tree`, `commit-tree` and `update-ref` in an index
+    of its own, none of which opens a folder's own repository. A folder with
+    one is left out, and Claude is told.
+- **T3's terminals ran as the worktree owner, outside every box.** A terminal
+  in T3 was a shell in T3's service, with the server's logins in its
+  environment, for anyone paired with the server. Now it runs
+  `images/fern-shell` and nothing else: a shell in the thread's services
+  box (`fern exec -it --here`), or none outside a thread's worktree.
+- **OpenCode in Claude's box loaded the workspace's `node_modules`.** Bun,
+  which OpenCode is built with, resolves modules from the folder it starts
+  in, and T3 started it in the workspace: a package the other box wrote
+  would load next to the login. The daemon now starts OpenCode's server in
+  `/`, the box's read-only root (`openCodeDir` in `internal/tools/agent.go`),
+  and turns off the workspace's OpenCode settings, plugins, formatters and
+  snapshots.
+- **The workspace's `.fern/tools/shims` were on Claude's PATH.** fern-init put
+  that folder first on the PATH of every box, and the other box writes it: a
+  file named `claude` or `git` there ran in Claude's box at its next start.
+  Claude's box now keeps the image's PATH, with `fern-git` first
+  (`guardGit` in `cmd/fern-init/main.go`); only the services' box gets the
+  repository's tools.
 
 The analysis as it was written, before the decision:
 
@@ -154,7 +204,9 @@ request forgery against assets 2–3.
 - Test: with `--tools ""`, a turn asking for WebFetch must fail.
 
 **T9. Git run by Claude in T3's pod.** Claude runs `git` for context (status,
-branch) in its working directory, the worktree.
+branch) in its working directory, the worktree. (Wrong: there was a new risk,
+a repository the box makes in a folder of the worktree, found 2026-11-13 and
+closed by `fern-git`; see the holes above.)
 - Same exposure as T3's server today, which runs git in the same worktrees: the
   git folder and the worktree's `.git` file are read-only to the box (§13), so
   the box can't set a config that runs commands. No new risk, but the check in

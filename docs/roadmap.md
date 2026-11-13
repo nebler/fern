@@ -1,17 +1,21 @@
 # Roadmap
 
-**Status:** 2026-11-01. This is the source of truth for the order of work. The first plan, week by week and Kubernetes first, is [history/roadmap-weeks.md](history/roadmap-weeks.md); Fern left Kubernetes on 2026-10-29 ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)).
+**Status:** 2026-11-14. This is the source of truth for the order of work. The first plan, week by week and Kubernetes first, is [history/roadmap-weeks.md](history/roadmap-weeks.md); Fern left Kubernetes on 2026-10-29 ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)).
 - [architecture.md](architecture.md): what we build, with what is planned marked so
 - [../lab/RESULTS.md](../lab/RESULTS.md): what was measured
 
 ## Built
 - **The promise:** a snapshot per agent turn, and a revert in T3 brings back the files and the database (`v0.1`).
-- **The engine:** environments on a btrfs pool, gVisor boxes the daemon runs itself, an actor per environment, crash-safe changes with `Reconcile`, sleep when idle and wake on use, pre-wake.
+- **The engine:** environments on a btrfs pool, gVisor boxes the daemon runs itself, an actor per box, crash-safe changes with `Reconcile`, sleep when idle and wake on use, pre-wake.
 - **Agents:** Claude in an agent box of its own; its Bash runs in the environment's box, which never sees the login.
 - **Golden snapshots:** a repository's setup (tools, dependencies, an initialised database) built once and shared by every thread.
 - **Web development** (2026-10-31): dev servers hear Claude's edits, keep running, and are reachable as previews that wake the box; tools a repository pins (mise).
 - **Heavier repositories** (2026-11-12, after a compiler's repository was worked on in a box for a day): a golden build runs the repository's setup script, for up to an hour; Bash commands run past a minute; Claude commits with a tool; the daemon guards the disk under the pool and frees what nothing needs (`fern df`, `fern gc`).
-- **Install** (`v0.2.0`, 2026-11-01): one command from a Mac sets up a server from released images, Claude's login, a tunnel and the T3 pairing.
+- **Install** (`v0.2.0`, 2026-11-01): one command from a Mac sets up a server from released images, Claude's login, a tunnel and the T3 pairing. Since 2026-11-13 an update keeps the release it replaces, and `install.sh rollback` puts it back.
+- **Health and the runbook** (2026-11-13): the daemon's problems (`GET /problems`) in `fern doctor`, `fern top` and `fern logs`; `--notify-url` sends them to a phone, `--heartbeat-url` pings a watcher outside the server, and `fern-failed@.service` tells of a daemon or T3 that systemd gives up on; what to do for each: [operations.md](operations.md).
+- **Backups that survive a crash** (2026-11-13): a manifest written last names a whole backup, and a restore that stopped carries on from where it was (`restoring.json`).
+- **Limits** (2026-11-13): a memory limit for all boxes together (`--boxes-memory`), and a disk limit per thread, opt-in (`--env-disk-limit`, btrfs simple quotas, Linux 6.7 or later; `fern limit`).
+- **Holes closed** (2026-11-13): T3's terminals run in the thread's box (`images/fern-shell`), and `fern-git` is the git of T3's service and Claude's box (architecture §13).
 
 ## Next, in order
 
@@ -26,7 +30,7 @@
 | 7 (built 2026-11-02: three forks with Postgres in 77–94 ms, their tests at once in 2.1–2.7 s; T3's own Fork still shares the worktree) | **Forks:** an environment copied from a snapshot, several at once, each with its own Postgres on :5432 (`env_fork`) | three forks of a thread run their tests at once |
 | 8 | **Codex** next to Claude, with its own login | a Codex thread in T3 snapshots and reverts like a Claude one |
 | 9 | **pi** in an agent box, with a ChatGPT, Copilot or xAI login | a pi thread in T3 snapshots and reverts like a Claude one |
-| 10 (built 2026-11-10 with Claude's login: `lab/t3-run.sh toy` with `INSTANCE=opencode` passes its turns, revert and reopen; the box doesn't sleep between turns yet, and other logins are untried) | **OpenCode** in an agent box, with Claude's login through its Claude Agent provider, or a ChatGPT, Copilot or xAI login | an OpenCode thread in T3 snapshots and reverts like a Claude one |
+| 10 (built 2026-11-10 with Claude's login: `lab/t3-run.sh toy` with `INSTANCE=opencode` passes its turns, revert and reopen; its agent box sleeps between turns (`hibernate.Serve`, `lab/check/opencode.sh`); other logins are untried) | **OpenCode** in an agent box, with Claude's login through its Claude Agent provider, or a ChatGPT, Copilot or xAI login | an OpenCode thread in T3 snapshots and reverts like a Claude one |
 
 ### What each harness needs (steps 8 to 10, read from T3's source at the pinned commit, 2026-11-09; nothing built or tried)
 The owner decided on 2026-11-09 to support Claude Code, Codex, pi and OpenCode. Today every part of the route is written for Claude: the `claude` wrapper in T3's image, the arguments the daemon adds (`startAgent`), the login, Claude's folder, the hint in `CLAUDE.md` and hibernation, which reads Claude's stream.
@@ -44,7 +48,7 @@ The owner decided on 2026-11-09 to support Claude Code, Codex, pi and OpenCode. 
 - **Each needs its own login to test**, which only the owner can give.
 
 ## Proposed, from Amp (2026-11-06)
-Not yet in the order above, which stays as it is until the owner decides. Nothing here is built, and the costs are guesses. The reasoning and sources are on the site's roadmap page (`site/src/pages/roadmap.astro`, "What to take from Amp").
+Not yet in the order above, which stays as it is until the owner decides. Nothing here is built, and the costs are guesses.
 
 | Idea | Taken from | Done when |
 |---|---|---|
@@ -71,7 +75,7 @@ Later, if someone asks: short-lived identity for a box (OIDC), attempts side by 
 Left out: team features, desktops and Chrome profiles, Mac machines and public preview links (previews are never public). Models, apps and review UI belong to the CLIs and T3.
 
 ## Not now
-Several nodes and moving environments between them, quotas and several people per server, micro-VM boxes, warm pools of boxes, memory snapshots (rejected: lab/spike/runsc), EKS.
+Several nodes and moving environments between them, quotas per person and several people per server (a disk limit per thread is built, above), micro-VM boxes, warm pools of boxes, memory snapshots (rejected: lab/spike/runsc), EKS.
 
 ## Rules for staying fast
 - **Every step ends with something you can run and show.** If a step slips, cut scope, not the demo.

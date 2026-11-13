@@ -52,6 +52,8 @@
 //	                                         image builds left, snapshots past retention
 //	fern limit <env> <size>|none             set an environment's disk limit, such as 20G
 //	                                         (the daemon's --env-disk-limit gives new ones theirs)
+//	fern help [<command>]                    list the commands, or one's arguments and flags
+//	                                         (also fern -h, and fern <command> -h)
 package main
 
 import (
@@ -94,8 +96,20 @@ func main() {
 // run runs one invocation against the daemon at socket and returns the
 // process exit code.
 func run(ctx context.Context, socket string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_ = help(stderr)
+		return 2
+	}
 	cmd, err := parse(args)
-	if err != nil {
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		// fern help, fern -h or fern <command> -h: asked for, so not an error.
+		if err := help(stdout, cmd.args...); err != nil {
+			_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
+			return 2
+		}
+		return 0
+	case err != nil:
 		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
 		return 2
 	}
@@ -145,7 +159,9 @@ type stdio struct {
 // subcommand is one of the CLI's commands.
 type subcommand struct {
 	name     string
-	min, max int // how many positional arguments it takes; max -1 means no limit
+	usage    string // its arguments, as help shows them
+	about    string // what it does, in one line
+	min, max int    // how many positional arguments it takes; max -1 means no limit
 	// flags defines the command's flags on fs, to be parsed into c.
 	flags func(fs *flag.FlagSet, c *command)
 	run   func(ctx context.Context, c command, cl *api.Client, std stdio) (int, error)
@@ -155,50 +171,120 @@ type subcommand struct {
 // exec parses its own arguments.
 func subcommands() []subcommand {
 	return []subcommand{
-		{name: "create", min: 1, max: 1, run: create, flags: func(fs *flag.FlagSet, c *command) {
-			fs.StringVar(&c.path, "path", "", "the workspace: <pool>/worktrees/<repo>/<name>; a directory there is adopted")
-			fs.BoolVar(&c.seed, "seed", false, "fill the workspace from a tar stream on stdin")
-		}},
-		{name: "prebuild", min: 1, max: 1, run: prebuild},
-		{name: "image", min: 1, max: 1, run: loadImages},
-		{name: "ls", run: list},
-		{name: "which", min: 1, max: 1, run: which},
-		{name: "worktree", min: 1, max: 1, run: worktreeOf, flags: func(fs *flag.FlagSet, c *command) {
-			fs.StringVar(&c.pool, "pool", pool, "the pool T3's worktrees are in")
-		}},
-		{name: "rm", min: 1, max: 1, run: remove},
-		{name: "snapshot", min: 2, max: 2, run: snapshot, flags: func(fs *flag.FlagSet, c *command) {
-			fs.BoolVar(&c.replace, "replace", false, "take it again if it exists")
-		}},
-		{name: "snapshots", min: 1, max: 1, run: snapshots},
-		{name: "rmsnap", min: 2, max: -1, run: removeSnapshots},
-		{name: "restore", min: 2, max: 2, run: restore},
-		{name: "fork", min: 1, max: 2, run: fork, flags: func(fs *flag.FlagSet, c *command) {
-			fs.IntVar(&c.count, "n", 1, "how many forks to make")
-		}},
-		{name: "exec", run: execute},
-		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
-		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
-		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
-		{name: "why", min: 1, max: 1, run: why},
-		{name: "git-credential", min: 1, max: 1, run: gitCredential},
-		{name: "github-token", max: 1, run: githubToken, flags: func(fs *flag.FlagSet, c *command) {
-			fs.BoolVar(&c.account, "account", false, "a token for an account the App is installed on, the one named or the only one, not for a repository")
-		}},
-		{name: "doctor", run: doctor},
-		{name: "logs", min: 1, max: 1, run: logs, flags: func(fs *flag.FlagSet, c *command) {
-			fs.StringVar(&c.since, "since", "24 hours ago", "how far back in the daemon's journal to look, as journalctl takes it")
-			fs.IntVar(&c.lines, "n", 100, "how many of the last lines to print, of the daemon's and of each box's")
-		}},
-		{name: "top", run: top},
-		{name: "df", run: diskUsage},
-		{name: "pool", min: 2, max: 2, run: poolCommand},
-		{name: "gc", run: collect},
-		{name: "limit", min: 2, max: 2, run: setLimit},
-		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {
-			return 0, cl.Backup(ctx)
-		}},
+		{
+			name: "create", usage: "[--path P] [--seed] <env>", about: "make an environment",
+			min: 1, max: 1, run: create, flags: func(fs *flag.FlagSet, c *command) {
+				fs.StringVar(&c.path, "path", "", "the workspace: <pool>/worktrees/<repo>/<name>; a directory there is adopted")
+				fs.BoolVar(&c.seed, "seed", false, "fill the workspace from a tar stream on stdin")
+			},
+		},
+		{name: "prebuild", usage: "<repo>", about: "build repo's golden snapshot from a tar stream of its checkout on stdin", min: 1, max: 1, run: prebuild},
+		{name: "image", usage: "load", about: "unpack the images of a docker save stream on stdin into the pool (root, on the node)", min: 1, max: 1, run: loadImages},
+		{name: "ls", about: "list environments", run: list},
+		{name: "which", usage: "<path>", about: "print the environment whose workspace holds path", min: 1, max: 1, run: which},
+		{
+			name: "worktree", usage: "[--pool P] <path>", about: "print the environment ID and top folder of the T3 worktree holding path",
+			min: 1, max: 1, run: worktreeOf, flags: func(fs *flag.FlagSet, c *command) {
+				fs.StringVar(&c.pool, "pool", pool, "the pool T3's worktrees are in")
+			},
+		},
+		{name: "rm", usage: "<env>", about: "delete an environment", min: 1, max: 1, run: remove},
+		{
+			name: "snapshot", usage: "[--replace] <env> <snap>", about: "take a snapshot",
+			min: 2, max: 2, run: snapshot, flags: func(fs *flag.FlagSet, c *command) {
+				fs.BoolVar(&c.replace, "replace", false, "take it again if it exists")
+			},
+		},
+		{name: "snapshots", usage: "<env>", about: "list an environment's snapshots", min: 1, max: 1, run: snapshots},
+		{name: "rmsnap", usage: "<env> <snap>...", about: "delete snapshots", min: 2, max: -1, run: removeSnapshots},
+		{name: "restore", usage: "<env> <snap>", about: "restore a snapshot; the box stays asleep", min: 2, max: 2, run: restore},
+		{
+			name: "fork", usage: "[-n N] <env> [<snap>]", about: "copy an environment, from a snapshot if one is named, and print the copies' IDs",
+			min: 1, max: 2, run: fork, flags: func(fs *flag.FlagSet, c *command) {
+				fs.IntVar(&c.count, "n", 1, "how many forks to make")
+			},
+		},
+		{
+			name: "exec", usage: "[-i|-it] [-e NAME]... (<env> | --here) -- cmd...",
+			about: "run a command in the environment's box, waking it if needed",
+			run:   execute, flags: execFlags,
+		},
+		{name: "sleep", usage: "<env>", about: "stop the environment's boxes", min: 1, max: 1, run: timed((*api.Client).Sleep)},
+		{name: "wake", usage: "<env>", about: "start the environment's box and wait until it is ready", min: 1, max: 1, run: timed((*api.Client).Wake)},
+		{name: "prewake", usage: "<env>", about: "start the environment's box in the background", min: 1, max: 1, run: timed((*api.Client).Prewake)},
+		{name: "why", usage: "<env>", about: "what holds the environment's boxes awake, and when they sleep", min: 1, max: 1, run: why},
+		{name: "git-credential", usage: "get", about: "git's credential helper in T3's server: a token from the daemon's GitHub App", min: 1, max: 1, run: gitCredential},
+		{
+			name: "github-token", usage: "[--account] [owner/repo | account]", about: "print a GitHub App token for a repository (default: origin's) or an account",
+			max: 1, run: githubToken, flags: func(fs *flag.FlagSet, c *command) {
+				fs.BoolVar(&c.account, "account", false, "a token for an account the App is installed on, the one named or the only one, not for a repository")
+			},
+		},
+		{name: "doctor", about: "check the node, as root on it, and say what to do about each problem", run: doctor},
+		{
+			name: "logs", usage: "[--since T] [-n N] <env>", about: "what the daemon and the environment's boxes logged about it (root, on the node)",
+			min: 1, max: 1, run: logs, flags: func(fs *flag.FlagSet, c *command) {
+				fs.StringVar(&c.since, "since", "24 hours ago", "how far back in the daemon's journal to look, as journalctl takes it")
+				fs.IntVar(&c.lines, "n", 100, "how many of the last lines to print, of the daemon's and of each box's")
+			},
+		},
+		{name: "top", about: "the boxes that are up, what they use and what holds them awake (root, on the node)", run: top},
+		{name: "df", about: "what uses the pool and the disk under it, and what fern gc would free", run: diskUsage},
+		{name: "pool", usage: "grow <size>", about: "make the pool larger, to 70G or by +10G (root, on the node)", min: 2, max: 2, run: poolCommand},
+		{name: "gc", about: "remove what nothing needs: old images, what image builds left, snapshots past retention", run: collect},
+		{name: "limit", usage: "<env> <size>|none", about: "set an environment's disk limit, such as 20G, or remove it", min: 2, max: 2, run: setLimit},
+		{
+			name: "backup", about: "back up the node's threads now",
+			run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {
+				return 0, cl.Backup(ctx)
+			},
+		},
 	}
+}
+
+// help writes the usage of the command named, or of every command.
+func help(w io.Writer, name ...string) error {
+	if len(name) > 1 {
+		return errors.New("usage: fern help [<command>]")
+	}
+	if len(name) == 1 {
+		sc, ok := lookup(name[0])
+		if !ok {
+			return fmt.Errorf("unknown command %q; fern help lists them", name[0])
+		}
+		_, _ = fmt.Fprintf(w, "usage: fern %s\n\n%s\n", sc.synopsis(), sc.about)
+		fs := sc.flagSet(&command{})
+		var any bool
+		fs.VisitAll(func(*flag.Flag) { any = true })
+		if any {
+			_, _ = fmt.Fprintln(w, "\nflags:")
+			fs.SetOutput(w)
+			fs.PrintDefaults()
+		}
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprint(tw, "usage: fern <command> [arguments]\n\ncommands:\n")
+	for _, sc := range subcommands() {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\n", sc.synopsis(), sc.about)
+	}
+	_, _ = fmt.Fprint(tw, "\nfern help <command> or fern <command> -h shows a command's flags.\n")
+	return tw.Flush()
+}
+
+// synopsis is the command's name and its arguments.
+func (sc subcommand) synopsis() string {
+	return strings.TrimSpace(sc.name + " " + sc.usage)
+}
+
+// flagSet returns a flag set with the command's flags, parsed into c.
+func (sc subcommand) flagSet(c *command) *flag.FlagSet {
+	fs := flag.NewFlagSet(sc.name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // errors are returned, and help is help's
+	if sc.flags != nil {
+		sc.flags(fs, c)
+	}
+	return fs
 }
 
 // lookup returns the subcommand called name, if there is one.
@@ -211,60 +297,68 @@ func lookup(name string) (subcommand, bool) {
 	return scs[i], true
 }
 
-// parse turns the CLI's arguments into a command.
+// parse turns the CLI's arguments into a command. A request for help is
+// flag.ErrHelp, with the command it is about, if any, in args.
 func parse(args []string) (command, error) {
 	if len(args) == 0 {
-		var names []string
-		for _, sc := range subcommands() {
-			names = append(names, sc.name)
-		}
-		return command{}, fmt.Errorf("usage: fern <%s> …", strings.Join(names, "|"))
+		return command{}, errors.New("usage: fern <command> [arguments]; fern help lists them")
+	}
+	switch args[0] {
+	case "help", "-h", "-help", "--help":
+		return command{name: "help", args: args[1:]}, flag.ErrHelp
 	}
 	cmd := command{name: args[0]}
 	sc, ok := lookup(cmd.name)
 	if !ok {
-		return command{}, fmt.Errorf("unknown command %q", cmd.name)
+		return command{}, fmt.Errorf("unknown command %q; fern help lists them", cmd.name)
 	}
-	fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := sc.flagSet(&cmd)
+	var pos []string
+	var err error
 	if cmd.name == "exec" {
-		return parseExec(fs, cmd, args[1:])
+		err = parseExec(fs, &cmd, args[1:])
+	} else {
+		pos, err = parseInterleaved(fs, args[1:])
 	}
-	if sc.flags != nil {
-		sc.flags(fs, &cmd)
-	}
-	pos, err := parseInterleaved(fs, args[1:])
-	if err != nil {
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return command{name: "help", args: []string{cmd.name}}, err
+	case err != nil:
 		return command{}, err
-	}
-	if len(pos) < sc.min || (sc.max >= 0 && len(pos) > sc.max) {
-		return command{}, fmt.Errorf("%s: wrong number of arguments", cmd.name)
+	case cmd.name == "exec":
+		return cmd, nil
+	case len(pos) < sc.min || (sc.max >= 0 && len(pos) > sc.max):
+		return command{}, fmt.Errorf("%s: wrong number of arguments; usage: fern %s", cmd.name, sc.synopsis())
 	}
 	cmd.args = pos
 	return cmd, nil
 }
 
-// parseExec parses exec's flags, which come before the environment:
-// everything after it belongs to the command.
-func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
-	fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
-	fs.BoolVar(&cmd.tty, "it", false, "send stdin from a terminal")
-	fs.BoolVar(&cmd.here, "here", false, "use the environment holding the current directory, and run in it")
-	fs.DurationVar(&cmd.idle, "hibernate", 0, "stop a Claude driven by its SDK, or an OpenCode server, after this long with nothing to do, and start it again at the next message")
-	fs.BoolVar(&cmd.agent, "agent", false, "run in the environment's agent box, Claude's own, if the daemon has them (fern-claude)")
+// execFlags defines exec's flags.
+func execFlags(fs *flag.FlagSet, c *command) {
+	fs.BoolVar(&c.stdin, "i", false, "send stdin")
+	fs.BoolVar(&c.tty, "it", false, "send stdin from a terminal")
+	fs.BoolVar(&c.here, "here", false, "use the environment holding the current directory, and run in it")
+	fs.DurationVar(&c.idle, "hibernate", 0, "stop a Claude driven by its SDK, or an OpenCode server, after this long with nothing to do, and start it again at the next message")
+	fs.BoolVar(&c.agent, "agent", false, "run in the environment's agent box, Claude's own, if the daemon has them (fern-claude)")
 	fs.Func("e", "pass the variable `NAME` on to the command, if it is set", func(name string) error {
 		if v, ok := os.LookupEnv(name); ok {
-			cmd.environ = append(cmd.environ, name+"="+v)
+			c.environ = append(c.environ, name+"="+v)
 		}
 		return nil
 	})
+}
+
+// parseExec parses exec's arguments into cmd. Its flags come before the
+// environment: everything after it belongs to the command.
+func parseExec(fs *flag.FlagSet, cmd *command, args []string) error {
 	if err := fs.Parse(args); err != nil {
-		return command{}, err
+		return err
 	}
 	pos := fs.Args()
 	if !cmd.here {
 		if len(pos) == 0 {
-			return command{}, errors.New("exec: wrong number of arguments")
+			return errors.New("exec: wrong number of arguments")
 		}
 		cmd.args, pos = pos[:1], pos[1:]
 	}
@@ -273,10 +367,10 @@ func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
 		pos = pos[1:]
 	}
 	if len(pos) == 0 {
-		return command{}, errors.New("exec: no command given")
+		return errors.New("exec: no command given")
 	}
 	cmd.argv = pos
-	return cmd, nil
+	return nil
 }
 
 // parseInterleaved parses flags that may come before, between or after the

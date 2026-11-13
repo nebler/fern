@@ -38,6 +38,25 @@ With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to you
 2. `fern top` — is the server short of memory?
 3. Mend the cause (often the repository's `services.yaml`, or `--box-memory` in `/etc/fern/daemon.env`, then `systemctl restart fern-daemon`), then `fern wake <box>` to try at once.
 
+**The boxes are short of memory** (`memory`: the boxes together are near what they may use; the kernel slows them, and at the limit stops the box that uses the most)
+1. `fern top` — which boxes are up, and what each uses.
+2. `fern sleep <env>` frees one's memory now; an idle box sleeps by itself after its turn.
+3. If the server has the memory: raise what the boxes may use together, `--boxes-memory=<MiB>` in `FERN_DAEMON_ARGS` in `/etc/fern/daemon.env` (default: the server's memory less 1,536 MiB for the node itself, and at least half of it), then `systemctl restart fern-daemon` when no turn runs. If not, a larger server.
+
+**The kernel stopped a box for memory** (`memory`, about `killed`: listed for 15 minutes after it was seen)
+1. Nothing needs doing for the thread: it was told at the command that ended with it, and its next command starts the box again.
+2. `fern logs <env>` and `fern top` — a box at its own limit (`--box-memory`, MiB, per box), or the one that used the most when the boxes together were at theirs (`--boxes-memory`).
+3. Raise the one it hit in `FERN_DAEMON_ARGS` in `/etc/fern/daemon.env`, then `systemctl restart fern-daemon`; a repository can ask for its own box's under `limits:` in `services.yaml`.
+
+**A backup failed, or none came** (`backups`: the last one failed, or none for three periods)
+1. `journalctl -u fern-daemon | grep backup` says why: often the bucket's address, key or room.
+2. Mend it: run the install again with the right `FERN_BACKUP_*` settings, or fix the bucket.
+3. `fern backup` (server) tries one now; one that works clears the problem. Until then a restore brings back the last backup that worked.
+
+**T3 has stopped answering** (`t3`: the daemon has had no answer from T3 for a while, so no thread works)
+1. `systemctl status fern-t3`, `journalctl -u fern-t3 -n 50` (server) say why.
+2. `systemctl restart fern-t3`. Below, *T3 doesn't answer*, for when it is the tunnel.
+
 **A golden build fails** (`golden build`: new threads start without what the setup script makes)
 1. `fern doctor` shows the first line; the whole failure, with what the script printed, is `/var/lib/fern/envs/<builder>/build-failed.json`.
 2. Mend the repository's setup script or `services.yaml` and push. The first new thread 15 minutes after the failure builds again; one that works clears the problem. Threads meanwhile work, only slower to start.
@@ -79,7 +98,7 @@ With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to you
 ## Routine
 
 - **Update:** run the install again from your Mac: `curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash -s -- root@HOST` (`FERN_VERSION=<tag>` for a given release). It waits up to ten minutes for running turns, and keeps the release it replaces for a rollback.
-- **Disk limits per thread:** add `--env-disk-limit=20G` to `FERN_DAEMON_ARGS` in `/etc/fern/daemon.env` (server), then `systemctl restart fern-daemon` when no turn runs. At that start the daemon turns btrfs's simple quotas on (Linux 6.7 or later; `uname -r`) and gives every thread a limit, golden builders none; it counts what is written from then on, not what threads hold already. `fern doctor` says if the pool can't have them (`disk limit`). `fern limit <env> <size>` changes one thread's. Taking the flag out gives new threads no limit; existing ones keep theirs until `fern limit <env> none`.
+- **Disk limits per thread** (off by default; the install has no setting for them): add `--env-disk-limit=20G` to `FERN_DAEMON_ARGS` in `/etc/fern/daemon.env` (server), then `systemctl restart fern-daemon` when no turn runs. At that start the daemon turns btrfs's simple quotas on (Linux 6.7 or later; `uname -r`) and gives every thread a limit, golden builders none; it counts what is written from then on, not what threads hold already. `fern doctor` says if the pool can't have them (`disk limit`). `fern limit <env> <size>` changes one thread's. Taking the flag out gives new threads no limit; existing ones keep theirs until `fern limit <env> none`.
 - **Grow the pool:** `fern pool grow +10G` or `fern pool grow 70G` (server), with boxes running; safe to run again.
 - **Backups:** the install with `FERN_BACKUP_ENDPOINT`, `_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY` ([README](../README.md#try-it)); `fern backup` makes one now (server). Keep a copy of `~/.config/fern/backup-key`.
 - **Notifications:** the install with `FERN_NOTIFY_URL=https://ntfy.sh/<a topic nobody would guess>` (subscribe to it in the ntfy app), and `FERN_HEARTBEAT_URL=<a check's ping URL>` from healthchecks.io or another dead man's switch, with a period of 5 minutes and some grace. `off` turns either off. `curl -d test https://ntfy.sh/<topic>` checks your phone's end.

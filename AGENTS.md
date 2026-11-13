@@ -82,7 +82,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 - **The disk is the only record.** An environment is its directory with its record file (`envs/<id>/env.json`); a snapshot is its subvolume. Nothing beside them says what exists: no database, no cache that outlives the daemon.
 - **Per-turn work stays on the node.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login from `/etc/fern/claude.env`.
 - **Credentials never enter `live/`, golden or snapshots.**
-- **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.
+- **No API keys.** Agents are the real `claude` / `opencode` CLIs with the user's own subscription.
 
 ## Tests
 - Table-driven tests with `t.Run`. Diffs with `github.com/google/go-cmp/cmp`.

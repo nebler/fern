@@ -1,6 +1,6 @@
 # Fern v2 architecture
 
-**Status:** what Fern is and how it works, as built on 2026-10-29, with what is planned marked so.
+**Status:** what Fern is and how it works, as built on 2026-11-14, with what is planned marked so.
 - Why, and the research behind it: [design.md](design.md).
 - How each decision was made: [briefs/](briefs/). The first, Kubernetes-first design and its experiments are in [history/](history/).
 
@@ -14,7 +14,7 @@ Fern gives every AI coding thread its own **environment**: code, installed depen
 - It **sleeps** when idle and **wakes** on the next touch.
 - It takes a **snapshot at every agent turn**, so reverting a thread brings the data back along with the code.
 
-Fern runs on **one remote Linux machine as two systemd services**: the Go daemon (`fern-daemon.service`), which owns the environments and runs their boxes itself with gVisor's `runsc`, and T3 Code's server (`fern-t3.service`). Claude runs in a box of its own per thread; its shell commands run in the box with the services ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). Your Mac or phone only runs the T3 app. Agents are the real `claude` / `codex` CLIs on your own subscription.
+Fern runs on **one remote Linux machine as two systemd services**: the Go daemon (`fern-daemon.service`), which owns the environments and runs their boxes itself with gVisor's `runsc`, and T3 Code's server (`fern-t3.service`). Claude runs in a box of its own per thread; its shell commands run in the box with the services ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). Your Mac or phone only runs the T3 app. Agents are the real `claude` and `opencode` CLIs on your own subscription (OpenCode with Claude's login, through its Claude Agent provider); Codex is planned (roadmap step 8).
 
 How it got here: the first design ran boxes as agent-sandbox `Sandbox` pods on Kubernetes with a CSI driver. The daemon took over running the boxes on 2026-10-27 ([briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), Kubernetes left the single-machine install on 2026-10-28 ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)), and the Kubernetes mode was removed from the code on 2026-10-29.
 
@@ -29,7 +29,7 @@ How it got here: the first design ran boxes as agent-sandbox `Sandbox` pods on K
 - **API-key model access,** and any proxy that intermediates subscription credentials.
 - **A hosted multi-tenant service.** Fern is self-hosted, one login per person.
 - **Kubernetes.** Removed; see §1.
-- **Our own URL product.** Previews (planned) use portless or simple hostname routing.
+- **Our own URL product.** Previews (built, §5) use simple hostname routing.
 - **Running on the Mac.** Fern runs on a remote Linux machine; the Mac only runs the T3 app.
 
 ## 2. Concepts
@@ -148,9 +148,9 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 | `GET /events` | event stream (state changes, snapshots, wakes) | planned; for UIs and tests |
 | `PUT /goldens/{repo}` | build repo's golden from a checkout, a tar body, unless it has one for it | built; T3 sends it when a project is added (`fern prebuild REPO`). Answers before the build |
 
-**Other entrances (planned):**
+**Other entrances:**
 - **Previews (built):** `http://<port>-<env>.<host>/…` is port `<port>` of the environment's box, with nothing to declare, and `http://<env>.<host>/…` its default preview, the port of the first service in `services.yaml` (by name) with a `port` (copied from Delta). `<host>` is `--preview-host`, `localhost` by default: a browser sends every name under `.localhost` to the machine itself, so no DNS is needed. The front door listens on `--preview-addr` (`:30780`); like T3's own port it is never public (the VPS's firewall lets in only SSH; reach it with `ssh -L 30780:127.0.0.1:30780`, as T3's), and boxes can't reach it. The repository isn't in the name, as planned: an environment's ID is unique on its node. A box learns its URL as `FERN_PREVIEW` (with `{port}`), which Claude's hint passes on, so Claude can hand out the link. Answers: 404 for a name that isn't a preview, an unknown environment or one without a default; 503 with `Retry-After` if the box doesn't wake; 502 saying that nothing listens on the port, after trying for 5 s (a dev server a wake starts listens a moment later).
-- **Webhooks:** `POST /hooks/{env}/{token}` → wakes the environment and delivers the request.
+- **Webhooks (planned):** `POST /hooks/{env}/{token}` → wakes the environment and delivers the request.
 
 **Errors:** an HTTP status (404 not found, 400 invalid, 500 failed) with `{"error": message}`. Planned with the actor and quotas: busy, conflict and quota exceeded; normal calls will queue in the actor's mailbox.
 
@@ -212,7 +212,7 @@ CPU usage and running services are ignored. An explicit `hold` keeps it awake.
 
 **Background commands (built)** are the exception to the first rule: one Claude starts with Bash's `run_in_background`, such as a dev server, is counted as a job of the box (`Group.Job`), but it doesn't hold the box awake as other execs do. With one running, the box sleeps on the two clocks, ignoring a Bash call's 5 s linger and a pre-wake's lease, and Claude's edits passed on to it (§10) count as touches of the human clock. That sleep ends the command: a dev server Claude forgot costs at most 20 minutes of an awake box.
 
-Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off), and previews: every request through the front door is an exec for as long as it lasts (`Group.Preview`), so a page whose dev server's live reload is connected keeps the box awake, and once it is closed the clocks run. Terminals and `hold` are planned.
+Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off), and previews: every request through the front door is an exec for as long as it lasts (`Group.Preview`), so a page whose dev server's live reload is connected keeps the box awake, and once it is closed the clocks run; and terminals (built 2026-11-13): a terminal in T3 is a shell exec'd in the box, an open command for as long as it lasts (§15). `hold` is planned.
 
 **T3 keeps a thread's Claude running between turns,** in one exec, and ends it once the session has been idle (no turn, tool call, approval or background task). Unpatched T3 waits 30 minutes, so a box would stay awake about 35 minutes after a short turn, holding Claude's memory (200 MB and up). Fern's T3 image waits 5 minutes (`images/t3/fern-sessions.patch`; `T3CODE_PROVIDER_IDLE_TIMEOUT_MS` changes it): Claude exits 5 minutes after the last turn, and the box sleeps 5 minutes later, or 20 minutes after Claude started if that is later.
 
@@ -415,7 +415,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 - **Wake coalescing:** the first touch on an asleep environment starts **one** wake; later touches wait on it.
 - **Rendering ahead (built):** when an environment's own box wakes (not its agent box or a golden builder's), the actor names it on a channel (`Config.Woken`), and the front door asks its default preview for `/` once, by the preview's name, as a browser's first request would, retrying while the dev server starts (`Server.Warm`, 2 min at most). A dev server compiles a page at its first request: TanStack Start's takes 10 s in a box, so the page a person opens after Claude's turn woke the box comes in 0.11 s instead of 16.6 s (`lab/check.sh tools`, VPS). A wake a browser's request made isn't rendered twice: that request is the first.
 - **Holding (built):** a preview request waits for the wake (about 155 ms), then up to 5 s for the port to listen; a wake that fails is **503 + Retry-After**. Planned: health and probe requests get the 503 at once while waking.
-- **Activity (built for previews):** a preview request is an exec of the box's actor while it lasts (§6.3). Planned: attached terminals.
+- **Activity (built):** a preview request is an exec of the box's actor while it lasts, and so is a terminal T3 has open in the box (§6.3, §15).
 
 ---
 
@@ -473,7 +473,7 @@ The threat model is in [briefs/claude-outside-the-box.md](briefs/claude-outside-
   - GitHub (built): T3's server pushes and opens pull requests, never a box (the repository's git folder is read-only there). Its git asks `fern git-credential` (set in `fern-t3.service`) and its `gh` asks `fern github-token` (`images/fern-gh`) for a token; the daemon mints it from the person's GitHub App (`internal/github`; its ID and key in `/etc/fern/github-app/`, root only): for the one repository, with contents and pull requests only, for an hour, renewed five minutes before. T3 itself asks differently: once for the host, in its own folder and no repository (`gh auth token --hostname github.com`), and uses that credential for every thread's pull requests. There the wrapper gives it a token for the account the App is installed on (`fern github-token --account`, `App.AccountToken`): every repository of that installation, with the same permissions and hour. That is no more than T3 can get already, a repository at a time. Until 2026-11-12 the call got nothing: T3 had no GitHub credential on a Fern server, and its pull request lookups failed once a minute for every thread (`lab/check.sh github` asked for a token by repository, never as T3 does). With an App's token GitHub answers T3's GraphQL (`viewer` is the App's bot) and refuses `GET /user`; what T3 does with pull requests through it has not been tried in the app. The request goes over the API's socket, which boxes can't reach, so no token is in a box, a workspace or a snapshot. Without an App, or one installed on the repository, git and gh go on without a token. `lab/check.sh github` checks it against a fake GitHub.
   - forks get no credentials (built: an empty Claude folder, and a token of their own as every box has); planned: fresh secrets in the identity hook
 - **The boxes' network:** an nftables table of their own (`inet fern`, replaced whole in one transaction at every daemon start) drops what boxes send to private, shared, loopback, link-local and multicast ranges and everything they send to the node except answers; only the daemon, on the node, connects to a box. Agent boxes alone may reach the daemon's MCP port. Boxes resolve names with public resolvers (`--box-dns`). Checked by `lab/check.sh`: another box, the node's ports (T3, the daemon's metrics) and the metadata address time out; the internet answers.
-- **The machine's network:** T3's port must never be public, as anyone who reaches it uses the owner's subscription (§13.1). On a VPS, `lab/vps.sh` installs a firewall (`inet fern_host`, a table of its own) that lets in only SSH; reach T3 through an SSH tunnel or a tailnet. The daemon's metrics and profiles listen on localhost.
+- **The machine's network:** T3's port must never be public, as anyone who reaches it uses the owner's subscription (§13.1). `install.sh` installs a firewall (`inet fern_host`, a table of its own) that lets in only SSH, unless `FERN_FIREWALL=off` (the lab's VPS gets it the same way, as `lab/vps.sh` runs `install.sh --node-only`); reach T3 through an SSH tunnel or a tailnet. The daemon's metrics and profiles listen on localhost.
 - **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); a box's own token is readable in `/proc` by that box's processes, in fern-init's first environment (it opens only that box's fern-init, which they are already inside of, and for an agent box that environment's tools, which its agent has anyway; it is no longer in Claude's arguments); the Cloudflare token, where one is set up, is still in the agent's arguments; user namespaces inside gVisor aren't set up.
 - **Isolation levels by class (planned):** gVisor → micro-VM.
 
@@ -491,7 +491,7 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 
 **Careful with:** parallel forks and automated turns (webhooks, schedules). Plans assume "ordinary, individual usage", so they are capped per subscription and opt-in. API keys stay out (no API keys).
 
-**Providers:** Claude Code and Codex through their own CLIs are supported. Blocked: Claude logins through other agents (pi, OpenCode's plugins), which Anthropic prohibits; OpenCode's Claude Agent provider (2.2.3, 2026-10-30) is not one, as it runs the unmodified `claude` with its own login through the Agent SDK, and Google Antigravity / Gemini consumer logins, which Google forbids wrapping. Fine through T3 if wanted later: pi and OpenCode with ChatGPT, Copilot or xAI logins, Cursor, Muse. Grok's login in a container is undocumented.
+**Providers:** Claude Code through its own CLI, and OpenCode with Claude's login through its Claude Agent provider, are built (`images/fern-opencode`, `internal/hibernate`, `lab/check/opencode.sh`). Codex through its own CLI is allowed and planned (roadmap step 8), not built. Blocked: Claude logins through other agents (pi, OpenCode's plugins), which Anthropic prohibits; OpenCode's Claude Agent provider (2.2.3, 2026-10-30) is not one, as it runs the unmodified `claude` with its own login through the Agent SDK, and Google Antigravity / Gemini consumer logins, which Google forbids wrapping. Fine through T3 if wanted later: pi and OpenCode with ChatGPT, Copilot or xAI logins, Cursor, Muse. Grok's login in a container is undocumented.
 
 ---
 
@@ -499,7 +499,7 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 
 One remote Linux machine running two systemd services. What its owner does when something is wrong, and how to update, roll back, restore, grow the pool and turn on backups and notifications: [operations.md](operations.md). `lab/setup.sh` (with `FERN_HOST` for a VPS, through `lab/vps.sh`):
 - creates the btrfs pool (a loop-mounted image file), installs gVisor and a firewall that lets in only SSH
-- installs `fern` and `fern-daemon` in `/usr/local/bin`, loads the box and T3 images into the pool (`fern image load`) and installs `deploy/systemd/` (`fern-daemon.service`, `fern-t3.service`)
+- installs `fern` and `fern-daemon` in `/usr/local/bin`, loads the box and T3 images into the pool (`fern image load`) and installs `deploy/systemd/` (`fern-daemon.service`, `fern-t3.service`, and `fern-failed@.service`, which tells the owner when systemd gives up on either, §16)
 - stores Claude's login in `/etc/fern/claude.env`, runs the quick checks and prints the pairing link
 
 An update restarts the daemon, which running commands and turns carry on through (§3), and T3's server, which holds the turn and ends it. So `install.sh` waits up to ten minutes for the running turns before it restarts T3 (`FERN_DRAIN`), and then restarts it. **It keeps the release it replaces (built, 2026-11-13):** before it changes anything, `install.sh` copies the binaries and units that run to `/usr/local/lib/fern/previous/` with the IDs of the images they run, and tags those images `fern-box:previous` and `fern-t3:previous` in the pool, which `fern image load` and `fern gc` then keep (the release before that loses its tags, and its images go at the next load or gc: one previous generation, about the size of the two images, in the pool). A marker (`/usr/local/lib/fern/updating`) says while files are being replaced, so an update that stopped half-way and is run again doesn't keep its own half as the previous release. `install.sh rollback HOST` puts the previous release back and restarts the services as an update does (drop a flag in `FERN_DAEMON_ARGS` that the older daemon doesn't know, saying so, as it wouldn't start with it); the next `install.sh` brings the newer release back. It doesn't roll back data: what a newer T3 has done to its database stays, and the threads are as they are ([operations](operations.md)). `lab/build.sh` installs by its own way and keeps no previous release. `lab/build.sh` on a VPS waits as long and then leaves T3 running its image from before, saying so, until it is run again with the thread idle (on 2026-11-12 it restarted T3 at once, and a day's fixes waited eight hours on one working thread because of it).
@@ -641,7 +641,8 @@ internal/setup/      setup contract, golden keys
 internal/worktree/   a T3 worktree's top folder, repository and environment ID, from its path
 internal/span/       trace spans
 lab/                 the lab: setup, integration checks, perf gate, A/B, profiler
-deploy/systemd/      the daemon's and T3's units
+deploy/systemd/      the daemon's and T3's units, and fern-failed@ for a unit systemd gives up on
+images/              the images (one Dockerfile), T3's patches, the wrappers T3 runs (fern-claude, fern-opencode, fern-shell, fern-gh) and the skill packs
 ```
 
 ---

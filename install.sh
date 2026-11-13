@@ -35,7 +35,21 @@
 # server, or the daemon or T3 fails, and FERN_HEARTBEAT_URL (such as
 # https://hc-ping.com/<uuid>) a GET every five minutes while the daemon
 # works, for a watcher that tells you when they stop; "off" turns either
-# off again (docs/operations.md).
+# off again (docs/operations.md). FERN_DRAIN (seconds, default 600) is how
+# long an update or a rollback waits for running turns before it restarts T3.
+#
+# Subcommands, from your Mac with root@HOST or on the server as root:
+#   doctor root@HOST    checks the server and this Mac's tunnel (Mac only)
+#   rollback [root@HOST] puts back the release the last update replaced
+# On the server, as root (the install runs these itself from the settings
+# above; most read their value from stdin):
+#   pair                prints a new pairing link for the T3 app
+#   skills "PACKS"      sets the skill packs Claude gets ("" for none)
+#   github APP_ID       stores the GitHub App's ID, its key from stdin
+#   cloudflare          stores a Cloudflare API token from stdin
+#   git-author NAME EMAIL  gives T3's git an author, unless it has one
+#   backup-config       stores the backup settings, NAME=VALUE lines on stdin
+#   alerts-config       sets FERN_NOTIFY_URL= and FERN_HEARTBEAT_URL= from stdin
 #
 # The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
 # amd64, dedicated to Fern. It gets a firewall that lets in only SSH (T3's
