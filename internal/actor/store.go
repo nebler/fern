@@ -6,9 +6,12 @@ import (
 	"github.com/nebler/fern/internal/store"
 )
 
-// Store keeps environments and snapshots on disk (store.Store). It is the
-// small interfaces below, one per job the actors ask of the disk: a method
-// the store gains for the actors goes in the one whose job it is.
+// Store keeps environments and snapshots on disk (store.Store): what New
+// takes. It is the small interfaces below, one per job the actors ask of
+// the disk, and New splits it at once among the Group and its parts, each
+// keeping the ones it uses (envStore, goldenStore, snapshotStore,
+// noticeStore); nothing keeps it whole. A method the store gains for the
+// actors goes in the one whose job it is.
 type Store interface {
 	Environments
 	Inventory
@@ -21,22 +24,24 @@ type Store interface {
 }
 
 // Environments makes, reads and deletes one environment's record and
-// workspace: changes.go's create and delete, golden.go's builders.
+// workspace: the Group's changes and wakes, and golden builds.
 type Environments interface {
 	Create(ctx context.Context, id string, opts store.CreateOptions) (store.Env, error)
 	Get(ctx context.Context, id string) (store.Env, error)
 	Delete(ctx context.Context, id string) error
 }
 
-// Inventory lists what the pool holds: the environments, for Fork, PruneAll
-// and a golden's builders, and those whose worktree is gone, for sweep.
+// Inventory lists what the pool holds: the environments, for forks, and
+// those whose worktree is gone, for sweep. Retention and golden builds take
+// List alone.
 type Inventory interface {
 	List(ctx context.Context) ([]store.Env, error)
 	Orphans(ctx context.Context) ([]string, error)
 }
 
 // Snapshots takes, deletes and looks for an environment's snapshots: a
-// turn's (Snapshot) and a golden's.
+// golden's. A turn's (snapshotStore) and a restore's look (envStore) take
+// the methods they use alone.
 type Snapshots interface {
 	Snapshot(ctx context.Context, id, snapID string) error
 	DeleteSnapshot(ctx context.Context, id, snapID string) error
@@ -49,7 +54,8 @@ type Restorer interface {
 }
 
 // Pruner deletes the snapshots past what the pool keeps: an environment's
-// oldest turns, and a builder's goldens of other keys.
+// oldest turns, and a builder's goldens of other keys (retention); a golden
+// build prunes only the goldens.
 type Pruner interface {
 	Prune(ctx context.Context, id string) error
 	PruneGoldens(ctx context.Context, id string) error
@@ -64,7 +70,7 @@ type GoldenSources interface {
 }
 
 // BuildFailures keeps a builder's last failed golden build with it, for the
-// next build to skip and for a thread's notices.
+// next build to skip; a thread's notices only read it.
 type BuildFailures interface {
 	SetBuildFailure(ctx context.Context, id string, f *store.BuildFailure) error
 	BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error)
@@ -78,7 +84,7 @@ type Disk interface {
 }
 
 // SnapshotFailures keeps each environment's last failed snapshot with it,
-// on disk (store.Store).
+// on disk (store.Store): the snapshotter writes it, and notices read it.
 type SnapshotFailures interface {
 	SetSnapshotFailure(ctx context.Context, id string, f *store.SnapshotFailure) error
 	SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error)

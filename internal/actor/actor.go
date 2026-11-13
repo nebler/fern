@@ -14,7 +14,11 @@
 // and retires actors, in run.go; the change queue (do and the mailbox) in
 // queue.go; an actor and its box's wake and stop in lifecycle.go; its crash
 // counts in crashes.go; what a box runs and gets in box.go; the changes in
-// changes.go; the disk's interfaces in store.go.
+// changes.go; the disk's interfaces in store.go. The Group's parts, each
+// with only the interfaces it uses: golden builds (builder) in golden.go,
+// snapshots and retention (snapshotter) in snapshots.go, pre-wakes
+// (prewaker) in prewake.go, and what a box with Claude is told (reporter) in
+// notices.go.
 package actor
 
 import (
@@ -31,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/runsc"
+	"github.com/nebler/fern/internal/store"
 )
 
 // Driver runs boxes.
@@ -120,9 +125,22 @@ type Idle struct {
 // ErrStopped means the daemon is shutting down.
 var ErrStopped = errors.New("daemon is stopping")
 
-// Group runs the actors of a node's environments.
+// envStore is the disk as the Group itself uses it: environments' records
+// (their changes, a box's wake), the list of them (forks, sweep) and a
+// restore. Its parts take their own (builder, snapshotter, reporter).
+type envStore interface {
+	Environments
+	Inventory
+	Restorer
+	HasSnapshot(ctx context.Context, ref store.SnapshotRef) (bool, error)
+}
+
+// Group runs the actors of a node's environments. Golden builds,
+// snapshots, pre-wakes and notices are parts of it of their own, each with
+// only the interfaces it uses; the Group keeps the actors, Run's books, the
+// changes that stop or wake boxes, and the box policy.
 type Group struct {
-	store  Store
+	store  envStore
 	driver Driver
 	cfg    Config
 	tracer trace.Tracer
@@ -158,7 +176,9 @@ type Group struct {
 
 // New returns a Group for the environments in st, whose boxes drv runs as
 // cfg says, that records its changes with tr and its metrics in reg. Call
-// Run before anything else.
+// Run before anything else. st is split at once among the Group and its
+// parts, each keeping only the interfaces it uses: one argument, so that a
+// caller hands over its store once.
 func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Registerer, log *slog.Logger) *Group {
 	// Boxes take from tens of milliseconds to the timeouts' minutes; disk
 	// changes and queueing take from a millisecond.
