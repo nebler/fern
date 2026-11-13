@@ -28,7 +28,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nebler/fern/internal/actor"
+	"github.com/nebler/fern/internal/background"
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/tools"
@@ -76,10 +78,10 @@ func newDemoBoxWith(t *testing.T, relay bool) demoBox {
 	mux := http.NewServeMux()
 	dir := t.TempDir()
 	if relay {
-		mux.Handle("GET "+boxexec.MCPRelayPath, boxexec.MCPRelayCheck(boxToken))
+		mux.Handle("GET "+mcprelay.Path, mcprelay.Check(boxToken))
 	}
 	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, dir, nil, log))
-	jobs := boxexec.NewJobs(boxToken, dir, nil, log)
+	jobs := background.NewJobs(boxToken, dir, nil, log)
 	jobs.Register(mux)
 	t.Cleanup(jobs.Close)
 	init := &swapHandler{}
@@ -359,7 +361,7 @@ func TestBashBackgroundEndedBeforeASleep(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, b.dir, nil, b.log))
-	jobs := boxexec.NewJobs(boxToken, b.dir, nil, b.log)
+	jobs := background.NewJobs(boxToken, b.dir, nil, b.log)
 	jobs.Register(mux)
 	t.Cleanup(jobs.Close)
 	b.box.set(mux)
@@ -423,7 +425,7 @@ type keyed struct{ token, key string }
 func (k keyed) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+k.token)
-	r.Header.Set(boxexec.CallKeyHeader, k.key)
+	r.Header.Set(mcprelay.CallKeyHeader, k.key)
 	return http.DefaultTransport.RoundTrip(r)
 }
 
@@ -607,7 +609,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	swap.set(first.MCPHandler())
 	daemon := httptest.NewServer(swap)
 	t.Cleanup(daemon.Close)
-	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, boxToken, 30*time.Second))
+	relay := httptest.NewServer(mcprelay.New(daemon.URL, boxToken, 30*time.Second))
 	t.Cleanup(relay.Close)
 
 	s, err := connect(t, relay.URL+"/mcp/demo", boxToken)
@@ -695,7 +697,7 @@ func TestBashCancelledCallKillsCommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			url, _, _ := newMCP(t)
-			relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), boxToken, 30*time.Second))
+			relay := httptest.NewServer(mcprelay.New(strings.TrimSuffix(url, "/mcp/demo"), boxToken, 30*time.Second))
 			t.Cleanup(relay.Close)
 			pidfile := filepath.Join(t.TempDir(), "pid")
 			ctx, cancel := context.WithCancel(t.Context())
@@ -794,7 +796,7 @@ func TestT3MCP(t *testing.T) {
 	type seen struct{ path, auth, box string }
 	calls := make(chan seen, 1)
 	t3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get(boxexec.BoxTokenHeader)}
+		calls <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get(mcprelay.BoxTokenHeader)}
 		_, _ = io.WriteString(w, "from t3")
 	}))
 	defer t3.Close()
@@ -812,7 +814,7 @@ func TestT3MCP(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("Authorization", "Bearer t3-token")
-		req.Header.Set(boxexec.BoxTokenHeader, box)
+		req.Header.Set(mcprelay.BoxTokenHeader, box)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

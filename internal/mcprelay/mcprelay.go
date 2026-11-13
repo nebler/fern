@@ -1,4 +1,7 @@
-package boxexec
+// Package mcprelay is the relay an agent box's fern-init serves between
+// Claude and the daemon's MCP server (Relay), and how the daemon learns that
+// a box has one (Has).
+package mcprelay
 
 import (
 	"bytes"
@@ -14,28 +17,29 @@ import (
 )
 
 const (
-	// MCPRelayPort is where an agent box's fern-init relays MCP to the daemon,
-	// on the box's loopback.
-	MCPRelayPort = 7072
-	// MCPRelayPath is where fern-init says it has the relay, on Port.
-	MCPRelayPath = "/mcp-relay"
+	// Port is where an agent box's fern-init relays MCP to the daemon, on the
+	// box's loopback.
+	Port = 7072
+	// Path is where fern-init says it has the relay, on boxexec.Port.
+	Path = "/mcp-relay"
 	// BoxTokenHeader carries the box's token to the daemon on a call to T3's
 	// MCP server, beside T3's own Authorization, which T3 needs.
 	BoxTokenHeader = "X-Fern-Box"
 	// CallKeyHeader names one call: the relay sends the same value each time.
 	CallKeyHeader = "X-Fern-Call"
-	// relayAuthHeader, in the answer to MCPRelayPath, says the relay adds the
+	// relayAuthHeader, in the answer to Path, says the relay adds the
 	// box's token to every call itself, so Claude need not be given it.
 	relayAuthHeader = "X-Fern-Relay-Auth"
 	// maxMCPCall is the largest call the relay holds to send again.
 	maxMCPCall = 16 << 20
 )
 
-// MCPRelay stands between Claude and the daemon's MCP server, in the agent
+// Relay stands between Claude and the daemon's MCP server, in the agent
 // box. The daemon is restarted to upgrade it, which breaks the connection of a
 // tool call running then, and Claude would read that as the tool failing. The
 // relay sends the call again until a daemon answers, under the same key, which
-// is what lets the daemon find a command that call started (session.go).
+// is what lets the daemon find a command that call started (boxexec's
+// sessions).
 //
 // It also adds the box's token to every call, so the token is in fern-init's
 // memory and never in Claude's arguments, where anything in the box could
@@ -46,7 +50,7 @@ const (
 // 60 s to begin, whatever the tool's own limit: the daemon answers when the
 // tool is done, so every Bash command longer than a minute failed with "The
 // operation timed out." (VPS, 2026-11-12).
-type MCPRelay struct {
+type Relay struct {
 	daemon string
 	token  string
 	limit  time.Duration
@@ -69,11 +73,10 @@ type relayCall struct {
 // its tool runs, so that nothing takes a quiet stream for a dead one.
 const relayKeepAlive = 15 * time.Second
 
-// NewMCPRelay returns a relay to the daemon at URL daemon, which
-// authenticates each call with the box's token and sends it again for up to
-// limit.
-func NewMCPRelay(daemon, token string, limit time.Duration) *MCPRelay {
-	return &MCPRelay{daemon: daemon, token: token, limit: limit, client: &http.Client{}, calls: make(map[string]*relayCall)}
+// New returns a relay to the daemon at URL daemon, which authenticates each
+// call with the box's token and sends it again for up to limit.
+func New(daemon, token string, limit time.Duration) *Relay {
+	return &Relay{daemon: daemon, token: token, limit: limit, client: &http.Client{}, calls: make(map[string]*relayCall)}
 }
 
 // rpcMessage is what the relay reads of a JSON-RPC message.
@@ -85,7 +88,7 @@ type rpcMessage struct {
 	} `json:"params"`
 }
 
-func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (m *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMCPCall))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
@@ -118,7 +121,7 @@ func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // send sends the call r, whose body is body, to the daemon until one
 // answers, and returns the answer; an error if none does within the limit, or
 // ctx is done first.
-func (m *MCPRelay) send(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
+func (m *Relay) send(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
 	key := rand.Text()
 	wait := 50 * time.Millisecond
 	// From the first attempt that fails, not from the call's start: the
@@ -158,7 +161,7 @@ func (m *MCPRelay) send(ctx context.Context, r *http.Request, body []byte) (*htt
 // daemon's answer as its one message when the daemon has it. What the daemon
 // can't answer becomes the call's JSON-RPC error: the stream's status has
 // been sent by then.
-func (m *MCPRelay) stream(w http.ResponseWriter, r *http.Request, body []byte, id json.RawMessage) {
+func (m *Relay) stream(w http.ResponseWriter, r *http.Request, body []byte, id json.RawMessage) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	defer m.track(string(id), cancel)()
@@ -201,7 +204,7 @@ func (m *MCPRelay) stream(w http.ResponseWriter, r *http.Request, body []byte, i
 }
 
 // answer returns the daemon's answer to the call as one line of JSON.
-func (m *MCPRelay) answer(ctx context.Context, r *http.Request, body []byte) ([]byte, error) {
+func (m *Relay) answer(ctx context.Context, r *http.Request, body []byte) ([]byte, error) {
 	resp, err := m.send(ctx, r, body)
 	if err != nil {
 		return nil, err
@@ -234,7 +237,7 @@ func rpcError(id json.RawMessage, err error) []byte {
 
 // track records a tool call under way with JSON-RPC ID id, which cancel
 // ends, and returns what forgets it.
-func (m *MCPRelay) track(id string, cancel context.CancelFunc) (forget func()) {
+func (m *Relay) track(id string, cancel context.CancelFunc) (forget func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := m.calls[id]
@@ -258,7 +261,7 @@ func (m *MCPRelay) track(id string, cancel context.CancelFunc) (forget func()) {
 // has given up on (notifications/cancelled): its command ends with the call's
 // connection to the daemon. The stream Claude holds stays open until then, so
 // without this a command Claude was interrupted in ran on to its own limit.
-func (m *MCPRelay) cancelCall(id string) {
+func (m *Relay) cancelCall(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c := m.calls[id]; c != nil && c.cancel != nil {
@@ -286,8 +289,8 @@ func (w flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// MCPRelayCheck answers that this box has the relay.
-func MCPRelayCheck(token string) http.Handler {
+// Check answers that this box has the relay.
+func Check(token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -298,11 +301,11 @@ func MCPRelayCheck(token string) http.Handler {
 	})
 }
 
-// HasMCPRelay reports whether the box whose fern-init is at addr has the
-// relay, and whether that relay adds the box's token itself: one in a box
-// started before 2026-11-12 doesn't.
-func HasMCPRelay(ctx context.Context, hc *http.Client, addr, token string) (relay, auth bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+MCPRelayPath, nil)
+// Has reports whether the box whose fern-init is at addr has the relay, and
+// whether that relay adds the box's token itself: one in a box started
+// before 2026-11-12 doesn't.
+func Has(ctx context.Context, hc *http.Client, addr, token string) (relay, auth bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+Path, nil)
 	if err != nil {
 		return false, false
 	}

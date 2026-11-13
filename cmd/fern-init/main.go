@@ -19,7 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebler/fern/internal/background"
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 )
 
 func main() {
@@ -126,7 +128,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	mux.Handle("GET "+boxexec.Path, execs)
 	mux.HandleFunc("GET "+boxexec.ActivityPath, execs.ServeActivity)
 	// Background commands, which outlive the daemon's connections to them.
-	jobs := boxexec.NewJobs(token, dir, env, log)
+	jobs := background.NewJobs(token, dir, env, log)
 	jobs.OnStart = execs.Opened
 	jobs.Register(mux)
 	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
@@ -152,10 +154,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	var relayErr chan error
 	var relay *http.Server
 	if daemon := os.Getenv("FERN_MCP"); daemon != "" {
-		mux.Handle("GET "+boxexec.MCPRelayPath, boxexec.MCPRelayCheck(token))
+		mux.Handle("GET "+mcprelay.Path, mcprelay.Check(token))
 		relay = &http.Server{
-			Addr:              "127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort),
-			Handler:           boxexec.NewMCPRelay(daemon, token, boxexec.DefaultGrace),
+			Addr:              "127.0.0.1:" + strconv.Itoa(mcprelay.Port),
+			Handler:           mcprelay.New(daemon, token, boxexec.DefaultGrace),
 			BaseContext:       func(net.Listener) context.Context { return ctx },
 			ReadHeaderTimeout: 10 * time.Second,
 		}

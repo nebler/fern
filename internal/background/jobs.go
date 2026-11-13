@@ -1,4 +1,8 @@
-package boxexec
+// Package background runs a box's background commands, its jobs, such as the
+// dev servers Claude starts: fern-init's side (Jobs), which runs and keeps
+// them, and the daemon's (JobClient). A job is started as an exec's command
+// is (package boxexec), and is tied to no connection.
+package background
 
 import (
 	"bytes"
@@ -14,6 +18,8 @@ import (
 	"slices"
 	"sync"
 	"syscall"
+
+	"github.com/nebler/fern/internal/boxexec"
 )
 
 // JobsPath is where fern-init keeps the box's background commands (Jobs):
@@ -27,6 +33,10 @@ const (
 	MaxJobs      = 16
 	maxJobOutput = 1 << 20
 )
+
+// maxRequest is the largest JobRequest a box reads: an argv and an
+// environment, as much as an exec's request may be.
+const maxRequest = 1 << 20
 
 // JobRequest starts a background command.
 type JobRequest struct {
@@ -121,7 +131,7 @@ func (js *Jobs) auth(h http.HandlerFunc) http.HandlerFunc {
 
 func (js *Jobs) start(w http.ResponseWriter, r *http.Request) {
 	var req JobRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxMessage)).Decode(&req); err != nil || req.ID == "" || len(req.Argv) == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequest)).Decode(&req); err != nil || req.ID == "" || len(req.Argv) == 0 {
 		http.Error(w, "a job needs an id and a command", http.StatusBadRequest)
 		return
 	}
@@ -142,14 +152,14 @@ func (js *Jobs) start(w http.ResponseWriter, r *http.Request) {
 	}
 	env := append(slices.Clone(js.env), req.Environ...)
 	// The job outlives the request, and the daemon: kill and Close end it.
-	cmd := exec.CommandContext(context.WithoutCancel(r.Context()), lookPath(req.Argv[0], env), req.Argv[1:]...)
+	cmd := exec.CommandContext(context.WithoutCancel(r.Context()), boxexec.LookPath(req.Argv[0], env), req.Argv[1:]...)
 	cmd.Dir, cmd.Env = js.dir, env
 	// Its own process group, killed whole, as an exec's.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	j := &job{id: req.ID, cmd: cmd, ended: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = j, j
 	// A process the command left behind may hold its output open.
-	cmd.WaitDelay = outputDelay
+	cmd.WaitDelay = boxexec.OutputDelay
 	if err := cmd.Start(); err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -163,7 +173,7 @@ func (js *Jobs) start(w http.ResponseWriter, r *http.Request) {
 		// What the command left in its group ends with it, as with an exec.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		j.mu.Lock()
-		j.code = exitCode(err, js.log)
+		j.code = boxexec.ExitCode(err, js.log)
 		j.mu.Unlock()
 		close(j.ended)
 	})

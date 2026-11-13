@@ -5,7 +5,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 
-	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 )
 
 // t3MCPPath is the one path of T3's server its Claude calls: its MCP server.
@@ -25,7 +25,7 @@ func t3Relay(daemon, token string) (http.Handler, error) {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme, r.Out.URL.Host, r.Out.URL.Path, r.Out.URL.RawPath = target.Scheme, target.Host, target.Path, ""
 			r.Out.Host = target.Host
-			r.Out.Header.Set(boxexec.BoxTokenHeader, token)
+			r.Out.Header.Set(mcprelay.BoxTokenHeader, token)
 		},
 		FlushInterval: -1, // answers may be streams
 	}

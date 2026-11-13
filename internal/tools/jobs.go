@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/nebler/fern/internal/actor"
+	"github.com/nebler/fern/internal/background"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/setup"
@@ -21,7 +22,7 @@ import (
 )
 
 // jobs are the background commands Claude started, by environment. Each runs
-// in its box's fern-init (boxexec.Jobs), which keeps it and its output, so it
+// in its box's fern-init (background.Jobs), which keeps it and its output, so it
 // outlives the Bash call, Claude's hibernation and the daemon's restarts
 // (AdoptJobs); it ends with KillShell, or with its box's sleep, restore or
 // delete. While it runs, the daemon counts it as a job of its box's actor
@@ -42,7 +43,7 @@ type jobs struct {
 // job is the daemon's record of a background command.
 type job struct {
 	id     string
-	box    boxexec.JobClient
+	box    background.JobClient
 	cancel context.CancelFunc // ends the watch of the job, not the job
 	done   chan struct{}      // closed when the job's watch has ended, its state set
 	state  atomic.Int32       // a jobState, set once by the job's watch as it ends
@@ -52,11 +53,11 @@ type job struct {
 	// took from the box as it ended. The box sleeps 5 s after Claude's next
 	// Bash call and forgets its jobs, and Claude often asks later than that.
 	mu   sync.Mutex
-	last *boxexec.JobOutput
+	last *background.JobOutput
 }
 
 // keep records what the job had left to say as it ended.
-func (j *job) keep(o boxexec.JobOutput) {
+func (j *job) keep(o background.JobOutput) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.last = &o
@@ -64,11 +65,11 @@ func (j *job) keep(o boxexec.JobOutput) {
 
 // kept returns what an exited job had left to say, its output once, and
 // whether its watch kept it.
-func (j *job) kept() (boxexec.JobOutput, bool) {
+func (j *job) kept() (background.JobOutput, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.last == nil {
-		return boxexec.JobOutput{}, false
+		return background.JobOutput{}, false
 	}
 	o := *j.last
 	j.last.Output, j.last.Dropped = "", 0
@@ -128,8 +129,8 @@ func (js *jobs) startJob(ctx context.Context, id string, in bashInput, key strin
 	if err != nil {
 		return "", err
 	}
-	err = j.box.Start(ctx, boxexec.JobRequest{ID: jobID, Argv: []string{shell, "-c", in.Command}})
-	if err != nil && !errors.Is(err, boxexec.ErrJobExists) {
+	err = j.box.Start(ctx, background.JobRequest{ID: jobID, Argv: []string{shell, "-c", in.Command}})
+	if err != nil && !errors.Is(err, background.ErrJobExists) {
 		j.cancel()
 		ex.Close()
 		return "", err
@@ -157,7 +158,7 @@ func (js *jobs) openJob(ctx context.Context, id, jobID string) (*job, *actor.Exe
 		cancel()
 		return nil, nil, nil, err
 	}
-	j := &job{id: jobID, box: boxexec.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel, done: make(chan struct{})}
+	j := &job{id: jobID, box: background.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel, done: make(chan struct{})}
 	return j, ex, wctx, nil
 }
 
@@ -183,14 +184,14 @@ func (js *jobs) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec)
 	ofEnv[j.id] = j
 	// The records of jobs there is nothing more to read of go, once there
 	// are many; then those of ended jobs nobody read, which hold their output.
-	if len(ofEnv) > 2*boxexec.MaxJobs {
+	if len(ofEnv) > 2*background.MaxJobs {
 		for jid, old := range ofEnv {
 			if old.is(jobBoxStopped) || old.is(jobLost) || old.is(jobExited) && old.read() {
 				delete(ofEnv, jid)
 			}
 		}
 		for jid, old := range ofEnv {
-			if len(ofEnv) <= 2*boxexec.MaxJobs {
+			if len(ofEnv) <= 2*background.MaxJobs {
 				break
 			}
 			if old.is(jobExited) {
@@ -283,7 +284,7 @@ func (js *jobs) readJob(ctx context.Context, id, jobID string, wait time.Duratio
 		}
 	}
 	o, err := j.box.Read(ctx, j.id)
-	if errors.Is(err, boxexec.ErrNoJob) {
+	if errors.Is(err, background.ErrNoJob) {
 		js.forgetJob(id, j)
 	}
 	return j.report(o, err), nil
@@ -305,7 +306,7 @@ func (js *jobs) killJob(ctx context.Context, id, jobID string) (string, error) {
 	}
 	j.killed.Store(true)
 	o, err := j.box.Kill(ctx, j.id)
-	if errors.Is(err, boxexec.ErrNoJob) {
+	if errors.Is(err, background.ErrNoJob) {
 		js.forgetJob(id, j)
 	}
 	return j.report(o, err), nil
@@ -327,10 +328,10 @@ func (j *job) stopped() string {
 }
 
 // report formats what reading or killing the job returned for Claude.
-func (j *job) report(o boxexec.JobOutput, err error) string {
+func (j *job) report(o background.JobOutput, err error) string {
 	switch {
-	case errors.Is(err, boxexec.ErrNoJob) && !j.is(jobBoxStopped):
-		return fmt.Sprintf("[%s has ended, and its box no longer has it: a box keeps its newest %d, and none over a sleep]\n", j.id, boxexec.MaxJobs)
+	case errors.Is(err, background.ErrNoJob) && !j.is(jobBoxStopped):
+		return fmt.Sprintf("[%s has ended, and its box no longer has it: a box keeps its newest %d, and none over a sleep]\n", j.id, background.MaxJobs)
 	case err != nil || j.is(jobBoxStopped):
 		return j.stopped()
 	}
@@ -398,7 +399,7 @@ func (js *jobs) adoptJobs(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	infos, err := boxexec.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}.List(ctx)
+	infos, err := background.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}.List(ctx)
 	ex.Close()
 	if err != nil {
 		return err

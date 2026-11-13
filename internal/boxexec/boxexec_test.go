@@ -226,6 +226,35 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// The daemon reads how a box was used from its fern-init, with the box's
+// token: a new box was last used when it started, and runs nothing.
+func TestActivityOf(t *testing.T) {
+	began := time.Now()
+	execs := boxexec.NewServer(token, t.TempDir(), nil, slog.New(slog.DiscardHandler))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+boxexec.ActivityPath, execs.ServeActivity)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().String()
+
+	a, err := boxexec.ActivityOf(t.Context(), srv.Client(), addr, token)
+	if err != nil {
+		t.Fatalf("ActivityOf() error = %v", err)
+	}
+	if a.Running != 0 || a.Opened.Before(began.Truncate(time.Second)) || !a.Closed.Equal(a.Opened) {
+		t.Errorf("ActivityOf() of a new box = %+v, want nothing running, last used at its start", a)
+	}
+	if _, err := boxexec.ActivityOf(t.Context(), srv.Client(), addr, "wrong"); err == nil {
+		t.Error("ActivityOf() with the wrong token succeeded")
+	}
+	// A fern-init from before it has no such route.
+	old := httptest.NewServer(http.NewServeMux())
+	t.Cleanup(old.Close)
+	if _, err := boxexec.ActivityOf(t.Context(), old.Client(), old.Listener.Addr().String(), token); err == nil {
+		t.Error("ActivityOf() of a box without the route succeeded")
+	}
+}
+
 func TestDialWrongToken(t *testing.T) {
 	url, _ := newBox(t)
 	for _, tok := range []string{"", "wrong"} {

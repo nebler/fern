@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 )
 
 // A call to T3's MCP server in the box reaches the daemon's route with the
@@ -17,7 +17,7 @@ func TestT3Relay(t *testing.T) {
 	calls := make(chan seen, 1)
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		calls <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get(boxexec.BoxTokenHeader), string(body)}
+		calls <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get(mcprelay.BoxTokenHeader), string(body)}
 		_, _ = io.WriteString(w, "from t3")
 	}))
 	defer daemon.Close()

@@ -15,6 +15,7 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 	"github.com/nebler/fern/internal/setup"
 )
 
@@ -231,11 +232,11 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 // before the relay has none, and one from before 2026-11-12 has a relay that
 // adds no token: their agent gets the token in its arguments, as it did.
 func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) (url, token string) {
-	relay, auth := boxexec.HasMCPRelay(ctx, s.boxes, ex.Addr, ex.Token)
+	relay, auth := mcprelay.Has(ctx, s.boxes, ex.Addr, ex.Token)
 	if !relay {
 		return s.agentMCP, ex.Token
 	}
-	url = "http://127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort)
+	url = "http://127.0.0.1:" + strconv.Itoa(mcprelay.Port)
 	if auth {
 		return url, ""
 	}

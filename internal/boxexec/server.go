@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,9 +27,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// outputDelay is how long a command's output may go on after it exits: a
-// process it moved out of its group can hold its pipes or terminal open.
-const outputDelay = 2 * time.Second
+// OutputDelay is how long a command's output may go on after it exits: a
+// process it moved out of its group can hold its pipes or terminal open. A
+// box's background commands get the same (package background).
+const OutputDelay = 2 * time.Second
 
 // exitNotStarted is the exit code of a command that couldn't start, as a
 // shell reports one it can't find.
@@ -95,14 +97,28 @@ func (s *Server) ServeActivity(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	a := s.activity
 	s.mu.Unlock()
-	writeJSONTo(w, a)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(a)
 }
 
 // ActivityOf returns the Activity of the box whose fern-init is at addr. A
 // box from before it has none, an error.
 func ActivityOf(ctx context.Context, hc *http.Client, addr, token string) (Activity, error) {
 	var a Activity
-	return a, JobClient{HC: hc, Addr: addr, Token: token}.call(ctx, http.MethodGet, ActivityPath, nil, &a)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+ActivityPath, nil)
+	if err != nil {
+		return a, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return a, fmt.Errorf("activity: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return a, fmt.Errorf("activity: %s", resp.Status)
+	}
+	return a, json.NewDecoder(resp.Body).Decode(&a)
 }
 
 // NewServer returns a Server that runs commands in dir with environment env.
@@ -202,7 +218,7 @@ func (s *Server) start(ctx context.Context, req Request, output func(kind byte) 
 	}
 	// The program is found on the PATH it runs with, which puts the tools a
 	// workspace pins first, not on this process's.
-	cmd := exec.CommandContext(ctx, lookPath(req.Argv[0], env), req.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, LookPath(req.Argv[0], env), req.Argv[1:]...)
 	cmd.Dir, cmd.Env = s.dir, env
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
@@ -240,7 +256,7 @@ func (s *Server) start(ctx context.Context, req Request, output func(kind byte) 
 //
 // The output pipes are the server's, not os/exec's: Wait would wait for
 // os/exec's to be drained, and a background process the command left behind
-// holds them open, so every such command would take outputDelay to end.
+// holds them open, so every such command would take OutputDelay to end.
 // With its own, the server can kill the group as soon as the command exits,
 // which closes them.
 func (p *process) startPipes(cmd *exec.Cmd) error {
@@ -393,15 +409,15 @@ func (p *process) wait(log *slog.Logger) int {
 	// moment since the reap to be hit; otherwise the kill finds no group.
 	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) // ESRCH: nothing was left
 	// The kill closes what the group held open. A process it can't reach can
-	// hold an output open; it gets outputDelay. Closing the terminal also ends
+	// hold an output open; it gets OutputDelay. Closing the terminal also ends
 	// a write of stdin the command never read (Wait closes the stdin pipe).
-	deadline := time.Now().Add(outputDelay)
+	deadline := time.Now().Add(OutputDelay)
 	for _, out := range p.outputs {
 		_ = out.SetReadDeadline(deadline)
 	}
 	p.output.Wait()
 	p.closeOutputs()
-	return exitCode(err, log)
+	return ExitCode(err, log)
 }
 
 // finish sends the exit code and closes the connection.
@@ -498,7 +514,10 @@ func writeStdin(p *process, stdin <-chan []byte, over <-chan struct{}) {
 	}
 }
 
-func exitCode(err error, log *slog.Logger) int {
+// ExitCode returns the exit code of a command whose Wait returned err: its
+// own, 128 plus the signal that ended it, or the code of one that couldn't
+// start, logged, if it can't be told.
+func ExitCode(err error, log *slog.Logger) int {
 	var exitErr *exec.ExitError
 	switch {
 	case err == nil:
@@ -514,10 +533,10 @@ func exitCode(err error, log *slog.Logger) int {
 	}
 }
 
-// lookPath returns the path of program name on the last PATH in env, or
+// LookPath returns the path of program name on the last PATH in env, or
 // name as it is if it names a path or isn't found there, for exec to find
 // or fail on.
-func lookPath(name string, env []string) string {
+func LookPath(name string, env []string) string {
 	if strings.Contains(name, "/") {
 		return name
 	}

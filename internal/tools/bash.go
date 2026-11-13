@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/mcprelay"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -94,7 +95,7 @@ func (s *Server) MCPHandler() http.Handler {
 		}
 		// Claude giving up on a call ends its command. The MCP library's context
 		// for a tool isn't the request's.
-		if key := r.Header.Get(boxexec.CallKeyHeader); key != "" {
+		if key := r.Header.Get(mcprelay.CallKeyHeader); key != "" {
 			stop := context.AfterFunc(r.Context(), func() {
 				if c, ok := s.calls.Load(key); ok && !s.stopping() {
 					if c, ok := c.(*call); ok {
@@ -144,7 +145,7 @@ func (s *Server) t3Handler() http.Handler {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme, r.Out.URL.Host, r.Out.URL.Path, r.Out.URL.RawPath = target.Scheme, target.Host, target.Path, ""
 			r.Out.Host = target.Host
-			r.Out.Header.Del(boxexec.BoxTokenHeader)
+			r.Out.Header.Del(mcprelay.BoxTokenHeader)
 		},
 		FlushInterval: -1, // answers may be streams
 	}
@@ -153,7 +154,7 @@ func (s *Server) t3Handler() http.Handler {
 			http.Error(w, "T3's address: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if !s.hasBoxToken(r.PathValue("id"), r.Header.Get(boxexec.BoxTokenHeader)) {
+		if !s.hasBoxToken(r.PathValue("id"), r.Header.Get(mcprelay.BoxTokenHeader)) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -343,12 +344,12 @@ func toolError(err error) *mcp.CallToolResult {
 type call struct{ cancel context.CancelFunc }
 
 // callKey returns the name the agent box's relay gave this call, the same
-// each time it sends it (boxexec.MCPRelay), or "" if it came another way.
+// each time it sends it (mcprelay.Relay), or "" if it came another way.
 func callKey(req *mcp.CallToolRequest) string {
 	if req == nil || req.Extra == nil {
 		return ""
 	}
-	return req.Extra.Header.Get(boxexec.CallKeyHeader)
+	return req.Extra.Header.Get(mcprelay.CallKeyHeader)
 }
 
 // bash runs in's command in environment id's box and returns its output,
