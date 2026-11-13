@@ -1578,7 +1578,7 @@ guess() {
     box_log "$G" | tail -20 | sed 's/^/  builder: /'
     return
   fi
-  check "it holds the guessed tools, node_modules and the database" "yes yes yes yes" \
+  check "it holds the guessed tools, node_modules and the database, which git ignores" "yes yes yes yes yes" \
     "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in .fern/tools/guess.toml .fern/tools/installs/pnpm node_modules/.pnpm .fern/pg/fern-ready .fern/pg/.gitignore; do test -e \$p && echo yes || echo no; done" | xargs)"
   fern create guess2 --path $W/two >/dev/null
   start=$(now_ms)
