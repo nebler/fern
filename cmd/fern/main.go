@@ -21,6 +21,9 @@
 //	fern sleep <env> | fern wake <env>       stop or start the box
 //	fern why <env>                           what holds its boxes awake: what runs in
 //	                                         each, and when it sleeps and by which rule
+//	fern logs [--since T] [-n N] <env>       what the node logged about it, as root on
+//	                                         it: the daemon's lines, and each box's own
+//	                                         log, or the one its last stop kept
 //	fern prebuild <repo>                     build repo's golden snapshot from a tar
 //	                                         stream of its checkout on stdin
 //	fern image load                          unpack the images of a docker save stream
@@ -34,6 +37,9 @@
 //	                                         sets backups up; they run hourly)
 //	fern doctor                              check the node Fern runs on, as root on it,
 //	                                         and say what to do about each problem
+//	fern top                                 what the node is doing now, as root on it:
+//	                                         each box that is up, what it uses and what
+//	                                         holds it awake; the pool's room; what is wrong
 //	fern df                                  what uses the node's disk, and how much of
 //	                                         it nothing needs
 //	fern gc                                  remove what nothing needs: old images, what
@@ -168,6 +174,7 @@ func subcommands() []subcommand {
 			fs.StringVar(&c.since, "since", "24 hours ago", "how far back in the daemon's journal to look, as journalctl takes it")
 			fs.IntVar(&c.lines, "n", 100, "how many of the last lines to print, of the daemon's and of each box's")
 		}},
+		{name: "top", run: top},
 		{name: "df", run: diskUsage},
 		{name: "gc", run: collect},
 		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {

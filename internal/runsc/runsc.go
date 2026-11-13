@@ -655,8 +655,9 @@ func (d *Driver) ask(ctx context.Context, addr string) (readiness, string) {
 const maxSaid = 600
 
 // Sleep stops box id and waits until it is gone, with its network and
-// cgroup. A box that isn't there is asleep already. A box has nothing that
-// outlives it, so this is also how one is deleted.
+// cgroup. A box that isn't there is asleep already. Nothing of a box
+// outlives it but the end of its log, which is its environment's (LastLog),
+// so this is also how one is deleted.
 func (d *Driver) Sleep(ctx context.Context, id string) error {
 	ctx, sp := d.tracer.Start(ctx, "stop")
 	err := d.stop(ctx, id)
@@ -668,9 +669,9 @@ func (d *Driver) Sleep(ctx context.Context, id string) error {
 }
 
 // stop asks fern-init to shut down, waits for the box to exit (killing it
-// after stopGrace), deletes it, and removes its network, cgroup and
-// directory. Every step is safe to repeat, so a stop that a crash cut short
-// is finished by the next.
+// after stopGrace), deletes it, keeps the end of its log (keepLog) and
+// removes its network, cgroup and directory. Every step is safe to repeat,
+// so a stop that a crash cut short is finished by the next.
 func (d *Driver) stop(ctx context.Context, id string) error {
 	cs, err := d.list(ctx)
 	if err != nil {
@@ -712,6 +713,13 @@ func (d *Driver) stopListed(ctx context.Context, id string, cs []container) erro
 		if err := unix.Unmount(b.rootfs, 0); err != nil {
 			return fmt.Errorf("unmount %s: %w", b.rootfs, err)
 		}
+	}
+	// The box is gone and its log complete: its end outlives it, as its
+	// environment's (LastLog). A stop that can't keep it goes on all the
+	// same, as before there was one to keep: failing would leave the box's
+	// network and directory behind, and a restore or a wake waiting on them.
+	if err := keepLog(filepath.Join(b.data, "log"), LastLog(d.cfg.Pool, id)); err != nil {
+		trace.SpanFromContext(ctx).RecordError(fmt.Errorf("keep the log of box %s: %w", id, err))
 	}
 	for _, dir := range []string{b.dir, b.data} {
 		if err := os.RemoveAll(dir); err != nil {

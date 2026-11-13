@@ -84,9 +84,13 @@ type Freed struct {
 
 // Problem is something wrong on the node now that the daemon knows of
 // (GET /problems, fern doctor): a failed golden build, backups that fail, a
-// pool that takes no more snapshots.
+// pool that takes no more snapshots, a box that keeps crashing.
 type Problem struct {
-	Name   string    `json:"name"`          // the part: "golden build", "backups", "disk"
+	Name string `json:"name"` // the part: "golden build", "backups", "disk", "box"
+	// About is which one, of a part the node can have several of: a builder,
+	// a box. With Name it names the problem for as long as it lasts
+	// (health.Notifier), which its Detail doesn't.
+	About  string    `json:"about,omitempty"`
 	At     time.Time `json:"at,omitzero"`   // when it went wrong, if that is known
 	Detail string    `json:"detail"`        // what is wrong, and what it means
 	Fix    string    `json:"fix,omitempty"` // what to do

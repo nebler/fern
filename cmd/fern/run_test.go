@@ -26,6 +26,8 @@ type fakeDaemon struct {
 	got    []string
 	// problems is what GET /problems answers: nothing wrong, unless set.
 	problems []api.Problem
+	// holds is what GET /envs/{id}/holds answers, if set.
+	holds []api.Holds
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -55,6 +57,13 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		reply(w, []api.Snapshot{{ID: "s1", Created: created}})
 	})
 	mux.HandleFunc("GET /envs/{id}/holds", func(w http.ResponseWriter, _ *http.Request) {
+		d.mu.Lock()
+		holds := d.holds
+		d.mu.Unlock()
+		if holds != nil {
+			reply(w, holds)
+			return
+		}
 		reply(w, []api.Holds{
 			{Box: "demo", Awake: true, Running: []api.Running{{Kind: "exec", N: 7, Since: time.Now().Add(-90 * time.Second)}}, Why: "stays awake while a command or a preview request runs"},
 			{Box: "demo.agent", Why: "asleep"},

@@ -82,6 +82,9 @@ const (
 	defaultSkills = "safety"
 	// backupConfig says where backups go (internal/backup), root only.
 	backupConfig = "/etc/fern/backup.env"
+	// notifyEvery is how often the daemon looks whether the node's problems
+	// have changed, to tell --notify-url (health.Notifier).
+	notifyEvery = time.Minute
 )
 
 func main() {
@@ -165,12 +168,18 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	githubApp := flags.String("github-app", "/etc/fern/github-app", "the GitHub App T3's git and gh get tokens from: its id and key.pem (missing: none)")
 	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
 	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
+	notifyURL := flags.String("notify-url", "", "POST a short text to this URL when something goes wrong on the node, and when all is well again, such as https://ntfy.sh/TOPIC (\"\": don't)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	limits, most, err := boxLimits()
 	if err != nil {
 		return fmt.Errorf("the box limits: %w", err)
+	}
+	if *notifyURL != "" {
+		if err := health.CheckURL(*notifyURL); err != nil {
+			return fmt.Errorf("--notify-url: %w", err)
+		}
 	}
 	node, err := os.Hostname()
 	if err != nil {
@@ -295,8 +304,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	apiSrv.Disk = keeper
 
 	// fern doctor: what is wrong now that would otherwise be a line in this
-	// daemon's log. The same list is a metric, with the pool's room.
-	checker := health.Checker{Store: st, Pool: pool}
+	// daemon's log, or the error of a box's next command. The same list is a
+	// metric, with the pool's room.
+	checker := health.Checker{Store: st, Pool: pool, Boxes: envs}
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}
@@ -330,6 +340,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 	// A disk that fills up fails every thread: free what nothing needs first.
 	g.Go(func() error { keeper.Run(ctx, diskEvery); return nil })
+	// What doctor would list also reaches a person who isn't on the server.
+	if *notifyURL != "" {
+		notifier := health.Notifier{Checker: checker, URL: *notifyURL, Node: node, File: filepath.Join(pool, health.NotifiedFile), Log: log}
+		g.Go(func() error { notifier.Run(ctx, notifyEvery); return nil })
+	}
 	for _, s := range servers {
 		if s.lis == nil {
 			continue
@@ -378,7 +393,7 @@ func registerGauges(ctx context.Context, reg prometheus.Registerer, checker heal
 			return v
 		})
 	}
-	gauge("fern_problems", "What is wrong on the node now (fern doctor lists them): failed golden builds, failing backups, a full pool.", func() (float64, error) {
+	gauge("fern_problems", "What is wrong on the node now (fern doctor lists them): failed golden builds, failing backups, a full pool, boxes that keep crashing.", func() (float64, error) {
 		p, err := checker.Problems(ctx)
 		return float64(len(p)), err
 	})

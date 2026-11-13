@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/health"
 	"github.com/nebler/fern/internal/store"
@@ -36,6 +37,11 @@ func (f fakeStore) BuildFailure(_ context.Context, id string) (store.BuildFailur
 
 func (f fakeStore) Space() (store.Space, error) { return f.space, nil }
 
+// fakeBoxes are the boxes that aren't woken for now.
+type fakeBoxes []actor.Crashing
+
+func (f fakeBoxes) Crashing(context.Context) ([]actor.Crashing, error) { return f, nil }
+
 func TestProblems(t *testing.T) {
 	roomy := store.Space{Pool: store.Volume{Total: 100 << 30, Free: 50 << 30}, Least: 5 << 30}
 	hour := time.Hour
@@ -44,7 +50,9 @@ func TestProblems(t *testing.T) {
 		store  fakeStore
 		every  time.Duration // how often backups are due; 0: none set up
 		backup string        // the pool's backup.json; "": none yet
+		boxes  fakeBoxes     // the boxes that keep crashing
 		want   []string      // each problem's name and the start of its detail
+		fix    string        // a part of the first problem's fix
 	}{
 		{name: "nothing wrong", store: fakeStore{envs: []string{"t3-1", "golden-app-12345678"}, space: roomy}, every: hour},
 		{
@@ -66,6 +74,20 @@ func TestProblems(t *testing.T) {
 				space: roomy,
 			},
 			want: []string{"golden build: golden-app-12345678: its threads start without what the setup script and the services' first start make: .fern/setup exited with code 1 after 4s; it printed: pnpm: not found"},
+		},
+		{
+			name:  "an agent box that isn't woken for now, before a failed build",
+			store: fakeStore{envs: []string{"golden-app-12345678", "t3-1"}, failed: map[string]store.BuildFailure{"golden-app-12345678": {Error: "x"}}, space: roomy},
+			boxes: fakeBoxes{{
+				Box: "t3-1.agent", Times: 3, Since: time.Date(2026, 11, 13, 14, 2, 10, 0, time.UTC), Last: time.Date(2026, 11, 13, 14, 4, 0, 0, time.UTC),
+				Retry: time.Date(2026, 11, 13, 14, 7, 10, 0, time.UTC), Cause: "wake t3-1.agent: the box exited as it started; its log ends: no such file\nmore",
+			}},
+			want: []string{
+				"box: t3-1.agent keeps crashing: it died or failed to wake 3 times since 14:02 UTC, and its commands fail until 14:07 UTC, " +
+					"when the next one tries again. The last time: wake t3-1.agent: the box exited as it started; its log ends: no such file",
+				"golden build: golden-app-12345678",
+			},
+			fix: "`fern logs t3-1` shows what the box last printed and what the daemon said of it; `fern wake t3-1.agent` tries again now",
 		},
 		{
 			name:  "backups that fail",
@@ -98,7 +120,7 @@ func TestProblems(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := health.Checker{Store: tt.store, Pool: pool, BackupEvery: tt.every}.Problems(t.Context())
+			got, err := health.Checker{Store: tt.store, Pool: pool, BackupEvery: tt.every, Boxes: tt.boxes}.Problems(t.Context())
 			if err != nil {
 				t.Fatalf("Problems() error: %v", err)
 			}
@@ -121,6 +143,9 @@ func TestProblems(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, starts); diff != "" {
 				t.Errorf("Problems() mismatch (-want +got):\n%s", diff)
+			}
+			if tt.fix != "" && got[0].Fix != tt.fix {
+				t.Errorf("the fix of %s = %q, want %q", got[0].Name, got[0].Fix, tt.fix)
 			}
 		})
 	}

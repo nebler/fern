@@ -184,6 +184,8 @@ type Group struct {
 	builds   chan string      // to Run's builder, the environments whose golden source to build
 	prewakes chan string      // to Run's prewakers, environments to wake ahead
 	stopped  chan struct{}    // closed when Run returns
+	// crashed asks Run what is known of boxes' crashes (crashing).
+	crashed chan crashRequest
 }
 
 type findRequest struct {
@@ -228,6 +230,7 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
 		}, []string{"result"}),
 		find: make(chan findRequest), builds: make(chan string, buildQueue), prewakes: make(chan string, prewakeQueue),
+		crashed: make(chan crashRequest),
 		stopped: make(chan struct{}),
 	}
 }
@@ -305,6 +308,8 @@ func (g *Group) Run(ctx context.Context) error {
 			req.reply <- a
 		case a := <-exited:
 			retire(a)
+		case req := <-g.crashed:
+			req.reply <- crashesKnown(req.box, actors, crashes, causes, retire)
 		}
 	}
 }
@@ -527,9 +532,9 @@ func (a *actor) wake(ctx context.Context) error {
 	}
 	if a.crashes = recent(a.crashes); len(a.crashes) >= crashLimit {
 		return fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, the last time because: %s. "+
-			"It is tried again in %s, or at once by `fern wake %s` on the server, where its log is boxes/%s/log in the pool",
+			"It is tried again in %s, or at once by `fern wake %s` on the server, where `fern logs %s` shows what it last printed",
 			a.id, ErrCrashing, len(a.crashes), crashWindow, a.crashCause,
-			time.Until(a.crashes[0].Add(crashWindow)).Round(time.Second), a.id, a.id)
+			time.Until(a.crashes[0].Add(crashWindow)).Round(time.Second), a.id, store.EnvOfBox(a.id))
 	}
 	// Set first: a wake that fails half-way may leave the box running. Its
 	// idle times start now, so a slow wake isn't put back to sleep at once.

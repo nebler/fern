@@ -1,6 +1,7 @@
 // Package health says what is wrong on the node now: the failures the
-// daemon knows of that would otherwise be a line in its log. `fern doctor`
-// lists them (GET /problems), and a metric counts them.
+// daemon knows of that would otherwise be a line in its log, or the error
+// of the next command. `fern doctor` lists them (GET /problems), a metric
+// counts them, and a Notifier tells a person who isn't looking.
 package health
 
 import (
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/store"
@@ -21,10 +23,18 @@ type Store interface {
 	Space() (store.Space, error)
 }
 
+// Boxes says which boxes aren't woken for now because they keep dying or
+// failing to wake (actor.Group).
+type Boxes interface {
+	Crashing(ctx context.Context) ([]actor.Crashing, error)
+}
+
 // Checker finds the node's problems.
 type Checker struct {
 	Store Store
 	Pool  string // the pool, where the last backup's result is kept
+	// Boxes knows the boxes that keep crashing. May be nil: none are listed.
+	Boxes Boxes
 	// BackupEvery is how often the daemon backs up; 0 if no backups are set
 	// up, which is no problem.
 	BackupEvery time.Duration
@@ -35,8 +45,9 @@ type Checker struct {
 const lateBackups = 3
 
 // Problems returns what is wrong now, the most pressing first: a pool that
-// takes no more snapshots, backups that fail or have stopped, and golden
-// builds that failed. No problems is an empty list.
+// takes no more snapshots, backups that fail or have stopped, boxes that
+// aren't woken because they keep crashing, and golden builds that failed.
+// No problems is an empty list.
 func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	out := []api.Problem{} // an empty list on the wire, not null
 	sp, err := c.Store.Space()
@@ -52,6 +63,15 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	if c.BackupEvery > 0 {
 		if p, ok := c.backups(); ok {
 			out = append(out, p)
+		}
+	}
+	if c.Boxes != nil {
+		boxes, err := c.Boxes.Crashing(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, box := range boxes {
+			out = append(out, crashing(box))
 		}
 	}
 	envs, err := c.Store.List(ctx)
@@ -70,12 +90,26 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 			continue
 		}
 		out = append(out, api.Problem{
-			Name: "golden build", At: failed.At,
+			Name: "golden build", About: env.ID, At: failed.At,
 			Detail: fmt.Sprintf("%s: its threads start without what the setup script and the services' first start make: %s", env.ID, firstLine(failed.Error)),
 			Fix:    "mend the repository's setup script or services.yaml; the next new thread builds again. The whole failure: envs/" + env.ID + "/build-failed.json in the pool",
 		})
 	}
 	return out, nil
+}
+
+// crashing is the problem of a box that isn't woken for now: which, how
+// often it failed, when it is tried again and why it failed the last time.
+// It lasts until then; a box that fails again at that try is back.
+func crashing(box actor.Crashing) api.Problem {
+	const clock = "15:04 UTC"
+	env := store.EnvOfBox(box.Box)
+	return api.Problem{
+		Name: "box", About: box.Box, At: box.Last,
+		Detail: fmt.Sprintf("%s keeps crashing: it died or failed to wake %d times since %s, and its commands fail until %s, when the next one tries again. The last time: %s",
+			box.Box, box.Times, box.Since.UTC().Format(clock), box.Retry.UTC().Format(clock), firstLine(box.Cause)),
+		Fix: "`fern logs " + env + "` shows what the box last printed and what the daemon said of it; `fern wake " + box.Box + "` tries again now",
+	}
 }
 
 // backups returns the problem with the node's backups, if there is one.

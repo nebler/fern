@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,10 +21,13 @@ import (
 	"github.com/nebler/fern/internal/github"
 )
 
-// node is where doctor looks: the node's files, and T3's address.
+// node is where doctor, logs and top look: the node's files, and T3's
+// address.
 type node struct {
 	etc, pool, proc, bin string // /etc/fern, /var/lib/fern, /proc, /usr/local/bin
 	poolImage            string // the pool's sparse file's folder, /var/lib/fern-img
+	cgroup               string // the cgroup that holds a cgroup per box that is up, /sys/fs/cgroup/fern
+	bundles              string // the bundles of the boxes that may run, /run/fern/boxes
 	t3                   string // T3's server, http://127.0.0.1:30773
 	git                  string // the node's git, which makes Claude's commits
 	btrfs                string // btrfs-progs' btrfs
@@ -35,6 +39,7 @@ type node struct {
 func thisNode() node {
 	return node{
 		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
+		cgroup: "/sys/fs/cgroup/fern", bundles: "/run/fern/boxes",
 		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", journalctl: "journalctl", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
 	}
 }
@@ -61,7 +66,12 @@ const minFree = 5 << 30
 // doctor checks the node Fern runs on and says what to do about each
 // problem: fern doctor, as root on the node. It exits 1 if one is broken.
 func doctor(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error) {
-	findings := thisNode().check(ctx, cl)
+	return report(std.out, thisNode().check(ctx, cl))
+}
+
+// report prints findings, one a line, each with what to do if it isn't ok,
+// and returns 1 if one is broken.
+func report(out io.Writer, findings []finding) (int, error) {
 	code := 0
 	for _, f := range findings {
 		mark := "ok  "
@@ -71,11 +81,11 @@ func doctor(ctx context.Context, _ command, cl *api.Client, std stdio) (int, err
 		case !f.ok:
 			mark, code = "FAIL", 1
 		}
-		if _, err := fmt.Fprintf(std.out, "%s  %-14s %s\n", mark, f.name, f.detail); err != nil {
+		if _, err := fmt.Fprintf(out, "%s  %-14s %s\n", mark, f.name, f.detail); err != nil {
 			return 1, err
 		}
 		if !f.ok && f.fix != "" {
-			if _, err := fmt.Fprintf(std.out, "      %-14s → %s\n", "", f.fix); err != nil {
+			if _, err := fmt.Fprintf(out, "      %-14s → %s\n", "", f.fix); err != nil {
 				return 1, err
 			}
 		}
@@ -117,18 +127,7 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	}
 
 	// The pool and its free space.
-	var fs unix.Statfs_t
-	switch err := unix.Statfs(n.pool, &fs); {
-	case err != nil:
-		add(finding{name: "pool", detail: err.Error(), fix: again})
-	case fs.Type != btrfsMagic:
-		add(finding{name: "pool", detail: n.pool + " isn't btrfs: the pool isn't mounted", fix: "mount " + n.pool + " (it is in /etc/fstab), then systemctl restart fern-daemon fern-t3"})
-	default:
-		free := fs.Bavail * uint64(max(fs.Bsize, 0))
-		f := finding{name: "pool", ok: free >= minFree, detail: fmt.Sprintf("btrfs, %.1f GB free", float64(free)/1e9)}
-		f.fix = "delete threads you no longer need in T3, or grow the pool (btrfs filesystem resize)"
-		add(f)
-	}
+	add(n.checkPool())
 
 	// btrfs keeps its own records in room it sets aside as it goes: with
 	// none left to set aside, writes fail while free space still shows.
@@ -138,12 +137,8 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 
 	// The pool is a sparse file: what it can still hold is what the disk
 	// under it has.
-	if err := unix.Statfs(n.poolImage, &fs); err == nil {
-		free := fs.Bavail * uint64(max(fs.Bsize, 0))
-		add(finding{
-			name: "disk", ok: free >= minFree, detail: fmt.Sprintf("%.1f GB free under the pool", float64(free)/1e9),
-			fix: "free space on the server's disk: the pool is a file on it, and fills it as it grows",
-		})
+	if f, ok := n.checkDisk(); ok {
+		add(f)
 	}
 
 	// gVisor and the box image.
@@ -207,11 +202,7 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(finding{name: "backups", ok: true, detail: "set up: hourly, encrypted; fern backup makes one now"})
 	}
 	for _, p := range problems {
-		detail := p.Detail
-		if !p.At.IsZero() {
-			detail += " (" + p.At.Local().Format("2 Jan 15:04") + ")"
-		}
-		add(finding{name: p.Name, detail: detail, fix: p.Fix})
+		add(ofProblem(p))
 	}
 
 	// The GitHub App, which is optional.
@@ -236,6 +227,45 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(n.checkCloudflare(ctx, token))
 	}
 	return out
+}
+
+// ofProblem is the finding for something the daemon says is wrong.
+func ofProblem(p api.Problem) finding {
+	detail := p.Detail
+	if !p.At.IsZero() {
+		detail += " (" + p.At.Local().Format("2 Jan 15:04") + ")"
+	}
+	return finding{name: p.Name, detail: detail, fix: p.Fix}
+}
+
+// checkPool says whether the pool is mounted, and how much it has free.
+func (n node) checkPool() finding {
+	var fs unix.Statfs_t
+	switch err := unix.Statfs(n.pool, &fs); {
+	case err != nil:
+		return finding{name: "pool", detail: err.Error(), fix: again}
+	case fs.Type != btrfsMagic:
+		return finding{name: "pool", detail: n.pool + " isn't btrfs: the pool isn't mounted", fix: "mount " + n.pool + " (it is in /etc/fstab), then systemctl restart fern-daemon fern-t3"}
+	}
+	free := fs.Bavail * uint64(max(fs.Bsize, 0))
+	return finding{
+		name: "pool", ok: free >= minFree, detail: fmt.Sprintf("btrfs, %.1f GB free", float64(free)/1e9),
+		fix: "delete threads you no longer need in T3, or grow the pool (btrfs filesystem resize)",
+	}
+}
+
+// checkDisk says how much the disk under the pool has free, where the pool
+// is a file on it; false for a pool on a partition of its own.
+func (n node) checkDisk() (finding, bool) {
+	var fs unix.Statfs_t
+	if err := unix.Statfs(n.poolImage, &fs); err != nil {
+		return finding{}, false
+	}
+	free := fs.Bavail * uint64(max(fs.Bsize, 0))
+	return finding{
+		name: "disk", ok: free >= minFree, detail: fmt.Sprintf("%.1f GB free under the pool", float64(free)/1e9),
+		fix: "free space on the server's disk: the pool is a file on it, and fills it as it grows",
+	}, true
 }
 
 // recordsLeast is the room for btrfs's records below which doctor fails, when

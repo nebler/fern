@@ -25,6 +25,10 @@ const (
 //
 //   - New snapshots are refused, because the pool or the disk under it is
 //     full: the thread's turns leave nothing to revert to.
+//   - The environment's own box, where Claude's Bash runs, died or failed to
+//     wake so often that it isn't woken for now (crashNotice): Claude would
+//     otherwise learn it from its first Bash call, and the person from
+//     nothing.
 //   - The golden build of what this workspace was made from failed, so it
 //     started without what the setup script and the services' first start
 //     make.
@@ -34,6 +38,9 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 		if full := sp.Full(); full != nil {
 			out = append(out, "Fern takes no new snapshots, so a revert can't bring back what this turn changes: "+full.Error()+".")
 		}
+	}
+	if notice := g.crashNotice(ctx, env); notice != "" {
+		out = append(out, notice)
 	}
 	// The repository of a worktree is its parent folder (golden).
 	builder := store.BuilderID(filepath.Base(filepath.Dir(env.Workspace)))
