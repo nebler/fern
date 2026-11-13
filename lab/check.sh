@@ -52,6 +52,9 @@
 #   upgrade      commands and a Bash call run on through a daemon restart, with
 #                nothing lost or repeated, and a client that dies still ends
 #                its command (restarts the daemon)
+#   notify       a failed golden build is POSTed to --notify-url once, not
+#                again after a restart, and so is the all-clear (restarts
+#                the daemon; four minutes)
 #   settings     settings and MCP servers planted in a workspace don't run in
 #                the agent box; uses a fake login, so no subscription (with
 #                agent boxes)
@@ -283,6 +286,9 @@ box() {
   # The C library's lookup, as Node's fetch makes it: curl knows localhost itself.
   check "localhost is the loopback address" 127.0.0.1 "$(fern exec $ENV -- getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
   check "the box writes to the pool" y "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/inside")"
+  # What the node is doing now, for a person at the server: the box, how
+  # long it has been up, its memory and CPU time, and what holds it awake.
+  check "fern top lists the box, with what holds it" 1 "$(fern top | grep -cE "^$ENV +services +[0-9.smhd]+ +[0-9.]+ MiB +[0-9.smhd]+ +[^?]" || true)"
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
   check "fern why says the box is awake, and when it sleeps" "awake in" "$(fern why $ENV | awk -v e=$ENV '$1 == e { print $2, $4 }')"
   local mounted=0
@@ -1067,6 +1073,18 @@ limits() {
   took=$(($(date +%s) - took))
   check "a wake whose box exits at once fails with its log's end" yes "$(succeeds grep -q nonsense <<<"$woke")"
   check "… in seconds, not the wake's two minutes" yes "$([ "$took" -lt 20 ] && echo yes || echo "no: $took s")"
+  # The box is gone and its folder with it, but not what it last printed;
+  # and a box that keeps failing is no longer only the next command's error:
+  # fern doctor lists it, and the thread's Claude is told.
+  fern sleep ${ENV}3 >/dev/null 2>&1 || true
+  check "a failed wake's log is kept, and fern logs prints it" yes \
+    "$(fern logs ${ENV}3 2>&1 | grep -A20 "box ${ENV}3 isn't running: the log of its last run" | grep -q nonsense && echo yes || echo no)"
+  for _ in 1 2 3; do fern exec ${ENV}3 -- true >/dev/null 2>&1 || true; done
+  check "doctor lists a box that keeps crashing" 1 "$(fern doctor 2>/dev/null | grep -c "^FAIL  box  *${ENV}3 keeps crashing" || true)"
+  if [ "${AGENTS:-0}" = 1 ]; then
+    check "its thread's Claude is told" yes \
+      "$(fern exec --agent ${ENV}3 -- cat /var/lib/fern/envs/${ENV}3/claude/CLAUDE.md | tr '\n' ' ' | grep -q "stopped starting this thread's box" && echo yes || echo no)"
+  fi
   fern rm ${ENV}3
   fern wake ${ENV}2 >/dev/null
   ip=$(box_ip ${ENV}2)
@@ -2126,15 +2144,71 @@ stability() {
   check "no workspace mount remains after the cycles" 0 "$(mounts $ENV)"
 }
 
+# notify gives the daemon a URL to tell (--notify-url) and a receiver on the
+# node that keeps what is POSTed to it, breaks a golden build, and checks
+# that the failure is told once, not again by a restarted daemon, and that
+# the daemon says so when nothing is wrong any more. The daemon looks once a
+# minute, so this takes four.
+notify() {
+  echo "== a failure is told to a URL, once"
+  local W=/var/lib/fern/worktrees/ck-notify G args got=/tmp/fern-notified
+  G=$(golden_id ck-notify)
+  args=$(daemon_args)
+  for e in $ENV ${ENV}2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  in_daemon "rm -f $got /var/lib/fern/notified.json; pkill -f fern-notify-receiver || true"
+  # The receiver appends each POST's body, on a line of its own.
+  on_node sh -c "nohup python3 -c '
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get(\"Content-Length\", 0)))
+        open(\"$got\", \"ab\").write(body.replace(b\"\\n\", b\" \") + b\"\\n\")
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer((\"127.0.0.1\", 8099), H).serve_forever()  # fern-notify-receiver
+' >/dev/null 2>&1 &" </dev/null
+  # shellcheck disable=SC2086 # the daemon's arguments are words
+  set_daemon_args $args --notify-url=http://127.0.0.1:8099/fern
+  restart_daemon
+  tar_dir lab/sample-repo | in_daemon "rm -rf $W/one && mkdir -p $W/one/.fern && tar -x -C $W/one -f - &&
+    printf '%s\n' '#!/bin/sh' 'echo no such tool: frobnicate >&2' 'exit 3' > $W/one/.fern/setup &&
+    chmod +x $W/one/.fern/setup && chown -R 1000:1000 $W/one"
+  fern create $ENV --path $W/one >/dev/null
+  for _ in $(seq 150); do
+    in_daemon "grep -q 'golden build' $got" 2>/dev/null && break
+    sleep 1
+  done
+  check "a failed golden build is POSTed to the URL, with the builder's name" 1 "$(in_daemon "grep -c 'golden build.*$G' $got" || true)"
+  restart_daemon
+  sleep 75
+  check "a restarted daemon doesn't tell it again" 1 "$(in_daemon "grep -c 'golden build' $got" || true)"
+  # Mended, the next worktree's build works, and the last problem is gone.
+  in_daemon "printf '%s\n' '#!/bin/sh' 'true' > $W/one/.fern/setup"
+  tar_dir lab/sample-repo | in_daemon "rm -rf $W/two && mkdir -p $W/two/.fern && tar -x -C $W/two -f - &&
+    cp -p $W/one/.fern/setup $W/two/.fern/setup && chown -R 1000:1000 $W/two"
+  fern create ${ENV}2 --path $W/two >/dev/null
+  for _ in $(seq 200); do
+    in_daemon "grep -q 'nothing is wrong any more' $got" 2>/dev/null && break
+    sleep 1
+  done
+  check "and says when nothing is wrong any more" 1 "$(in_daemon "grep -c 'nothing is wrong any more' $got" || true)"
+  # shellcheck disable=SC2086
+  set_daemon_args $args
+  restart_daemon
+  in_daemon "pkill -f fern-notify-receiver || true; rm -f $got"
+  for e in $ENV ${ENV}2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  in_daemon "rm -rf $W"
+}
+
 # main runs the sections. It is one function, called on the script's last
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode commit devserver turn hardware stability)
+  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode commit devserver turn hardware stability notify)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon upgrade sizes node many scale sleeping turn hardware stability github devserver backup "
+  alone=" idle daemon upgrade sizes node many scale sleeping turn hardware stability github devserver backup notify "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

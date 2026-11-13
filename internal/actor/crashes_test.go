@@ -232,3 +232,37 @@ func TestCrashNoticeAtClaudesWake(t *testing.T) {
 		})
 	}
 }
+
+// A deleted environment's boxes take their counts of crashes with them: an
+// environment made again under the same ID isn't refused for the one before.
+func TestDeleteForgetsCrashes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		ctx := t.Context()
+		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		drv.FailWakes("demo", errors.New("out of memory"))
+		for range 5 {
+			if _, err := g.Exec(ctx, "demo", func() {}); err == nil {
+				t.Fatal("Exec(demo) with a driver that fails worked")
+			}
+		}
+		if _, err := g.Exec(ctx, "demo", func() {}); !errors.Is(err, actor.ErrCrashing) {
+			t.Fatalf("Exec(demo) after its box kept failing error = %v, want %v", err, actor.ErrCrashing)
+		}
+		if err := g.Delete(ctx, "demo"); err != nil {
+			t.Fatal(err)
+		}
+		drv.FailWakes("demo", nil)
+		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		ex, err := g.Exec(ctx, "demo", func() {})
+		if err != nil {
+			t.Fatalf("Exec(demo) in an environment made again under the ID error: %v", err)
+		}
+		ex.Close()
+	})
+}

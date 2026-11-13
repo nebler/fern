@@ -1989,3 +1989,23 @@ commits since `origin/main`), found two faults, both fixed that day:
   keeper, a minute later, removed "50 of Podman's images, which no container
   used", the two fresh ones among them, and the deploy stopped with nothing
   changed. It now leaves images of the last hour alone.
+
+**The rest of 2026-11-13, in the lab** (unit tests, lint, and
+`lab/check.sh box limits golden t3 commit upgrade tools notify`): what a box
+is started with is decided in one place, the actor's (`internal/actor/box.go`),
+and a box whose `services.yaml` can't be read is refused only at a start: one
+that runs is adopted by a restarted daemon as before. A stopped box's last
+log is kept with its environment (`last.log`), and `fern logs` prints it. A
+box that failed to wake three times is a line in `fern doctor` and a notice
+to its thread's Claude; a deleted environment's count of crashes goes with
+it (an environment made again under its ID was refused for five minutes).
+`fern top` lists a box with its uptime, memory, CPU time and what holds it.
+With `--notify-url` and a receiver on the node, a failed golden build was
+POSTed once, not again by a restarted daemon, and "nothing is wrong any
+more" once it was mended (the section takes three minutes: the daemon looks
+once a minute). **On the VPS**, deployed at 12:20 UTC (c077c1fe): 124 checks
+pass (`slice box stream restore paths golden t3 commit space`), the new
+ones among them: the commit tool around a box's nested repository, T3's git
+through `fern-git`, the PATH of Claude's box, a terminal in the thread's box.
+Not done there: the reboot it has pending, the perf gate, and a thread on
+this build, all waiting for its thread to be idle.

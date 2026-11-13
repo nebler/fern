@@ -31,7 +31,18 @@ load_images "${boxes[@]/%/:dev}"
 # Podman keeps every build's layers, on the disk the pool is a file on: 35 GB
 # of them filled a VPS's (2026-11-12). The untagged ones a day old go; newer
 # ones are the next build's cache.
-[ -z "$FERN_HOST" ] || builder image prune -f --filter until=24h </dev/null >/dev/null
+# On a disk that is nearly full all the same, the cache goes too: the pool
+# has its own copy of what was built, and a cold build next time (7 minutes
+# for T3) is better than a server at 95% (VPS, 2026-11-13: a deploy left its
+# 75 GB disk there, and the one before it had its own images removed by the
+# daemon's keeper as the disk ran low).
+if [ -n "$FERN_HOST" ]; then
+  builder image prune -f --filter until=24h </dev/null >/dev/null
+  if [ "$(on_node sh -c 'df --output=pcent /var/lib/fern-img 2>/dev/null | tail -1 | tr -dc 0-9' </dev/null)" -ge 85 ] 2>/dev/null; then
+    builder image prune -af </dev/null >/dev/null
+    echo "the server's disk is over 85% full: removed Podman's images, of which the pool has its own copies"
+  fi
+fi
 if [ "$t3" = yes ]; then install_units t3; else install_units; fi
 restart_daemon
 echo "restarted the daemon"

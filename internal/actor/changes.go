@@ -66,10 +66,25 @@ func (g *Group) Delete(ctx context.Context, id string) error {
 		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
-		if err := g.stopAgent(ctx, id); err != nil {
+		// The boxes' counts of crashes go with the environment: one made
+		// again under its ID starts clean (until 2026-11-13 it was refused
+		// for the one before it, for five minutes).
+		forget := func(a *actor) { a.crashes, a.crashCause = nil, "" }
+		err = g.do(ctx, "stop_agent", store.AgentBox(id), func(ctx context.Context, agent *actor) error {
+			forget(agent)
+			if agent.phase == boxAsleep {
+				return nil
+			}
+			return agent.stopBox(ctx)
+		})
+		if err != nil {
 			return err
 		}
-		return g.store.Delete(ctx, id)
+		if err := g.store.Delete(ctx, id); err != nil {
+			return err
+		}
+		forget(a)
+		return nil
 	})
 }
 
