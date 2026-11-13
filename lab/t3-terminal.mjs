@@ -1,7 +1,7 @@
-// Opens a terminal on T3's server, as the app's terminal pane does, types a
-// line into it and prints what came back: "<status> | <what T3_EXPECT
-// matched>", or the end of what the terminal printed if nothing matched in
-// 30 s. lab/check.sh runs it in T3's own service (node from T3's image,
+// Attaches to a terminal on T3's server, as the app's terminal pane does
+// (terminal.attach starts it and streams what it prints), types a line into
+// it and prints what came back: "<status> | <what T3_EXPECT matched>", or
+// the end of what the terminal printed if nothing matched in 30 s. lab/check.sh runs it in T3's own service (node from T3's image,
 // stdin as the script) with T3_PAIR_URL, a pairing link; T3_CWD, the folder
 // the terminal opens in; T3_TYPE, the line to type once it is up (optional);
 // T3_RESIZE, "cols rows" to resize it to before typing (optional); and
@@ -41,21 +41,25 @@ const matched = await new Promise((resolve) => {
     const m = expect.exec(printed);
     if (m) resolve(m[0]);
   };
+  let typed = false;
   ws.onmessage = (event) => {
     const frame = JSON.parse(event.data);
     if (frame._tag === "Chunk") {
       for (const value of frame.values) {
-        if (value.threadId !== session.threadId) continue;
+        if (value.type === "snapshot") {
+          status = value.snapshot.status;
+          printed += value.snapshot.history;
+        }
         if (value.type === "output") printed += value.data;
-        if (value.type === "error") printed += `[terminal] ${value.message}`;
+        if (value.type === "error") {
+          status = "error";
+          printed += `[terminal] ${value.message}`;
+        }
         if (value.type === "exited") status = "exited";
       }
       ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
-      look();
-    } else if (frame._tag === "Exit" && frame.requestId === "open") {
-      if (frame.exit._tag !== "Success") return resolve(`terminal.open failed: ${JSON.stringify(frame.exit.cause)}`);
-      if (status === "?") status = frame.exit.value.status;
-      if (status === "running") {
+      if (status === "running" && !typed) {
+        typed = true;
         if (process.env.T3_RESIZE) {
           const [cols, rows] = process.env.T3_RESIZE.split(" ").map(Number);
           send("resize", "terminal.resize", { ...session, cols, rows });
@@ -64,11 +68,12 @@ const matched = await new Promise((resolve) => {
         if (process.env.T3_TYPE) setTimeout(() => send("write", "terminal.write", { ...session, data: `${process.env.T3_TYPE}\r` }), 3000);
       }
       look();
+    } else if (frame._tag === "Exit" && frame.requestId === "attach" && frame.exit._tag !== "Success") {
+      resolve(`terminal.attach failed: ${JSON.stringify(frame.exit.cause)}`);
     }
   };
   setTimeout(() => resolve(null), 30_000);
-  send("events", "subscribeTerminalEvents", {});
-  send("open", "terminal.open", { ...session, cwd: process.env.T3_CWD });
+  send("attach", "terminal.attach", { ...session, cwd: process.env.T3_CWD });
 });
 // A shell that ended says so just after its last output.
 await new Promise((resolve) => setTimeout(resolve, 1500));
