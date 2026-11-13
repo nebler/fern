@@ -14,6 +14,8 @@
 #
 # Run it again to update; every step skips what is done. When something
 # doesn't work, install.sh doctor root@1.2.3.4 says what, and what to do.
+# An update keeps the release before it: install.sh rollback root@1.2.3.4
+# puts that back (docs/operations.md).
 #
 # Settings, in the environment: FERN_VERSION (a release tag, default
 # latest), FERN_FIREWALL=off
@@ -57,6 +59,10 @@ GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
 REGISTRY=ghcr.io/nebler
 SCRIPT_URL=${FERN_SCRIPT_URL:-https://raw.githubusercontent.com/nebler/fern/main/install.sh}
 T3_PORT=30773
+# FERN_LIB holds what an update keeps: the release it replaced (previous/),
+# the name of the one installed (release), and, while an update or a
+# rollback replaces files, the marker updating.
+FERN_LIB=/usr/local/lib/fern
 PREVIEW_PORT=30780
 
 say() { printf '\033[1m== %s\033[0m\n' "$*"; }
@@ -182,6 +188,14 @@ fern_from_release() {
   podman cp "$cid:/usr/local/bin/fern-daemon" "$tmp/fern-daemon"
   podman cp "$cid:/usr/share/fern" "$tmp/share"
   podman rm "$cid" >/dev/null
+
+  # Before anything is replaced, the release that runs now is kept for a
+  # rollback, unless an update that stopped half-way kept it already.
+  mkdir -p "$FERN_LIB"
+  if [ ! -e "$FERN_LIB/updating" ] && [ -x /usr/local/bin/fern-daemon ] && release_differs "$tmp"; then
+    keep_previous
+  fi
+  touch "$FERN_LIB/updating"
   for bin in fern fern-daemon; do
     if ! cmp -s "$tmp/$bin" "/usr/local/bin/$bin"; then
       install -m 755 "$tmp/$bin" "/usr/local/bin/$bin.new" && mv "/usr/local/bin/$bin.new" "/usr/local/bin/$bin"
@@ -249,7 +263,121 @@ fern_from_release() {
     systemctl start fern-daemon fern-t3
   fi
   wait_t3
+  printf '%s, installed %s\n' "$FERN_VERSION" "$(date -u '+%F %H:%M UTC')" >"$FERN_LIB/release.new"
+  [ "$changed" = no ] && [ -s "$FERN_LIB/release" ] || mv "$FERN_LIB/release.new" "$FERN_LIB/release"
+  rm -f "$FERN_LIB/release.new" "$FERN_LIB/updating"
   echo "Fern $FERN_VERSION is running"
+}
+
+# release_differs says whether the release unpacked in $1 (its binaries and
+# units) or the images pulled for FERN_VERSION differ from what is installed.
+release_differs() {
+  local new=$1 bin unit name
+  for bin in fern fern-daemon; do
+    cmp -s "$new/$bin" "/usr/local/bin/$bin" || return 0
+  done
+  for unit in fern-daemon fern-t3 fern-failed@; do
+    [ ! -e "$new/share/systemd/$unit.service" ] || cmp -s "$new/share/systemd/$unit.service" "/etc/systemd/system/$unit.service" || return 0
+  done
+  for name in fern-box fern-t3; do
+    [ "$(podman image inspect -f '{{.Id}}' "$REGISTRY/$name:$FERN_VERSION")" = "$(cat "/var/lib/fern-images/$name-dev" 2>/dev/null)" ] || return 0
+  done
+  return 1
+}
+
+# keep_previous keeps the installed release in $FERN_LIB/previous: its
+# binaries and units, which images in the pool it runs, and the record
+# install.sh keeps of them. The images stay in the pool under a tag of their
+# own (<name>:previous), which the next load and fern gc leave alone; the
+# previous previous loses it, and goes with them. Safe to repeat: until
+# the marker updating is written, nothing installed has changed.
+keep_previous() {
+  local dir=$FERN_LIB/previous.new name id unit images=/var/lib/fern/images
+  say "keeping the release that runs now, for a rollback"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp -p /usr/local/bin/fern /usr/local/bin/fern-daemon "$dir/"
+  for unit in fern-daemon fern-t3 fern-failed@; do
+    [ ! -e "/etc/systemd/system/$unit.service" ] || cp -p "/etc/systemd/system/$unit.service" "$dir/"
+  done
+  for name in fern-box fern-t3; do
+    if ! id=$(readlink "$images/$name:dev"); then
+      # Half a release is no rollback, and an older one would mislead.
+      warn "the pool has no image $name:dev, so this update keeps nothing to roll back to"
+      rm -rf "$dir" "$FERN_LIB/previous"
+      return 0
+    fi
+    echo "$id" >"$dir/$name.image"
+    cp -p "/var/lib/fern-images/$name-dev" "$dir/$name.podman" 2>/dev/null || true
+  done
+  cp -p "$FERN_LIB/release" "$dir/release" 2>/dev/null || echo "unknown (installed before install.sh kept releases)" >"$dir/release"
+  rm -rf "$FERN_LIB/previous"
+  mv "$dir" "$FERN_LIB/previous"
+  for name in fern-box fern-t3; do
+    pool_tag "$name:previous" "$(cat "$FERN_LIB/previous/$name.image")"
+  done
+}
+
+# pool_tag points tag $1 in the pool's images at image $2, in one rename;
+# what a crash leaves (.load-…) the next fern image load removes.
+pool_tag() {
+  local images=/var/lib/fern/images
+  ln -sfn "$2" "$images/.load-tag-$1"
+  mv -T "$images/.load-tag-$1" "$images/$1"
+}
+
+# rollback puts back the release the last update replaced, kept in
+# $FERN_LIB/previous, and restarts the services as an update does: the
+# daemon, then T3 once the running turns have ended (FERN_DRAIN). What it
+# can't undo is in docs/operations.md. Safe to run again; the next install
+# brings the newer release back. A flag in FERN_DAEMON_ARGS the previous
+# daemon doesn't know would stop it from starting: it is taken out, and
+# said.
+rollback() {
+  [ "$(id -u)" = 0 ] || die "run it as root"
+  local prev=$FERN_LIB/previous name id bin unit flag known
+  [ -x "$prev/fern-daemon" ] && [ -s "$prev/fern-box.image" ] && [ -s "$prev/fern-t3.image" ] ||
+    die "there is no previous release to go back to: an update keeps one, and none has run since install.sh kept them"
+  for name in fern-box fern-t3; do
+    id=$(cat "$prev/$name.image")
+    [ -d "/var/lib/fern/images/$id" ] || die "the previous $name image is no longer in the pool; install an older release instead: FERN_VERSION=<tag> install.sh"
+  done
+  say "rolling back to $(cat "$prev/release")"
+  known=$("$prev/fern-daemon" -h 2>&1 | sed -nE 's/^  -([a-z0-9-]+).*/\1/p' || true)
+  [ -n "$known" ] || warn "the previous daemon doesn't list its flags: /etc/fern/daemon.env is left as it is"
+  if [ -n "$known" ] && [ -e /etc/fern/daemon.env ]; then
+    for flag in $(sed -n 's/^FERN_DAEMON_ARGS=//p' /etc/fern/daemon.env | tr -d "\"'" | grep -oE -- '(^| )--?[a-z0-9-]+' | sed -E 's/^ ?-+//'); do
+      if ! grep -qx -- "$flag" <<<"$known"; then
+        cp -p /etc/fern/daemon.env /etc/fern/daemon.env.before-rollback
+        daemon_flag "$flag" ""
+        warn "the previous daemon has no --$flag: taken out of /etc/fern/daemon.env (the file before is daemon.env.before-rollback)"
+      fi
+    done
+  fi
+  mkdir -p "$FERN_LIB"
+  touch "$FERN_LIB/updating"
+  for bin in fern fern-daemon; do
+    install -m 755 "$prev/$bin" "/usr/local/bin/$bin.new" && mv "/usr/local/bin/$bin.new" "/usr/local/bin/$bin"
+  done
+  for unit in fern-daemon fern-t3 fern-failed@; do
+    [ ! -e "$prev/$unit.service" ] || install -m 644 "$prev/$unit.service" "/etc/systemd/system/$unit.service"
+  done
+  mkdir -p /var/lib/fern-images
+  for name in fern-box fern-t3; do
+    pool_tag "$name:dev" "$(cat "$prev/$name.image")"
+    # The next install then sees that the pool's images aren't its own.
+    if [ -s "$prev/$name.podman" ]; then cp "$prev/$name.podman" "/var/lib/fern-images/$name-dev"; else rm -f "/var/lib/fern-images/$name-dev"; fi
+  done
+  systemctl daemon-reload
+  systemctl reset-failed fern-daemon fern-t3 2>/dev/null || true
+  systemctl restart fern-daemon
+  wait_daemon
+  wait_turns
+  systemctl restart fern-t3
+  wait_t3
+  cp "$prev/release" "$FERN_LIB/release"
+  rm -f "$FERN_LIB/updating"
+  echo "Fern $(cat "$FERN_LIB/release") is running again; install.sh brings the newer release back"
 }
 
 wait_daemon() {
@@ -599,19 +727,24 @@ backup_settings() {
   printf 'FERN_BACKUP_KEY=%s\n' "$(cat "$keyfile")"
 }
 
+# send_script copies this same script to the server: from its file, or
+# fetched here when it came through a pipe, so the server needs nothing but
+# SSH.
+send_script() {
+  if [ -f "${BASH_SOURCE[0]:-}" ]; then
+    ssh -o BatchMode=yes "$1" 'cat >/tmp/fern-install.sh' <"${BASH_SOURCE[0]}"
+  else
+    curl -fsSL "$SCRIPT_URL" | ssh -o BatchMode=yes "$1" 'cat >/tmp/fern-install.sh'
+  fi
+}
+
 remote() {
   local host=$1 run
   command -v ssh >/dev/null || die "needs ssh"
   # The first connection to a new server learns its host key (accept-new).
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$host" true ||
     die "can't log in to $host with an SSH key. Check 'ssh $host' works without a password (ssh-copy-id $host sets that up)"
-  # Run this same script there: from its file, or fetched here when it came
-  # through a pipe, so the server needs nothing but SSH.
-  if [ -f "${BASH_SOURCE[0]:-}" ]; then
-    ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh' <"${BASH_SOURCE[0]}"
-  else
-    curl -fsSL "$SCRIPT_URL" | ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh'
-  fi
+  send_script "$host"
   if [ -n "$FERN_NOTIFY_URL$FERN_HEARTBEAT_URL" ]; then
     # The URLs go on stdin, never in a command line.
     alerts_settings | ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh alerts-config; else sudo -n bash /tmp/fern-install.sh alerts-config; fi"
@@ -699,6 +832,15 @@ doctor() {
 case "${1:-}" in
   pair) pair ;;
   doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
+  rollback)
+    case ${FERN_DRAIN:-600} in '' | *[!0-9]*) die "FERN_DRAIN is a number of seconds" ;; esac
+    if [ -z "${2:-}" ]; then
+      rollback
+    else
+      send_script "$2"
+      ssh -t "$2" "if [ \"\$(id -u)\" = 0 ]; then FERN_DRAIN=${FERN_DRAIN:-600} bash /tmp/fern-install.sh rollback; else sudo FERN_DRAIN=${FERN_DRAIN:-600} bash /tmp/fern-install.sh rollback; fi"
+    fi
+    ;;
   github) github_app "${2:-}" ;;
   cloudflare) cloudflare_token ;;
   git-author) git_author "${2:-}" "${3:-}" ;;
