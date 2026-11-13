@@ -32,8 +32,14 @@ pod_sample() {
   echo "${name}_cpu_ms $(usage "$cg")"
   awk -v n="$name" '$1 == "throttled_usec" { printf "%s_throttled_ms %.3f\n", n, $2/1000 }' "$cg/cpu.stat"
   echo "${name}_write_bytes $(writes "$cg")"
+  # Kernel memory less the reclaimable slab (dentries and inodes the kernel
+  # gives back when it needs room), as memory leaves out the page cache:
+  # what the service holds, not what it once read. A server whose threads
+  # read big trees showed 176 MiB of it for T3, 171.5 of them reclaimable
+  # (VPS, 2026-11-13).
   awk -v n="$name" '$1 == "anon" || $1 == "shmem" { b+=$2 }
-    $1 == "kernel" { k=$2 } END { printf "%s_memory_mib %.3f\n%s_kernel_mib %.3f\n", n,b/1048576,n,k/1048576 }' "$cg/memory.stat"
+    $1 == "kernel" { k=$2 } $1 == "slab_reclaimable" { r=$2 }
+    END { printf "%s_memory_mib %.3f\n%s_kernel_mib %.3f\n", n,b/1048576,n,(k-r)/1048576 }' "$cg/memory.stat"
 }
 process_sample() {
   for proc in /proc/[0-9]*; do
