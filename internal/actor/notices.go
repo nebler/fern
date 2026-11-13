@@ -3,11 +3,11 @@ package actor
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/worktree"
 )
 
 // noticeError is how much of a failure's text a notice carries: Claude reads
@@ -50,8 +50,8 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 			out = append(out, snapshotNotice(failed, time.Now()))
 		}
 	}
-	// The repository of a worktree is its parent folder (golden).
-	builder := store.BuilderID(filepath.Base(filepath.Dir(env.Workspace)))
+	// The repository of a worktree, as golden finds it.
+	builder := store.BuilderID(worktree.Repo(env.Workspace))
 	failed, ok, err := g.store.BuildFailure(ctx, builder)
 	if err != nil || !ok {
 		return out

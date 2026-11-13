@@ -80,7 +80,7 @@ Three nouns. Everything else is a property of one of them.
 |---|---|---|
 | **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box (§5) | `internal/api`, `internal/api/server` |
 | **tools** | for agent boxes, an MCP server with Claude's tools: Bash and its background commands in the environment's box, `commit`, the forks (`env_fork`, `env_exec`, `env_delete`) and `cloudflare_connect` (§5); and the settings that point an agent at them in place of its own shell as it starts | `internal/tools` |
-| **actor** | one goroutine per box while it may run (an environment's own box and its agent box have one each, as does a builder's): the environment's box's makes the environment's changes **one at a time** and stops its agent box through that one's actor; counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too | `internal/actor` |
+| **actor** | one goroutine per box while it may run (an environment's own box and its agent box have one each, as does a builder's): the environment's box's makes the environment's changes **one at a time** and stops its agent box through that one's actor; counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too. It reaches the disk through small interfaces, one per job (environments, their list, snapshots, restore, pruning, golden sources, failed builds, the pool's room), which together are its `Store` | `internal/actor` |
 | **box policy** | decides what each box runs and gets: services or Claude; Claude's folder, login, skill packs and notices or not; its other variables and its limits (`Group.boxOf`) | `internal/actor` |
 | **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and each environment's record. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
 | **runsc driver** | wakes and stops boxes, each with the variables and limits the box policy gave it and a token of its own: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
@@ -93,6 +93,7 @@ Three nouns. Everything else is a property of one of them.
 | **health** | says what is wrong on the node now that would otherwise be a line in the daemon's log or the error of a box's next command (`GET /problems`, `fern doctor`, the `fern_problems` metric, §16) | `internal/health` |
 | **watch** | while an agent box is awake, watches its workspace from the host with fanotify and keeps the writes of the agent box's processes (their cgroup names the box); the actor passes them to the environment's box as touches (§10) | `internal/watch` |
 | **fern-init** | a box's main process: starts and supervises the services (on demand, §8), serves exec with PTYs (`internal/boxexec`), the box's background commands (`internal/background`), readiness, a graceful stop and touches; in an agent box, the relay to the daemon's MCP server (`internal/mcprelay`) | `cmd/fern-init` |
+| **worktree** | what a T3 worktree's path means: its top folder, its repository and its environment's ID (`t3-` and 16 hex of the path's SHA-256), from the path alone; `fern worktree` prints them for the shell wrappers, and T3's checkpoint patch works out the same ID (a test pins it) | `internal/worktree` |
 | **hibernate** | in the CLI that T3 runs as `claude` and `opencode`: stops an idle Claude, or OpenCode server, so its box can sleep, and starts it again at the next message (§6.3) | `internal/hibernate` |
 | **preview** | the front door for previews: serves boxes' ports over HTTP and WebSocket, routed by host, waking a box that is asleep and counting each request as a use of it (§5, §11) | `internal/preview` |
 | identity | planned (§11) | |
@@ -607,7 +608,8 @@ cmd/fern-git/        git for T3 and for Claude's box: never a repository a box c
 internal/api/        socket protocol and client
 internal/api/server/ socket API server
 internal/tools/      the agent box's MCP tools, and what points an agent at them
-internal/actor/      an actor per box (an environment's own, its agent box, a builder's), idle rule, the box policy, golden builds
+internal/actor/      an actor per box (an environment's own, its agent box, a builder's): Run's loop (run.go), the change queue (queue.go),
+                     an actor's wake and stop (lifecycle.go), idle rule, the box policy (box.go), golden builds
 internal/store/      btrfs pool, snapshots, retention, the environments' records, Reconcile
 internal/runsc/      boxes as gVisor sandboxes: bundle, network, firewall (+ a fake for unit tests)
 internal/boxexec/    the exec protocol: fern-init's server, the client, the daemon's relay; touches
@@ -624,6 +626,7 @@ internal/backup/     hourly backups to an S3 bucket, encrypted on the node, and 
 internal/github/     tokens from the person's GitHub App, for T3's git and gh
 internal/envfile/    the node's settings files in /etc/fern, NAME=value lines as systemd reads them
 internal/setup/      setup contract, golden keys
+internal/worktree/   a T3 worktree's top folder, repository and environment ID, from its path
 internal/span/       trace spans
 lab/                 the lab: setup, integration checks, perf gate, A/B, profiler
 deploy/systemd/      the daemon's and T3's units

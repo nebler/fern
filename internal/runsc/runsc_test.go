@@ -147,7 +147,7 @@ func TestLimitsCheck(t *testing.T) {
 		lim  Limits
 		ok   bool
 	}{
-		{name: "the defaults", lim: DefaultLimits, ok: true},
+		{name: "the defaults", lim: DefaultLimits(), ok: true},
 		{name: "small", lim: Limits{CPUs: 0.1, Memory: 128 << 20, Pids: 64}, ok: true},
 		{name: "no CPU", lim: Limits{Memory: 1 << 30, Pids: 100}},
 		{name: "too little memory", lim: Limits{CPUs: 1, Memory: 1 << 20, Pids: 100}},

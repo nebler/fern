@@ -76,7 +76,7 @@ func (g *Group) boxOf(ctx context.Context, id string, env store.Env, forSetup bo
 		// Claude's box doesn't depend on the repository's services.yaml, which
 		// Claude may be there to mend. It learns what the services' box gets,
 		// to say so when the repository asks for more (fern-init's hint).
-		box.Limits = runsc.DefaultLimits
+		box.Limits = runsc.DefaultLimits()
 		if err == nil {
 			if services, err := g.cfg.limitsOf(asked); err == nil {
 				vars = append(vars, boxLimitsVar(services))
@@ -138,7 +138,7 @@ func (g *Group) claudeVars(ctx context.Context, env store.Env) ([]string, error)
 func (c Config) limitsOf(asked setup.Limits) (runsc.Limits, error) {
 	lim := c.Limits
 	if lim == (runsc.Limits{}) {
-		lim = runsc.DefaultLimits
+		lim = runsc.DefaultLimits()
 	}
 	most := c.MaxLimits
 	if most == (runsc.Limits{}) {

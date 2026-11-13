@@ -17,25 +17,24 @@
 # as long as it runs. The pane then starts a new one.
 set -eu
 pool=${FERN_POOL:-/var/lib/fern}
-case "$PWD/" in
-"$pool"/worktrees/*/?*)
+# fern worktree gives this folder's worktree and its environment's ID, from
+# the path alone, as T3's checkpoint hook works them out; it fails anywhere
+# else.
+if found=$(fern worktree --pool "$pool" "$PWD" 2>/dev/null); then
 	# A worktree becomes an environment at its thread's first checkpoint
 	# (T3's hook, fern-checkpoints.patch), and a terminal can be opened
 	# before it. So it is made here, the same one, as fern-opencode does;
 	# making one that exists does nothing. It swaps the worktree's
 	# directory, which this shell must not be holding.
 	dir=$PWD
-	rest=${dir#"$pool"/worktrees/}
-	repo=${rest%%/*}
-	rest=${rest#*/}
-	workspace=$pool/worktrees/$repo/${rest%%/*}
+	env=${found%% *}
+	workspace=${found#* }
 	cd /
-	fern create --path "$workspace" "t3-$(printf %s "$workspace" | sha256sum | cut -c1-16)" >/dev/null
+	fern create --path "$workspace" "$env" >/dev/null
 	cd "$dir"
 	export TMOUT="${FERN_TERMINAL_IDLE:-1200}"
 	exec fern exec -it --here -e TERM -e COLORTERM -e TMOUT -- /bin/bash
-	;;
-esac
+fi
 echo "No terminal here: this folder has no Fern box, and a shell would run on the server itself, in T3's own service."
 echo "Open the terminal in a thread that works in a New worktree, or ask the agent to run the command."
 exit 1

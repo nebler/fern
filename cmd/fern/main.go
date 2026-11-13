@@ -4,6 +4,9 @@
 //	                                         --seed fills it from a tar stream on stdin
 //	fern ls                                  list environments
 //	fern which <path>                        print the environment whose workspace holds path
+//	fern worktree [--pool P] <path>          print the environment ID and the top folder
+//	                                         of the T3 worktree holding path, from the
+//	                                         path alone (fern-shell, fern-opencode)
 //	fern rm <env>                            delete an environment
 //	fern snapshot [--replace] <env> <snap>   take a snapshot (again, with --replace)
 //	fern snapshots <env>                     list snapshots
@@ -70,13 +73,17 @@ import (
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/hibernate"
 	"github.com/nebler/fern/internal/image"
+	"github.com/nebler/fern/internal/worktree"
 )
 
 // socket is the daemon's API.
 const socket = "/run/fern/fern.sock"
 
+// pool is the node's pool, where T3's worktrees are (worktrees/).
+const pool = "/var/lib/fern"
+
 // images is where the daemon finds the box image and systemd T3's.
-const images = "/var/lib/fern/images"
+const images = pool + "/images"
 
 func main() {
 	os.Exit(run(context.Background(), socket, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -123,6 +130,7 @@ type command struct {
 	account bool          // github-token --account
 	since   string        // logs --since
 	lines   int           // logs -n
+	pool    string        // worktree --pool
 	argv    []string      // exec: the command
 }
 
@@ -153,6 +161,9 @@ func subcommands() []subcommand {
 		{name: "image", min: 1, max: 1, run: loadImages},
 		{name: "ls", run: list},
 		{name: "which", min: 1, max: 1, run: which},
+		{name: "worktree", min: 1, max: 1, run: worktreeOf, flags: func(fs *flag.FlagSet, c *command) {
+			fs.StringVar(&c.pool, "pool", pool, "the pool T3's worktrees are in")
+		}},
 		{name: "rm", min: 1, max: 1, run: remove},
 		{name: "snapshot", min: 2, max: 2, run: snapshot, flags: func(fs *flag.FlagSet, c *command) {
 			fs.BoolVar(&c.replace, "replace", false, "take it again if it exists")
@@ -337,6 +348,19 @@ func which(ctx context.Context, c command, cl *api.Client, std stdio) (int, erro
 		return 0, err
 	}
 	_, err = fmt.Fprintln(std.out, env.ID)
+	return 0, err
+}
+
+// worktreeOf prints the environment ID and the top folder of the T3
+// worktree holding a path, as "<env> <top>", without asking the daemon: the
+// shell wrappers use it to make the environment before T3's first
+// checkpoint does, under the same ID.
+func worktreeOf(_ context.Context, c command, _ *api.Client, std stdio) (int, error) {
+	top, ok := worktree.Top(c.pool, c.args[0])
+	if !ok {
+		return 1, fmt.Errorf("%s isn't in a worktree, %s/worktrees/<repo>/<name>", c.args[0], c.pool)
+	}
+	_, err := fmt.Fprintln(std.out, worktree.EnvID(top), top)
 	return 0, err
 }
 

@@ -153,6 +153,18 @@ func TestRun(t *testing.T) {
 		{name: "ls", args: []string{"ls"}, requests: []string{"GET /envs"}, stdout: "demo  asleep  2026-10-29T12:00:00Z  /pool/envs/demo/live"},
 		{name: "which", args: []string{"which", "/wt"}, requests: []string{"GET /envs?path=%2Fwt"}, stdout: "wt"},
 		{name: "which finds none", args: []string{"which", "/elsewhere"}, code: 1, requests: []string{"GET /envs?path=%2Felsewhere"}, stderr: "no environment at /elsewhere"},
+		{
+			name: "worktree", args: []string{"worktree", "/var/lib/fern/worktrees/fern/t3-83c08bfd/cmd"},
+			stdout: "t3-fcdf1356e08e5762 /var/lib/fern/worktrees/fern/t3-83c08bfd\n",
+		},
+		{
+			name: "worktree in another pool", args: []string{"worktree", "--pool", "/srv/pool", "/srv/pool/worktrees/a/b"},
+			stdout: "t3-efab74ac557feeda /srv/pool/worktrees/a/b\n",
+		},
+		{
+			name: "worktree outside one", args: []string{"worktree", "/var/lib/fern/repos/fern"}, code: 1,
+			stderr: "fern worktree: /var/lib/fern/repos/fern isn't in a worktree",
+		},
 		{name: "rm", args: []string{"rm", "demo"}, requests: []string{"DELETE /envs/demo"}},
 		{name: "rm of an unknown environment", args: []string{"rm", "missing"}, code: 1, requests: []string{"DELETE /envs/missing"}, stderr: `fern rm: environment "missing": not found`},
 		{

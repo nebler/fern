@@ -56,7 +56,7 @@ func TestFileSkills(t *testing.T) {
 }
 
 func TestLimitFlags(t *testing.T) {
-	def := runsc.DefaultLimits
+	def := runsc.DefaultLimits()
 	for _, tc := range []struct {
 		name         string
 		args         []string

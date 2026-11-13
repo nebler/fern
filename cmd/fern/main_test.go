@@ -66,6 +66,16 @@ func TestParse(t *testing.T) {
 			want: command{name: "which", args: []string{"/var/lib/fern/worktrees/r/b/src"}},
 		},
 		{
+			name: "worktree",
+			args: []string{"worktree", "/var/lib/fern/worktrees/r/b/src"},
+			want: command{name: "worktree", args: []string{"/var/lib/fern/worktrees/r/b/src"}, pool: "/var/lib/fern"},
+		},
+		{
+			name: "worktree in another pool",
+			args: []string{"worktree", "--pool", "/srv/pool", "/srv/pool/worktrees/r/b"},
+			want: command{name: "worktree", args: []string{"/srv/pool/worktrees/r/b"}, pool: "/srv/pool"},
+		},
+		{
 			name: "snapshot --replace",
 			args: []string{"snapshot", "--replace", "demo", "s1"},
 			want: command{name: "snapshot", args: []string{"demo", "s1"}, replace: true},

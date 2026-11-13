@@ -124,7 +124,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 // write. Agent boxes keep the defaults: they run the agent, not the
 // repository.
 func limitFlags(flags *flag.FlagSet) func() (limits, most runsc.Limits, err error) {
-	def := runsc.DefaultLimits
+	def := runsc.DefaultLimits()
 	cpus := flags.Float64("box-cpus", def.CPUs, "the CPUs a box may use, from its next wake on")
 	memory := flags.Int64("box-memory", def.Memory>>20, "… and its memory, in MiB")
 	pids := flags.Int64("box-pids", def.Pids, "… and its processes and threads")

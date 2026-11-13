@@ -11,6 +11,25 @@ import (
 	"github.com/nebler/fern/internal/store"
 )
 
+// ErrCrashing means a box died or failed to wake crashLimit times within
+// crashWindow: it isn't woken again until the oldest of those is older,
+// or a person wakes it (Wake).
+var ErrCrashing = errors.New("the box keeps crashing")
+
+// A box that dies under its commands, or fails to wake, is woken again at
+// the next command, up to crashLimit times in crashWindow; then commands
+// fail at once with ErrCrashing, rather than each paying for a wake that
+// ends the same way.
+const (
+	crashLimit  = 3
+	crashWindow = 5 * time.Minute
+)
+
+// recent returns the times in ts within crashWindow of now.
+func recent(ts []time.Time) []time.Time {
+	return slices.DeleteFunc(ts, func(t time.Time) bool { return time.Since(t) >= crashWindow })
+}
+
 // Crashing is a box that isn't woken for now, because it died under its
 // commands or failed to wake crashLimit times within crashWindow: every
 // command for it fails at once with ErrCrashing until Retry.

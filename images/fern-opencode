@@ -23,23 +23,24 @@ set -eu
 pool=${FERN_POOL:-/var/lib/fern}
 real=${FERN_LOCAL_OPENCODE:-/usr/local/libexec/opencode}
 if [ "${1:-}" = serve ]; then
-	case "$PWD/" in
-	"$pool"/worktrees/*/?*)
+	# fern worktree gives this folder's worktree and its environment's ID,
+	# from the path alone, as T3's checkpoint hook works them out; it fails
+	# anywhere else.
+	if found=$(fern worktree --pool "$pool" "$PWD" 2>/dev/null); then
 		# T3 opens OpenCode's session before the thread's first checkpoint,
 		# which is what makes a worktree an environment (T3's hook,
 		# fern-checkpoints.patch). So it is made here, the same one; making
 		# one that exists does nothing. It swaps the worktree's directory,
 		# which this shell must not be holding.
 		dir=$PWD
-		rest=${dir#"$pool"/worktrees/}
-		repo=${rest%%/*}
-		rest=${rest#*/}
-		workspace=$pool/worktrees/$repo/${rest%%/*}
+		env=${found%% *}
+		workspace=${found#* }
 		cd /
-		fern create --path "$workspace" "t3-$(printf %s "$workspace" | sha256sum | cut -c1-16)" >/dev/null
+		fern create --path "$workspace" "$env" >/dev/null
 		cd "$dir"
 		exec fern exec --here --agent --hibernate "${FERN_HIBERNATE:-30s}" -e OPENCODE_PASSWORD -e OPENCODE_CONFIG_CONTENT -- opencode "$@"
-		;;
+	fi
+	case "$PWD/" in
 	"$pool"/repos/* | "$pool"/projects/*)
 		echo "fern-opencode: this thread works in the project's main folder, which has no Fern box or database." \
 			"Start a new thread in New worktree to get one." >&2

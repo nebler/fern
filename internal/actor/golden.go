@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"time"
 
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/worktree"
 )
 
 // goldenSource is the snapshot a new environment keeps of its first
@@ -40,7 +40,7 @@ var errBuildWaits = errors.New("the last build of this key failed; not built aga
 // into one: a miss doesn't make the thread wait, the next one gets it. A
 // repository without a setup contract has neither.
 func (g *Group) golden(ctx context.Context, id, workspace string) (*store.SnapshotRef, bool) {
-	repo := filepath.Base(filepath.Dir(workspace))
+	repo := worktree.Repo(workspace)
 	key, err := setup.Key(workspace, g.cfg.Image)
 	if errors.Is(err, setup.ErrNoContract) {
 		g.goldens.WithLabelValues("none").Inc()
@@ -218,7 +218,7 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 	id, ok := store.BuilderOf(src)
 	repo := id
 	if !ok {
-		repo = filepath.Base(filepath.Dir(srcEnv.Workspace))
+		repo = worktree.Repo(srcEnv.Workspace)
 		id = store.BuilderID(repo)
 	}
 	// The key is of the checkout as it came: a setup script may change a

@@ -88,9 +88,10 @@ type Limits struct {
 	Pids   int64 // processes and threads
 }
 
-// DefaultLimits are a box's limits unless the node is set up with others
-// (actor.Config), and always an agent box's.
-var DefaultLimits = Limits{CPUs: 2, Memory: 2 << 30, Pids: 4096}
+// DefaultLimits returns a box's limits unless the node is set up with others
+// (actor.Config), and always an agent box's. A function, not a variable:
+// nothing may change them for the whole process.
+func DefaultLimits() Limits { return Limits{CPUs: 2, Memory: 2 << 30, Pids: 4096} }
 
 // minMemory is the least memory a box may be given. A box with only idle
 // services measures about 32 MiB (lab/t3-run.sh); less than this is a typo.

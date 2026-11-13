@@ -155,7 +155,7 @@ func TestBoxGets(t *testing.T) {
 				"FERN_PREVIEW=http://{port}-demo.localhost:30780/",
 				"FERN_BOX_LIMITS=3:4096:6000",
 			},
-			limits: runsc.DefaultLimits,
+			limits: runsc.DefaultLimits(),
 		},
 		{
 			name: "agent, whose repository's services.yaml is broken",
@@ -172,7 +172,7 @@ func TestBoxGets(t *testing.T) {
 				"FERN_T3_MCP=http://fern-daemon:7071/t3/demo",
 				"FERN_PREVIEW=http://{port}-demo.localhost:30780/",
 			},
-			limits: runsc.DefaultLimits,
+			limits: runsc.DefaultLimits(),
 		},
 		{
 			name: "agent, on a node with no login, skills, T3 or previews",
@@ -185,7 +185,7 @@ func TestBoxGets(t *testing.T) {
 				"CLAUDE_CONFIG_DIR=claude/demo",
 				"FERN_BOX_LIMITS=2:2048:4096",
 			},
-			limits: runsc.DefaultLimits,
+			limits: runsc.DefaultLimits(),
 		},
 		{
 			name: "builder",
@@ -304,12 +304,12 @@ func TestBoxLimits(t *testing.T) {
 		want    runsc.Limits
 		wantErr bool
 	}{
-		{name: "unset", box: "demo", want: runsc.DefaultLimits},
+		{name: "unset", box: "demo", want: runsc.DefaultLimits()},
 		{name: "set", cfg: actor.Config{Limits: big}, box: "demo", want: big},
-		{name: "an agent box", cfg: actor.Config{Limits: big, MaxLimits: big}, box: "demo.agent", yaml: all, want: runsc.DefaultLimits},
+		{name: "an agent box", cfg: actor.Config{Limits: big, MaxLimits: big}, box: "demo.agent", yaml: all, want: runsc.DefaultLimits()},
 		{name: "a builder", cfg: actor.Config{MaxLimits: big}, box: store.BuilderID("r"), yaml: all, want: runsc.Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
 		{name: "asked for less", box: "demo", yaml: "limits: {memory: 512}\n", want: runsc.Limits{CPUs: 2, Memory: 512 << 20, Pids: 4096}},
-		{name: "asked for more than the node gives", box: "demo", yaml: all, want: runsc.DefaultLimits},
+		{name: "asked for more than the node gives", box: "demo", yaml: all, want: runsc.DefaultLimits()},
 		{name: "asked for more, under the most", cfg: actor.Config{MaxLimits: big}, box: "demo", yaml: all, want: runsc.Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
 		{name: "asked for more than the most", cfg: actor.Config{MaxLimits: big}, box: "demo", yaml: "limits: {cpus: 64, memory: 1048576, pids: 1048576}\n", want: big},
 		{name: "asked for too little", box: "demo", yaml: "limits: {memory: 1}\n", wantErr: true},
