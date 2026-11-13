@@ -63,6 +63,10 @@ func Podman(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// podmanKeep is how young an image of Podman's is left alone, whatever uses
+// it.
+const podmanKeep = time.Hour
+
 // Keeper reports and frees a node's disk space.
 type Keeper struct {
 	pool Pool
@@ -248,7 +252,12 @@ func (k *Keeper) free(ctx context.Context, podman bool) (api.Freed, error) {
 		freed.Removed = append(freed.Removed, fmt.Sprintf("image %.12s, which a tag pointed to before", img.ID))
 	}
 	if podman && k.cfg.Podman != nil {
-		out, err := k.cfg.Podman(ctx, "image", "prune", "--all", "--force")
+		// Not the last hour's: an image build under way has made images that
+		// no container uses yet, and its results wait to be loaded into the
+		// pool. On the VPS (2026-11-13) a deploy's T3 build took the disk
+		// low, and this removed the daemon's and the box's images it had
+		// just built.
+		out, err := k.cfg.Podman(ctx, "image", "prune", "--all", "--force", "--filter", "until="+podmanKeep.String())
 		switch n := len(bytes.Fields(out)); {
 		case errors.Is(err, exec.ErrNotFound):
 		case err != nil:

@@ -194,7 +194,7 @@ func TestFree(t *testing.T) {
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("Free() mismatch (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff([]string{"image prune --all --force"}, *calls); diff != "" {
+			if diff := cmp.Diff([]string{"image prune --all --force --filter until=1h0m0s"}, *calls); diff != "" {
 				t.Errorf("podman's calls mismatch (-want +got):\n%s", diff)
 			}
 			for id, want := range map[string]bool{tagged: true, inUse: true, unused: false} {
