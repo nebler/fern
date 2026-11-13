@@ -17,6 +17,30 @@ const (
 	noticeErrorTail = 1200
 )
 
+// noticeStore is the disk as notices read it: the pool's room, env's disk
+// limit and its repository's last failed golden build.
+type noticeStore interface {
+	Disk
+	BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error)
+}
+
+// snapshotFailures reads an environment's last failed snapshot
+// (SnapshotFailures, which Snapshot writes).
+type snapshotFailures interface {
+	SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error)
+}
+
+// reporter works out the notices of a box with Claude (notices), at its
+// wake. It is a part of the Group with what it reads alone: the disk only
+// through noticeStore and snapshotFailures, and the boxes' crashes only
+// through crashing (Group.crashing), which asks Run and the actors.
+type reporter struct {
+	store    noticeStore
+	failures snapshotFailures // nil: none is kept, and none is told of
+	image    string           // the box image's ID, part of every golden key
+	crashing func(ctx context.Context, box string, wait time.Duration) ([]Crashing, error)
+}
+
 // notices returns what has gone wrong on the node that the person working
 // in environment env should hear of, a sentence or two each: its Claude is
 // told at its box's start (claudeVars, fern-init's hint) and passes
@@ -37,9 +61,9 @@ const (
 //   - The golden build of what this workspace was made from failed, so it
 //     started without what the setup script and the services' first start
 //     make.
-func (g *Group) notices(ctx context.Context, env store.Env) []string {
+func (r *reporter) notices(ctx context.Context, env store.Env) []string {
 	var out []string
-	if sp, err := g.store.Space(); err == nil {
+	if sp, err := r.store.Space(); err == nil {
 		if full := sp.Full(); full != nil {
 			out = append(out, "Fern takes no new snapshots, so a revert can't bring back what this turn changes: "+full.Error()+".")
 		}
@@ -47,33 +71,49 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 	// Only an environment with a quota group has a limit: without limits,
 	// nothing is read.
 	if env.Group != 0 {
-		if q, err := g.store.Quota(ctx, env); err == nil && q.Near() {
+		if q, err := r.store.Quota(ctx, env); err == nil && q.Near() {
 			out = append(out, limitNotice(env.ID, q))
 		}
 	}
-	if notice := g.crashNotice(ctx, env); notice != "" {
+	if notice := r.crashNotice(ctx, env); notice != "" {
 		out = append(out, notice)
 	}
-	if keep := g.cfg.SnapshotFailures; keep != nil {
+	if keep := r.failures; keep != nil {
 		if failed, ok, err := keep.SnapshotFailure(ctx, env.ID); err == nil && ok {
 			out = append(out, snapshotNotice(failed, time.Now()))
 		}
 	}
 	// The repository of a worktree, as golden finds it.
 	builder := store.BuilderID(worktree.Repo(env.Workspace))
-	failed, ok, err := g.store.BuildFailure(ctx, builder)
+	failed, ok, err := r.store.BuildFailure(ctx, builder)
 	if err != nil || !ok {
 		return out
 	}
 	// Only now, with a failure to compare it to, is the key worked out: it
 	// reads the lockfiles. A failed build of other files isn't this one's.
-	if key, err := setup.Key(env.Workspace, g.cfg.Image); err != nil || key != failed.Key {
+	if key, err := setup.Key(env.Workspace, r.image); err != nil || key != failed.Key {
 		return out
 	}
 	return append(out, fmt.Sprintf("Fern's build of this repository's starting point failed (%s, %s ago), so this thread began "+
 		"without what the setup script and the services' first start make. It is tried again when a thread is "+
 		"made, at most every %s. Why it failed: %s",
 		failed.At.UTC().Format("2006-01-02 15:04 UTC"), time.Since(failed.At).Round(time.Minute), buildRetry, clip(failed.Error)))
+}
+
+// crashNotice is what the Claude of environment env's thread is told when
+// the environment's own box, where its Bash and the services run, isn't
+// woken for now; "" when it is, or when its actor is busy and can't say: a
+// notice is asked for during a wake, which never waits for another actor.
+func (r *reporter) crashNotice(ctx context.Context, env store.Env) string {
+	boxes, err := r.crashing(ctx, env.ID, 0)
+	if err != nil || len(boxes) == 0 {
+		return ""
+	}
+	c := boxes[0]
+	return fmt.Sprintf("Fern has stopped starting this thread's box, where Bash and the services run: it died or failed to start "+
+		"%d times since %s. Bash fails until %s, when the next command tries again; on the server, `fern wake %s` tries at once "+
+		"and `fern logs %s` shows what the box last printed. Why it failed the last time: %s",
+		c.Times, c.Since.UTC().Format("15:04 UTC"), c.Retry.UTC().Format("15:04 UTC"), c.Box, env.ID, clip(c.Cause))
 }
 
 // limitNotice says how much of its disk limit environment env has used, and

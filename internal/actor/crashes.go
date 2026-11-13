@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"time"
 
@@ -200,20 +199,4 @@ func (g *Group) Crashing(ctx context.Context) ([]Crashing, error) {
 	}
 	slices.SortFunc(out, func(x, y Crashing) int { return cmp.Compare(x.Box, y.Box) })
 	return out, nil
-}
-
-// crashNotice is what the Claude of environment env's thread is told when
-// the environment's own box, where its Bash and the services run, isn't
-// woken for now; "" when it is, or when its actor is busy and can't say: a
-// notice is asked for during a wake, which never waits for another actor.
-func (g *Group) crashNotice(ctx context.Context, env store.Env) string {
-	boxes, err := g.crashing(ctx, env.ID, 0)
-	if err != nil || len(boxes) == 0 {
-		return ""
-	}
-	c := boxes[0]
-	return fmt.Sprintf("Fern has stopped starting this thread's box, where Bash and the services run: it died or failed to start "+
-		"%d times since %s. Bash fails until %s, when the next command tries again; on the server, `fern wake %s` tries at once "+
-		"and `fern logs %s` shows what the box last printed. Why it failed the last time: %s",
-		c.Times, c.Since.UTC().Format("15:04 UTC"), c.Retry.UTC().Format("15:04 UTC"), c.Box, env.ID, clip(c.Cause))
 }

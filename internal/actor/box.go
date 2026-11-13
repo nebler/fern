@@ -119,7 +119,7 @@ func (g *Group) claudeVars(ctx context.Context, env store.Env) ([]string, error)
 			vars = append(vars, "FERN_SKILLS="+skills)
 		}
 	}
-	if notices := g.notices(ctx, env); len(notices) > 0 {
+	if notices := g.reporter.notices(ctx, env); len(notices) > 0 {
 		data, err := json.Marshal(notices)
 		if err != nil {
 			return nil, err

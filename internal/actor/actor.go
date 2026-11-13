@@ -137,6 +137,8 @@ type Group struct {
 
 	// builder makes the golden builds.
 	builder *builder
+	// reporter works out what a box with Claude is told (boxOf).
+	reporter *reporter
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
@@ -198,6 +200,7 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 		queue: make(chan string, buildQueue),
 		do:    g.do, exec: g.Exec, delete: g.Delete,
 	}
+	g.reporter = &reporter{store: traced, failures: cfg.SnapshotFailures, image: cfg.Image, crashing: g.crashing}
 	return g
 }
 
