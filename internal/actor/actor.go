@@ -142,10 +142,10 @@ type Group struct {
 	log    *slog.Logger
 	// touches asks services' boxes to touch the files Claude changed.
 	touches *http.Client
-	// boxes connects to boxes for their commands (Dial). A box that vanished
-	// can leave an address nothing answers; the same short connect timeout
-	// as readiness gets to the next wake without waiting a second on that
-	// stale address.
+	// boxes connects to boxes for their commands (Dial), and asks them when
+	// they were last used (AdoptClocks). A box that vanished can leave an
+	// address nothing answers; the same short connect timeout as readiness
+	// gets to the next wake without waiting a second on that stale address.
 	boxes *http.Client
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by

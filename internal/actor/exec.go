@@ -137,10 +137,28 @@ func (g *Group) exec(ctx context.Context, kind, id string, cancel context.Cancel
 	return ex, nil
 }
 
-// AdoptClocks sets the idle clocks of environment id's awake box to the times
+// AdoptClocks gives box's idle clocks back the times its fern-init kept, so
+// that a restart doesn't keep idle boxes awake longer. A box running a
+// command, perhaps one waiting for its client to come back, keeps new ones.
+func (g *Group) AdoptClocks(ctx context.Context, box string) {
+	ex, err := g.Exec(ctx, box, func() {})
+	if err != nil {
+		return
+	}
+	a, err := boxexec.ActivityOf(ctx, g.boxes, ex.Addr, ex.Token)
+	ex.Close()
+	if err != nil || a.Running > 0 {
+		return // an older fern-init has none; the clocks just started over
+	}
+	if err := g.setClocks(ctx, box, a.Opened, a.Closed); err != nil {
+		g.log.WarnContext(ctx, "restoring a box's idle clocks failed", slog.String("env", box), slog.Any("error", err))
+	}
+}
+
+// setClocks sets the idle clocks of environment id's awake box to the times
 // it was last used, known from the box: they survive a daemon's restart there.
 // A command opened since keeps the box's newer times.
-func (g *Group) AdoptClocks(ctx context.Context, id string, opened, closed time.Time) error {
+func (g *Group) setClocks(ctx context.Context, id string, opened, closed time.Time) error {
 	return g.do(ctx, "adopt", id, func(_ context.Context, a *actor) error {
 		if commands, _ := a.counts(); a.phase != boxAsleep && commands == 0 {
 			a.opened, a.closed = opened, closed

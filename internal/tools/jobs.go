@@ -15,7 +15,6 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/background"
-	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
@@ -371,25 +370,8 @@ func (js *jobs) adoptAll(ctx context.Context) {
 				js.log.WarnContext(ctx, "finding a box's background commands failed", slog.String("env", box), slog.Any("error", err))
 			}
 		}
-		js.adoptClocks(ctx, box)
-	}
-}
-
-// adoptClocks gives box's idle clocks back the times its fern-init kept, so
-// that a restart doesn't keep idle boxes awake longer. A box running a
-// command, perhaps one waiting for its client to come back, keeps new ones.
-func (js *jobs) adoptClocks(ctx context.Context, box string) {
-	ex, err := js.envs.Exec(ctx, box, func() {})
-	if err != nil {
-		return
-	}
-	a, err := boxexec.ActivityOf(ctx, js.boxes, ex.Addr, ex.Token)
-	ex.Close()
-	if err != nil || a.Running > 0 {
-		return // an older fern-init has none; the clocks just started over
-	}
-	if err := js.envs.AdoptClocks(ctx, box, a.Opened, a.Closed); err != nil {
-		js.log.WarnContext(ctx, "restoring a box's idle clocks failed", slog.String("env", box), slog.Any("error", err))
+		// And its idle clocks go on from where the last daemon's were.
+		js.envs.AdoptClocks(ctx, box)
 	}
 }
 
