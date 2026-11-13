@@ -239,7 +239,7 @@ func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 		close(done)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return server.New(st, drv, envs, "", notrace, log).Handler()
+	return server.New(st, drv, envs, false, notrace, log).Handler()
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
@@ -824,7 +824,7 @@ func TestNodeRoutes(t *testing.T) {
 			drv := runsc.NewFake("")
 			// The actors never run: these routes don't use them.
 			envs := actor.New(newFakeStore(), drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
-			srv := server.New(newFakeStore(), drv, envs, "", notrace, log)
+			srv := server.New(newFakeStore(), drv, envs, false, notrace, log)
 			node := fakeNode{err: tt.err}
 			srv.Disk, srv.Health, srv.BackupConfig = node, node, "/etc/fern/backup.env"
 			if !tt.noBackups {

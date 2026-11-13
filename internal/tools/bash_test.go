@@ -1,4 +1,4 @@
-package server_test
+package tools_test
 
 import (
 	"bytes"
@@ -28,10 +28,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/tools"
 )
 
 // bearer adds an Authorization header to every request.
@@ -100,11 +100,11 @@ func newDemoBoxWith(t *testing.T, relay bool) demoBox {
 	return demoBox{dir: dir, box: init, st: st, drv: drv, envs: envs, log: log}
 }
 
-// serve serves the box's environment's MCP endpoint from a new API server,
+// serve serves the box's environment's MCP endpoint from a new tools server,
 // and returns the endpoint's URL and the server.
-func (b demoBox) serve(t *testing.T) (string, *server.Server) {
+func (b demoBox) serve(t *testing.T) (string, *tools.Server) {
 	t.Helper()
-	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 	t.Cleanup(api.Close)
 	srv := httptest.NewServer(api.MCPHandler())
 	t.Cleanup(srv.Close)
@@ -191,7 +191,7 @@ func (d boxTokens) Token(id string) (string, error) {
 func TestMCPTakesTheAgentBoxTokenAlone(t *testing.T) {
 	b := newDemoBox(t)
 	drv := boxTokens{b.drv, map[string]string{"demo": boxToken, "demo.agent": "the-agent-box"}}
-	api := server.New(b.st, drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	api := tools.New(b.st, drv, b.envs, "http://fern-daemon:7071", b.log)
 	t.Cleanup(api.Close)
 	srv := httptest.NewServer(api.MCPHandler())
 	t.Cleanup(srv.Close)
@@ -600,7 +600,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "runs")
 
 	stopping := make(chan struct{})
-	first := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	first := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 	first.Stopping = stopping
 	t.Cleanup(first.Close)
 	swap := &swapHandler{}
@@ -637,7 +637,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	// The first daemon stops, and its connections break.
 	close(stopping)
 	daemon.CloseClientConnections()
-	second := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	second := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 	t.Cleanup(second.Close)
 	swap.set(second.MCPHandler())
 	if err := os.WriteFile(marker+".go", nil, 0o644); err != nil {
@@ -761,10 +761,10 @@ func TestAgentStartCloudflare(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+			api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 			t.Cleanup(api.Close)
 			api.Cloudflare = func(context.Context) (string, error) { return tt.token, nil }
-			c := serveSocket(t, api.Handler())
+			c := b.agents(t, api)
 			for _, agent := range []boxexec.Request{
 				{Argv: []string{filepath.Join(bin, "claude"), "-p"}},
 				{Argv: []string{filepath.Join(bin, "opencode"), "serve"}},
@@ -800,7 +800,7 @@ func TestT3MCP(t *testing.T) {
 	defer t3.Close()
 
 	b := newDemoBox(t)
-	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 	t.Cleanup(api.Close)
 	api.T3 = t3.URL
 	daemon := httptest.NewServer(api.MCPHandler())
@@ -893,7 +893,7 @@ func TestCloudflareConnect(t *testing.T) {
 				t.Fatal(err)
 			}
 			agentUp(t, b.drv, "cf")
-			api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+			api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 			t.Cleanup(api.Close)
 			api.Cloudflare = func(context.Context) (string, error) { return "cf-1", nil }
 			secrets := &fakeSecrets{set: make(map[string]string)}
@@ -1035,9 +1035,9 @@ func TestAgentStart(t *testing.T) {
 	// pointed at the relay and given no token at all.
 	const relayURL = "http://127.0.0.1:7072/mcp/demo"
 	withRelay := newDemoBoxWith(t, true)
-	relayAPI := server.New(withRelay.st, withRelay.drv, withRelay.envs, "http://fern-daemon:7071", notrace, withRelay.log)
+	relayAPI := tools.New(withRelay.st, withRelay.drv, withRelay.envs, "http://fern-daemon:7071", withRelay.log)
 	t.Cleanup(relayAPI.Close)
-	relayed := serveSocket(t, relayAPI.Handler())
+	relayed := withRelay.agents(t, relayAPI)
 	var stdout bytes.Buffer
 	req := boxexec.Request{Argv: []string{filepath.Join(bin, "claude"), "-p"}}
 	if _, err := relayed.ExecAgent(t.Context(), "demo", req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
@@ -1053,9 +1053,9 @@ func TestAgentStart(t *testing.T) {
 	}
 
 	b := newDemoBox(t)
-	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
 	t.Cleanup(api.Close)
-	c := serveSocket(t, api.Handler())
+	c := b.agents(t, api)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -1091,7 +1091,7 @@ func BenchmarkMCPCall(b *testing.B) {
 	drv := runsc.NewFake("box")
 	agentUp(b, drv, "demo")
 	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
-	api := server.New(st, drv, envs, "http://fern-daemon:7071", notrace, log)
+	api := tools.New(st, drv, envs, "http://fern-daemon:7071", log)
 	defer api.Close()
 	srv := httptest.NewServer(api.MCPHandler())
 	defer srv.Close()

@@ -46,6 +46,7 @@ import (
 	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/tools"
 	"github.com/nebler/fern/internal/watch"
 )
 
@@ -251,12 +252,15 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		cfg.Woken = woken
 	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
-	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
-	apiSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
-	apiSrv.T3 = *t3
+	apiSrv := server.New(st, drv, envs, cfg.Agents, tr, log)
+	// What Claude in an agent box gets in place of its own shell.
+	toolSrv := tools.New(st, drv, envs, agentMCP, log)
+	apiSrv.StartAgent = toolSrv.StartAgent
+	toolSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
+	toolSrv.T3 = *t3
 	// Claude's commits: the node's git as T3's user, with T3's home, whose
 	// .gitconfig names the author.
-	apiSrv.Git = &commit.Committer{
+	toolSrv.Git = &commit.Committer{
 		Git: "git", User: &syscall.Credential{Uid: store.BoxUID, Gid: store.BoxGID}, Home: filepath.Join(pool, "projects"),
 	}
 	app, err := github.Load(*githubApp, *githubAPI)
@@ -264,7 +268,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return fmt.Errorf("the GitHub App: %w", err)
 	}
 	if app != nil {
-		apiSrv.GitHub = app
+		toolSrv.GitHub = app
 	}
 	// T3's git and gh get their tokens on the API's socket, which boxes
 	// can't reach.
@@ -297,7 +301,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	previews := preview.New(*previewHost, st, envs, log)
 	g, ctx := errgroup.WithContext(ctx)
-	apiSrv.Stopping = ctx.Done()
+	apiSrv.Stopping, toolSrv.Stopping = ctx.Done(), ctx.Done()
 	servers := []struct {
 		name string
 		srv  *http.Server
@@ -305,7 +309,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}{
 		{"api", &http.Server{Handler: apiSrv.Handler()}, apiLis},
 		{"metrics", &http.Server{Handler: metricsHandler(reg)}, metricsLis},
-		{"mcp", &http.Server{Handler: apiSrv.MCPHandler()}, mcpLis},
+		{"mcp", &http.Server{Handler: toolSrv.MCPHandler()}, mcpLis},
 		{"preview", &http.Server{Handler: previews}, previewLis},
 	}
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
@@ -316,7 +320,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		g.Go(func() error { previews.Warm(ctx, woken); return nil })
 	}
 	// Background commands an earlier daemon watched run on in their boxes.
-	g.Go(func() error { apiSrv.AdoptJobs(ctx); return nil })
+	g.Go(func() error { toolSrv.AdoptJobs(ctx); return nil })
 	if backer != nil {
 		g.Go(func() error { backer.Run(ctx, *backupEvery); return nil })
 	}
@@ -350,7 +354,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 			errs = append(errs, s.srv.Shutdown(shutdownCtx))
 		}
 		// Claude's background commands, which no request holds.
-		apiSrv.Close()
+		toolSrv.Close()
 		return errors.Join(errs...)
 	})
 	return g.Wait()

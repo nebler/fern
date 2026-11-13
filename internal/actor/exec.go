@@ -2,8 +2,13 @@ package actor
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/nebler/fern/internal/boxexec"
 )
 
 // Exec is a command running in a box, counted by its environment's actor
@@ -43,6 +48,37 @@ func (e *Exec) CloseAndSleep(d time.Duration) { e.close(ending{sleep: true, afte
 // cancel, which must end the command.
 func (g *Group) Exec(ctx context.Context, id string, cancel context.CancelFunc) (*Exec, error) {
 	return g.exec(ctx, kindExec, id, cancel)
+}
+
+// dialTimeout bounds connecting to a box and its WebSocket handshake.
+const dialTimeout = 10 * time.Second
+
+// Dial connects to environment id's box, waking it if needed, for a command
+// its actor counts (Exec). A box seen earlier may be gone (a crash, a box
+// stopped by hand): then it is woken once more.
+func (g *Group) Dial(ctx context.Context, id string, cancel context.CancelFunc) (*websocket.Conn, *Exec, error) {
+	var err error
+	for try := range 2 {
+		var ex *Exec
+		if ex, err = g.Exec(ctx, id, cancel); err != nil {
+			return nil, nil, err
+		}
+		dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+		conn, dialErr := boxexec.Dial(dialCtx, "ws://"+ex.Addr+boxexec.Path, ex.Token, g.boxes)
+		cancelDial()
+		if dialErr == nil {
+			return conn, ex, nil
+		}
+		err = dialErr
+		if try > 0 {
+			// The next command finds it and says so: a command counts one
+			// death of the box, not two.
+			ex.Close()
+			break
+		}
+		ex.Dead()
+	}
+	return nil, nil, fmt.Errorf("connect to box %s: %w", id, err)
 }
 
 // Job is Exec for a command that runs in the background, such as a dev

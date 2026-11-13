@@ -1,4 +1,4 @@
-package server_test
+package tools_test
 
 import (
 	"os"

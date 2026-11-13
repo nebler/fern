@@ -1,4 +1,4 @@
-package server
+package tools
 
 import (
 	"bytes"
@@ -207,7 +207,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 			"Output past 30,000 characters is cut in the middle: send long output to a file in the workspace and read the part you need.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in bashInput) (*mcp.CallToolResult, any, error) {
 		if in.Background {
-			jobID, err := s.startJob(ctx, id, in, callKey(req))
+			jobID, err := s.jobs.startJob(ctx, id, in, callKey(req))
 			if err != nil {
 				return toolError(err), nil, nil
 			}
@@ -235,7 +235,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 			"this way, with one call for up to ten minutes, instead of looking again and again with sleep. " +
 			"Each call returns at most 30,000 characters and then forgets them: a command that prints more should write to a file in the workspace.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
-		text, err := s.readJob(ctx, id, in.ID, time.Duration(in.Wait)*time.Second)
+		text, err := s.jobs.readJob(ctx, id, in.ID, time.Duration(in.Wait)*time.Second)
 		if err != nil {
 			return toolError(err), nil, nil
 		}
@@ -246,7 +246,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		Meta:        alwaysLoad(),
 		Description: "Stops a background command started by Bash, with what it started, and returns its last output.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in killShellInput) (*mcp.CallToolResult, any, error) {
-		text, err := s.killJob(ctx, id, in.ID)
+		text, err := s.jobs.killJob(ctx, id, in.ID)
 		if err != nil {
 			return toolError(err), nil, nil
 		}
@@ -373,7 +373,7 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 		s.calls.Store(key, c)
 		defer s.calls.CompareAndDelete(key, c)
 	}
-	conn, ex, err := s.dialBox(ctx, id, cancel)
+	conn, ex, err := s.envs.Dial(ctx, id, cancel)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", 0, fmt.Errorf("no environment %s", id)

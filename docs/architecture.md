@@ -78,7 +78,8 @@ Three nouns. Everything else is a property of one of them.
 
 | Component | Job | Code |
 |---|---|---|
-| **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box; for agent boxes, an MCP server with Claude's tools: Bash and its background commands in the environment's box, `commit`, the forks (`env_fork`, `env_exec`, `env_delete`) and `cloudflare_connect` (§5) | `internal/api`, `internal/api/server` |
+| **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box (§5) | `internal/api`, `internal/api/server` |
+| **tools** | for agent boxes, an MCP server with Claude's tools: Bash and its background commands in the environment's box, `commit`, the forks (`env_fork`, `env_exec`, `env_delete`) and `cloudflare_connect` (§5); and the settings that point an agent at them in place of its own shell as it starts | `internal/tools` |
 | **actor** | one goroutine per box while it may run: makes its environment's changes **one at a time**, counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too | `internal/actor` |
 | **box policy** | decides what each box runs and gets: services or Claude, Claude's folder and login or not (`Group.boxOf`) | `internal/actor` |
 | **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and each environment's record. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
@@ -236,7 +237,7 @@ The diagrams above are how an environment looks from outside. In the code, each 
 | A box's answer | no answer, not ready, ready | fern-init | `internal/runsc` |
 | A hibernated Claude | running, stopping, asleep, ending | `hibernate.Run`'s loop | `internal/hibernate` |
 | The OpenCode proxy's server | stopped, starting, up, stopping | the proxy's actor | `internal/hibernate` |
-| A background command, to the daemon | watching, exited, box stopped, lost | its watch, once | `internal/api/server` |
+| A background command, to the daemon | watching, exited, box stopped, lost | its watch, once | `internal/tools` |
 | A command session, for its client | open, delivered, abandoned; and at most one connection | the session's lock | `internal/boxexec` |
 | A service | running, waiting to start again, stopped | its supervisor | `cmd/fern-init` |
 | A service started on demand | listening, starting, ready, failed (and back to starting) | its lock | `cmd/fern-init` |
@@ -568,7 +569,8 @@ cmd/fern/            small CLI
 cmd/fern-daemon/     node daemon: wiring only
 cmd/fern-init/       the main process inside boxes
 internal/api/        socket protocol and client
-internal/api/server/ socket API server, the agent box's MCP tools
+internal/api/server/ socket API server
+internal/tools/      the agent box's MCP tools, and what points an agent at them
 internal/actor/      per-environment actors, idle rule, the box policy, golden builds
 internal/store/      btrfs pool, snapshots, retention, the environments' records, Reconcile
 internal/runsc/      boxes as gVisor sandboxes: bundle, network, firewall (+ a fake for unit tests)

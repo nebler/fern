@@ -1,4 +1,4 @@
-package server
+package tools
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,9 +27,15 @@ import (
 // delete. While it runs, the daemon counts it as a job of its box's actor
 // (actor.Group.Job), so the box sleeps on its idle clocks.
 type jobs struct {
+	envs     *actor.Group
+	driver   Driver
+	boxes    *http.Client // asks boxes' fern-init for their jobs
+	log      *slog.Logger
+	stopping func() bool // whether the daemon has begun to stop
+
 	mu     sync.Mutex
 	byEnv  map[string]map[string]*job
-	closed bool           // Close has begun
+	closed bool           // close has begun
 	wg     sync.WaitGroup // the watches
 }
 
@@ -102,7 +109,7 @@ var errBoxStopped = errors.New("its box went to sleep, was restored or deleted")
 
 // startJob starts in's command in the background in environment id's box,
 // and returns its ID.
-func (s *Server) startJob(ctx context.Context, id string, in bashInput, key string) (string, error) {
+func (js *jobs) startJob(ctx context.Context, id string, in bashInput, key string) (string, error) {
 	// A call sent again after a restart names the same job, and doesn't start
 	// a second one.
 	if key == "" {
@@ -114,10 +121,10 @@ func (s *Server) startJob(ctx context.Context, id string, in bashInput, key stri
 		return "", errors.New("the call's key is not one the relay makes")
 	}
 	jobID := "bash_" + strings.ToLower(key[:8])
-	if s.hasJob(id, jobID) {
+	if js.hasJob(id, jobID) {
 		return jobID, nil
 	}
-	j, ex, wctx, err := s.openJob(ctx, id, jobID)
+	j, ex, wctx, err := js.openJob(ctx, id, jobID)
 	if err != nil {
 		return "", err
 	}
@@ -127,72 +134,72 @@ func (s *Server) startJob(ctx context.Context, id string, in bashInput, key stri
 		ex.Close()
 		return "", err
 	}
-	s.keepJob(wctx, id, j, ex)
+	js.keepJob(wctx, id, j, ex)
 	return jobID, nil
 }
 
 // hasJob reports whether the daemon knows job jobID of environment id.
-func (s *Server) hasJob(id, jobID string) bool {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	_, ok := s.jobs.byEnv[id][jobID]
+func (js *jobs) hasJob(id, jobID string) bool {
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	_, ok := js.byEnv[id][jobID]
 	return ok
 }
 
 // openJob opens a job count in environment id's box, waking it, for job
 // jobID, which the caller starts there or found there. The returned context
 // is the job's watch's: the box's sleep, restore or delete ends it.
-func (s *Server) openJob(ctx context.Context, id, jobID string) (*job, *actor.Exec, context.Context, error) {
+func (js *jobs) openJob(ctx context.Context, id, jobID string) (*job, *actor.Exec, context.Context, error) {
 	// The watch outlives the call that opens it.
 	wctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	ex, err := s.envs.Job(ctx, id, cancel)
+	ex, err := js.envs.Job(ctx, id, cancel)
 	if err != nil {
 		cancel()
 		return nil, nil, nil, err
 	}
-	j := &job{id: jobID, box: boxexec.JobClient{HC: s.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel, done: make(chan struct{})}
+	j := &job{id: jobID, box: boxexec.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}, cancel: cancel, done: make(chan struct{})}
 	return j, ex, wctx, nil
 }
 
 // keepJob records job j of environment id and watches it until it ends or
 // its box stops (wctx is done), then closes its count ex.
-func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec) {
-	s.jobs.mu.Lock()
+func (js *jobs) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec) {
+	js.mu.Lock()
 	// One watch a job: a call sent again, or an adoption, may have raced the
 	// one that keeps it. And none once the watches are being waited for.
-	if old, ok := s.jobs.byEnv[id][j.id]; s.jobs.closed || ok && old.is(jobWatching) {
-		s.jobs.mu.Unlock()
+	if old, ok := js.byEnv[id][j.id]; js.closed || ok && old.is(jobWatching) {
+		js.mu.Unlock()
 		j.cancel()
 		ex.Close()
 		return
 	}
-	if s.jobs.byEnv == nil {
-		s.jobs.byEnv = make(map[string]map[string]*job)
+	if js.byEnv == nil {
+		js.byEnv = make(map[string]map[string]*job)
 	}
-	if s.jobs.byEnv[id] == nil {
-		s.jobs.byEnv[id] = make(map[string]*job)
+	if js.byEnv[id] == nil {
+		js.byEnv[id] = make(map[string]*job)
 	}
-	js := s.jobs.byEnv[id]
-	js[j.id] = j
+	ofEnv := js.byEnv[id]
+	ofEnv[j.id] = j
 	// The records of jobs there is nothing more to read of go, once there
 	// are many; then those of ended jobs nobody read, which hold their output.
-	if len(js) > 2*boxexec.MaxJobs {
-		for jid, old := range js {
+	if len(ofEnv) > 2*boxexec.MaxJobs {
+		for jid, old := range ofEnv {
 			if old.is(jobBoxStopped) || old.is(jobLost) || old.is(jobExited) && old.read() {
-				delete(js, jid)
+				delete(ofEnv, jid)
 			}
 		}
-		for jid, old := range js {
-			if len(js) <= 2*boxexec.MaxJobs {
+		for jid, old := range ofEnv {
+			if len(ofEnv) <= 2*boxexec.MaxJobs {
 				break
 			}
 			if old.is(jobExited) {
-				delete(js, jid)
+				delete(ofEnv, jid)
 			}
 		}
 	}
-	s.jobs.mu.Unlock()
-	s.jobs.wg.Go(func() {
+	js.mu.Unlock()
+	js.wg.Go(func() {
 		defer j.cancel()
 		defer close(j.done)
 		defer func() {
@@ -204,7 +211,7 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 		}()
 		err := j.box.Wait(wctx, j.id)
 		switch {
-		case s.closing():
+		case js.closing():
 			// The daemon stops; the job runs on, for the next one.
 		case wctx.Err() != nil:
 			j.state.Store(int32(jobBoxStopped))
@@ -229,10 +236,10 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 }
 
 // findJob returns environment id's job jobID.
-func (s *Server) findJob(id, jobID string) (*job, error) {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	if j, ok := s.jobs.byEnv[id][jobID]; ok {
+func (js *jobs) findJob(id, jobID string) (*job, error) {
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	if j, ok := js.byEnv[id][jobID]; ok {
 		return j, nil
 	}
 	return nil, fmt.Errorf("no background command %s: the daemon keeps them in memory, so one is forgotten when the daemon restarts after its box has slept. "+
@@ -244,14 +251,14 @@ func (s *Server) findJob(id, jobID string) (*job, error) {
 // first. Someone waiting counts as a command of the box, so the box stays
 // up meanwhile: a job alone doesn't hold it past its idle times, and a build
 // Claude waits ten minutes for would end with the box's sleep after five.
-func (s *Server) readJob(ctx context.Context, id, jobID string, wait time.Duration) (string, error) {
-	j, err := s.findJob(id, jobID)
+func (js *jobs) readJob(ctx context.Context, id, jobID string, wait time.Duration) (string, error) {
+	j, err := js.findJob(id, jobID)
 	if err != nil {
 		return "", err
 	}
 	if wait > 0 && j.is(jobWatching) {
 		wctx, cancel := context.WithTimeout(ctx, min(wait, bashMaxTimeout))
-		if ex, err := s.envs.Exec(wctx, id, cancel); err == nil {
+		if ex, err := js.envs.Exec(wctx, id, cancel); err == nil {
 			select {
 			case <-j.done:
 			case <-wctx.Done():
@@ -262,7 +269,7 @@ func (s *Server) readJob(ctx context.Context, id, jobID string, wait time.Durati
 		// A daemon that stops ends the watch, not the job: this call's answer
 		// goes nowhere (MCPHandler), and reading the box now would take the
 		// output from the call the relay sends the next daemon.
-		if s.stopping() {
+		if js.stopping() {
 			return "", errors.New("the daemon is restarting")
 		}
 	}
@@ -277,14 +284,14 @@ func (s *Server) readJob(ctx context.Context, id, jobID string, wait time.Durati
 	}
 	o, err := j.box.Read(ctx, j.id)
 	if errors.Is(err, boxexec.ErrNoJob) {
-		s.forgetJob(id, j)
+		js.forgetJob(id, j)
 	}
 	return j.report(o, err), nil
 }
 
 // killJob stops environment id's job jobID and returns its last output.
-func (s *Server) killJob(ctx context.Context, id, jobID string) (string, error) {
-	j, err := s.findJob(id, jobID)
+func (js *jobs) killJob(ctx context.Context, id, jobID string) (string, error) {
+	j, err := js.findJob(id, jobID)
 	if err != nil {
 		return "", err
 	}
@@ -299,18 +306,18 @@ func (s *Server) killJob(ctx context.Context, id, jobID string) (string, error) 
 	j.killed.Store(true)
 	o, err := j.box.Kill(ctx, j.id)
 	if errors.Is(err, boxexec.ErrNoJob) {
-		s.forgetJob(id, j)
+		js.forgetJob(id, j)
 	}
 	return j.report(o, err), nil
 }
 
 // forgetJob drops the record of j, a job its box no longer has: the box
 // keeps only so many finished ones.
-func (s *Server) forgetJob(id string, j *job) {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	if s.jobs.byEnv[id][j.id] == j && !j.is(jobWatching) {
-		delete(s.jobs.byEnv[id], j.id)
+func (js *jobs) forgetJob(id string, j *job) {
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	if js.byEnv[id][j.id] == j && !j.is(jobWatching) {
+		delete(js.byEnv[id], j.id)
 	}
 }
 
@@ -343,14 +350,14 @@ func (j *job) report(o boxexec.JobOutput, err error) string {
 	return text + clip(o.Output)
 }
 
-// AdoptJobs finds the background commands running in the boxes an earlier
+// adoptAll finds the background commands running in the boxes an earlier
 // daemon left awake, so that BashOutput and KillShell reach them and their
 // boxes stay up on their idle clocks. It returns when it has asked every
 // box, or ctx is done.
-func (s *Server) AdoptJobs(ctx context.Context) {
-	states, err := s.driver.States(ctx)
+func (js *jobs) adoptAll(ctx context.Context) {
+	states, err := js.driver.States(ctx)
 	if err != nil {
-		s.log.WarnContext(ctx, "finding the boxes' background commands failed", slog.Any("error", err))
+		js.log.WarnContext(ctx, "finding the boxes' background commands failed", slog.Any("error", err))
 		return
 	}
 	for box, state := range states {
@@ -359,73 +366,82 @@ func (s *Server) AdoptJobs(ctx context.Context) {
 		}
 		// Jobs run in environments' own boxes.
 		if store.EnvOfBox(box) == box {
-			if err := s.adoptJobs(ctx, box); err != nil {
-				s.log.WarnContext(ctx, "finding a box's background commands failed", slog.String("env", box), slog.Any("error", err))
+			if err := js.adoptJobs(ctx, box); err != nil {
+				js.log.WarnContext(ctx, "finding a box's background commands failed", slog.String("env", box), slog.Any("error", err))
 			}
 		}
-		s.adoptClocks(ctx, box)
+		js.adoptClocks(ctx, box)
 	}
 }
 
 // adoptClocks gives box's idle clocks back the times its fern-init kept, so
 // that a restart doesn't keep idle boxes awake longer. A box running a
 // command, perhaps one waiting for its client to come back, keeps new ones.
-func (s *Server) adoptClocks(ctx context.Context, box string) {
-	ex, err := s.envs.Exec(ctx, box, func() {})
+func (js *jobs) adoptClocks(ctx context.Context, box string) {
+	ex, err := js.envs.Exec(ctx, box, func() {})
 	if err != nil {
 		return
 	}
-	a, err := boxexec.ActivityOf(ctx, s.boxes, ex.Addr, ex.Token)
+	a, err := boxexec.ActivityOf(ctx, js.boxes, ex.Addr, ex.Token)
 	ex.Close()
 	if err != nil || a.Running > 0 {
 		return // an older fern-init has none; the clocks just started over
 	}
-	if err := s.envs.AdoptClocks(ctx, box, a.Opened, a.Closed); err != nil {
-		s.log.WarnContext(ctx, "restoring a box's idle clocks failed", slog.String("env", box), slog.Any("error", err))
+	if err := js.envs.AdoptClocks(ctx, box, a.Opened, a.Closed); err != nil {
+		js.log.WarnContext(ctx, "restoring a box's idle clocks failed", slog.String("env", box), slog.Any("error", err))
 	}
 }
 
-func (s *Server) adoptJobs(ctx context.Context, id string) error {
+func (js *jobs) adoptJobs(ctx context.Context, id string) error {
 	// The box is up: this only learns its address.
-	ex, err := s.envs.Exec(ctx, id, func() {})
+	ex, err := js.envs.Exec(ctx, id, func() {})
 	if err != nil {
 		return err
 	}
-	infos, err := boxexec.JobClient{HC: s.boxes, Addr: ex.Addr, Token: ex.Token}.List(ctx)
+	infos, err := boxexec.JobClient{HC: js.boxes, Addr: ex.Addr, Token: ex.Token}.List(ctx)
 	ex.Close()
 	if err != nil {
 		return err
 	}
 	for _, info := range infos {
-		j, jex, wctx, err := s.openJob(ctx, id, info.ID)
+		j, jex, wctx, err := js.openJob(ctx, id, info.ID)
 		if err != nil {
 			return err
 		}
-		s.keepJob(wctx, id, j, jex)
-		s.log.InfoContext(ctx, "background command adopted", slog.String("env", id), slog.String("job", info.ID),
+		js.keepJob(wctx, id, j, jex)
+		js.log.InfoContext(ctx, "background command adopted", slog.String("env", id), slog.String("job", info.ID),
 			slog.Bool("running", info.Running))
 	}
 	return nil
 }
 
-// closing reports whether Close has begun: watches that end then end with
+// closing reports whether close has begun: watches that end then end with
 // the daemon, not with their boxes.
-func (s *Server) closing() bool {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	return s.jobs.closed
+func (js *jobs) closing() bool {
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	return js.closed
 }
 
-// Close stops watching the background commands, which run on in their
+// close stops watching the background commands, which run on in their
 // boxes for the next daemon to adopt, and waits for the watches to end.
-func (s *Server) Close() {
-	s.jobs.mu.Lock()
-	s.jobs.closed = true
-	for _, js := range s.jobs.byEnv {
-		for _, j := range js {
+func (js *jobs) close() {
+	js.mu.Lock()
+	js.closed = true
+	for _, ofEnv := range js.byEnv {
+		for _, j := range ofEnv {
 			j.cancel()
 		}
 	}
-	s.jobs.mu.Unlock()
-	s.jobs.wg.Wait()
+	js.mu.Unlock()
+	js.wg.Wait()
 }
+
+// AdoptJobs finds the background commands running in the boxes an earlier
+// daemon left awake (jobs.adoptAll). It returns when it has asked every box,
+// or ctx is done.
+func (s *Server) AdoptJobs(ctx context.Context) { s.jobs.adoptAll(ctx) }
+
+// Close stops watching the background commands, which run on in their boxes
+// for the next daemon to adopt, and waits for the watches to end.
+func (s *Server) Close() { s.jobs.close() }

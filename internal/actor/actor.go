@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"sync"
@@ -141,6 +142,11 @@ type Group struct {
 	log    *slog.Logger
 	// touches asks services' boxes to touch the files Claude changed.
 	touches *http.Client
+	// boxes connects to boxes for their commands (Dial). A box that vanished
+	// can leave an address nothing answers; the same short connect timeout
+	// as readiness gets to the next wake without waiting a second on that
+	// stale address.
+	boxes *http.Client
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
@@ -176,6 +182,7 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 	return &Group{
 		store: tracedStore{st: st, tr: tr}, driver: drv, cfg: cfg, tracer: tr, log: log,
 		touches:      &http.Client{Timeout: touchTimeout},
+		boxes:        &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
 		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
 		stops:        histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
 		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
