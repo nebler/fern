@@ -478,7 +478,7 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 
 ## 14. Running modes
 
-One remote Linux machine running two systemd services. `lab/setup.sh` (with `FERN_HOST` for a VPS, through `lab/vps.sh`):
+One remote Linux machine running two systemd services. What its owner does when something is wrong, and how to update, roll back, restore, grow the pool and turn on backups and notifications: [operations.md](operations.md). `lab/setup.sh` (with `FERN_HOST` for a VPS, through `lab/vps.sh`):
 - creates the btrfs pool (a loop-mounted image file), installs gVisor and a firewall that lets in only SSH
 - installs `fern` and `fern-daemon` in `/usr/local/bin`, loads the box and T3 images into the pool (`fern image load`) and installs `deploy/systemd/` (`fern-daemon.service`, `fern-t3.service`)
 - stores Claude's login in `/etc/fern/claude.env`, runs the quick checks and prints the pairing link
