@@ -29,6 +29,7 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/api/server"
+	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
@@ -747,5 +748,99 @@ func TestFork(t *testing.T) {
 	}
 	if len(envs) != 0 {
 		t.Errorf("after Delete(demo): List() = %v, want none", envs)
+	}
+}
+
+// fakeNode is the node's backer, keeper and checker, each failing with err
+// if it is set.
+type fakeNode struct{ err error }
+
+func (f fakeNode) Once(context.Context) error { return f.err }
+
+func (f fakeNode) Usage(context.Context) (api.Disk, error) {
+	return api.Disk{Least: 5, Parts: []api.DiskPart{}}, f.err
+}
+
+func (f fakeNode) Free(context.Context) (api.Freed, error) {
+	return api.Freed{Removed: []string{"image 3f2a"}}, f.err
+}
+
+func (f fakeNode) Problems(context.Context) ([]api.Problem, error) {
+	return []api.Problem{}, f.err
+}
+
+// The routes about the node answer as they did when the daemon's main served
+// them, which the CLI and the lab's checks read: a failure is a 500 with the
+// error, whatever it wraps, but for a backup that is running or not set up.
+func TestNodeRoutes(t *testing.T) {
+	const pool = `{"path":"","total":0,"free":0}`
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		err        error
+		noBackups  bool
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "backup", method: http.MethodPost, path: "/backup", wantStatus: http.StatusNoContent},
+		{
+			name: "backup, none set up", method: http.MethodPost, path: "/backup", noBackups: true,
+			wantStatus: http.StatusNotFound, wantBody: `{"error":"no backups are set up: /etc/fern/backup.env is missing (README: backups)"}`,
+		},
+		{
+			name: "backup, one running", method: http.MethodPost, path: "/backup", err: backup.ErrBusy,
+			wantStatus: http.StatusConflict, wantBody: `{"error":"a backup is already running: try again when it ends"}`,
+		},
+		{
+			name: "backup, a thread deleted under it", method: http.MethodPost, path: "/backup", err: fmt.Errorf("back up demo: %w", store.ErrNotFound),
+			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"back up demo: not found"}`,
+		},
+		{
+			name: "disk", method: http.MethodGet, path: "/disk",
+			wantStatus: http.StatusOK, wantBody: `{"pool":` + pool + `,"least":5,"parts":[]}`,
+		},
+		{
+			name: "disk fails", method: http.MethodGet, path: "/disk", err: store.ErrPoolFull,
+			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"` + store.ErrPoolFull.Error() + `"}`,
+		},
+		{
+			name: "gc", method: http.MethodPost, path: "/gc",
+			wantStatus: http.StatusOK, wantBody: `{"removed":["image 3f2a"],"pool":` + pool + `}`,
+		},
+		{
+			name: "gc fails", method: http.MethodPost, path: "/gc", err: errors.New("statfs: input/output error"),
+			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"statfs: input/output error"}`,
+		},
+		{name: "problems, none", method: http.MethodGet, path: "/problems", wantStatus: http.StatusOK, wantBody: `[]`},
+		{
+			name: "problems fail", method: http.MethodGet, path: "/problems", err: actor.ErrStopped,
+			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"daemon is stopping"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log := slog.New(slog.DiscardHandler)
+			drv := runsc.NewFake("")
+			// The actors never run: these routes don't use them.
+			envs := actor.New(newFakeStore(), drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
+			srv := server.New(newFakeStore(), drv, envs, "", notrace, log)
+			node := fakeNode{err: tt.err}
+			srv.Disk, srv.Health, srv.BackupConfig = node, node, "/etc/fern/backup.env"
+			if !tt.noBackups {
+				srv.Backups = node
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, nil))
+			if rec.Code != tt.wantStatus {
+				t.Errorf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, tt.wantStatus)
+			}
+			if got := strings.TrimSpace(rec.Body.String()); got != tt.wantBody {
+				t.Errorf("%s %s body = %s, want %s", tt.method, tt.path, got, tt.wantBody)
+			}
+			if got := rec.Header().Get("Content-Type"); tt.wantBody != "" && got != "application/json" {
+				t.Errorf("%s %s Content-Type = %q, want application/json", tt.method, tt.path, got)
+			}
+		})
 	}
 }

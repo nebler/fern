@@ -5,7 +5,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -269,57 +268,23 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 	// T3's git and gh get their tokens on the API's socket, which boxes
 	// can't reach.
-	api := http.NewServeMux()
-	api.Handle("/", apiSrv.Handler())
-	api.Handle("POST /github/token", github.Handler(app))
+	apiSrv.GitHubToken = github.Handler(app)
 	backups, err := backup.LoadConfig(backupConfig)
 	if err != nil {
 		return err
 	}
+	// fern backup: one now, as the hourly ones make it.
 	var backer *backup.Backer
+	apiSrv.BackupConfig = backupConfig
 	if backups != nil {
 		backer = backup.New(backups, node, pool, st, envs, log)
+		apiSrv.Backups = backer
 	}
-	// fern backup: one now, as the hourly ones make it.
-	api.HandleFunc("POST /backup", func(w http.ResponseWriter, r *http.Request) {
-		fail := func(code int, msg string) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(code)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-		}
-		if backer == nil {
-			fail(http.StatusNotFound, "no backups are set up: "+backupConfig+" is missing (README: backups)")
-			return
-		}
-		if err := backer.Once(r.Context()); errors.Is(err, backup.ErrBusy) {
-			fail(http.StatusConflict, err.Error())
-			return
-		} else if err != nil {
-			fail(http.StatusInternalServerError, err.Error())
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
 
 	// fern df and fern gc: what uses the node's disk, and what nothing needs
 	// removed from it.
 	keeper := disk.New(st, envs, disk.Config{Root: pool, Proc: "/proc", Podman: disk.Podman, Sizes: store.PathUsage}, log)
-	answer := func(w http.ResponseWriter, v any, err error) {
-		w.Header().Set("Content-Type", "application/json")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			v = map[string]string{"error": err.Error()}
-		}
-		_ = json.NewEncoder(w).Encode(v)
-	}
-	api.HandleFunc("GET /disk", func(w http.ResponseWriter, r *http.Request) {
-		d, err := keeper.Usage(r.Context())
-		answer(w, d, err)
-	})
-	api.HandleFunc("POST /gc", func(w http.ResponseWriter, r *http.Request) {
-		freed, err := keeper.Free(r.Context())
-		answer(w, freed, err)
-	})
+	apiSrv.Disk = keeper
 
 	// fern doctor: what is wrong now that would otherwise be a line in this
 	// daemon's log. The same list is a metric, with the pool's room.
@@ -327,10 +292,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}
-	api.HandleFunc("GET /problems", func(w http.ResponseWriter, r *http.Request) {
-		problems, err := checker.Problems(r.Context())
-		answer(w, problems, err)
-	})
+	apiSrv.Health = checker
 	registerGauges(ctx, reg, checker, st, drv)
 
 	previews := preview.New(*previewHost, st, envs, log)
@@ -341,7 +303,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		srv  *http.Server
 		lis  net.Listener // nil: not served
 	}{
-		{"api", &http.Server{Handler: api}, apiLis},
+		{"api", &http.Server{Handler: apiSrv.Handler()}, apiLis},
 		{"metrics", &http.Server{Handler: metricsHandler(reg)}, metricsLis},
 		{"mcp", &http.Server{Handler: apiSrv.MCPHandler()}, mcpLis},
 		{"preview", &http.Server{Handler: previews}, previewLis},
