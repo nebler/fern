@@ -35,8 +35,8 @@ a bind-mounted host folder.
 ## Design, in build order
 
 1. **Turn it on.** The daemon enables simple quotas at start when
-   `--env-disk-limit` is set (by ioctl, `BTRFS_IOC_QUOTA_CTL`: Ubuntu
-   24.04's btrfs-progs 6.6 has no `--simple`), and leaves the pool alone
+   `--env-disk-limit` is set (by ioctl, `BTRFS_IOC_QUOTA_CTL`, so that it
+   doesn't depend on the node's btrfs-progs having `--simple`), and leaves the pool alone
    otherwise. Existing data is never counted: a limit counts from then on.
    The kernel's quota tree holds the groups and limits: it is on the disk,
    so nothing else records them.
@@ -87,6 +87,11 @@ a bind-mounted host folder.
    one sysfs file per environment.
 
 ## Measure on the server before turning it on
+
+Read on the server on 2026-11-13, after this brief was written: Ubuntu
+26.04.1, kernel 7.0.0-38, btrfs-progs 6.17.1 with `--simple`. The kernel
+is past the upstream fix (6.17), so the group-destroy fault above should not
+occur there; item 1 below still checks it on a loop image.
 
 1. **The kernel:** `uname -r`, and whether its quota destroy works after a
    member is deleted (`lab/spike/squota/run.sh groups` there, by hand, on a
