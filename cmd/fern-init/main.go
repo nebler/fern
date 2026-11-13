@@ -52,7 +52,16 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err := os.Unsetenv("FERN_BOX_TOKEN"); err != nil {
 		return err
 	}
-	env := toolsEnv(dir, os.Environ())
+	// The box that runs the services puts the tools its workspace pins
+	// first on its PATH. Claude's box does not: that folder is the
+	// workspace's, which the other box writes, and a file named claude or
+	// git there would run here, where Claude's login is (found 2026-11-13).
+	// Nothing in Claude's box needs the repository's tools: its Bash runs
+	// in the other one.
+	env := os.Environ()
+	if os.Getenv("FERN_SERVICES") != "off" {
+		env = toolsEnv(dir, env)
+	}
 
 	services, guessed, err := loadServices(dir)
 	// Claude's box starts with a services.yaml that can't be read: Claude

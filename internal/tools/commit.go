@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -30,6 +31,7 @@ func (s *Server) addCommitTool(srv *mcp.Server, id string) {
 		Description: "Commits this thread's changes to its branch. `git commit` in Bash fails here, because the box has the " +
 			"repository's git folder read-only: use this instead. It stages the paths given, or every change if none " +
 			"(as `git add --all`, so .gitignore applies), and commits them with the message; git's hooks don't run. " +
+			"A folder with a git repository of its own (one made with git init or git clone, or a submodule) is left out. " +
 			"`git status` and `git diff` in Bash show what there is to commit. It doesn't push: the person pushes from T3.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in commitInput) (*mcp.CallToolResult, any, error) {
 		text, err := s.commit(ctx, id, in)
@@ -69,5 +71,10 @@ func (s *Server) commit(ctx context.Context, id string, in commitInput) (string,
 	if res.Files == 1 {
 		files = "file"
 	}
-	return fmt.Sprintf("Committed %d %s to %s as %s: %s\nNot pushed: the person pushes from T3.", res.Files, files, res.Branch, res.Hash, res.Subject), nil
+	text := fmt.Sprintf("Committed %d %s to %s as %s: %s\nNot pushed: the person pushes from T3.", res.Files, files, res.Branch, res.Hash, res.Subject)
+	if len(res.Skipped) > 0 {
+		text += "\nLeft out, because each holds a git repository of its own: " + strings.Join(res.Skipped, ", ") +
+			". To commit its files as part of this repository, remove its .git folder first."
+	}
+	return text, nil
 }

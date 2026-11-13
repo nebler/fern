@@ -1952,3 +1952,25 @@ folder and can't write it. Unit tests, the store's on btrfs, and the quick
 checks pass (the lab's timings were not looked at). On the VPS, by hand, with
 its thread working: SSH takes keys only, and 2 GB of swap; its disk is 85%
 full, 12 GB free.
+
+**A security review of the branch, 2026-11-13** (`/security-review`, the 65
+commits since `origin/main`), found two faults, both fixed that day:
+- **The commit tool ran a box's program on the node.** With plain git 2.50
+  in a throwaway folder: a repository made in a folder of the worktree, `git
+  add --all` (hooks, the file monitor and signing off), a filter set in that
+  folder's own config, `git add --all` again: the filter ran. So did `git
+  status`, `git diff HEAD`, `git commit` with nothing staged and `git commit
+  --only <the folder>`; `diff-files --ignore-submodules=all`, `ls-files
+  --others`, `update-index`, `write-tree`, `commit-tree` and `update-ref` did
+  not, and those are what the tool uses now. `diff.ignoreSubmodules=all` did
+  not help: a `.gitmodules` in the worktree undid it. `lab/check.sh commit`
+  makes such a repository from a box and commits twice through the tool: the
+  filter doesn't run and the index holds no submodule.
+- **A file named `claude` in the workspace's tools folder ran in Claude's
+  box**, where the login is: every box had that folder first on its PATH. In
+  the lab now, the PATH of Claude's box has no folder of the pool, and the
+  box with the services still has its tools.
+- **Open:** T3's own `git status` and `git diff` run the same way once a
+  worktree's index holds such a folder as a submodule (a repository with
+  submodules; a commit from T3's app). Architecture §13 has what would close
+  it.

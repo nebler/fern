@@ -1338,6 +1338,22 @@ commit() {
   check "the box sees the commit" "from the thread" "$(fern exec $ENV -- git log -1 --format=%s)"
   check "and a worktree with nothing left to commit" "" "$(fern exec $ENV -- git status --short)"
   check "which the tool says too" "Nothing to commit: the worktree has no changes." "$(mcp $ENV commit '{"message": "again"}')"
+  # A repository the box makes in a folder has a config of the box's own.
+  # Staged as a submodule, git add and git status on the node would start a
+  # git in it, which runs the filter that config names: the box's program,
+  # outside the box (found 2026-11-13). The tool commits around it, twice,
+  # runs nothing, and leaves no submodule in the index for T3's git to find.
+  fern exec $ENV -- sh -c 'git init -q vendor/x && cd vendor/x && echo f > f && git add f &&
+    git -c user.name=x -c user.email=x@x commit -qm theirs &&
+    git config filter.mark.clean "sh -c \"echo ran >> /var/lib/fern/worktrees/ck-commit/one/filter-ran; cat\"" &&
+    echo "* filter=mark" > .git/info/attributes && echo changed > f &&
+    cd ../.. && printf "[submodule \"vendor/x\"]\n\tpath = vendor/x\n\turl = ./vendor/x\n\tignore = none\n" > .gitmodules && echo more >> a.txt'
+  out=$(mcp $ENV commit '{"message": "around a nested repository"}')
+  fern exec $ENV -- sh -c 'echo again >> a.txt; echo changed again > vendor/x/f'
+  out="$out $(mcp $ENV commit '{"message": "and once more"}')"
+  check "a repository the box made in a folder is left out, and the tool says so" 2 "$(grep -o 'Left out, because each holds a git repository of its own: vendor/x/' <<<"$out" | wc -l | tr -d ' ')"
+  check "its filter didn't run on the node, and the index holds no submodule" "no 0" \
+    "$(succeeds in_daemon "test -e $W/filter-ran") $(in_daemon "cd $W && $as git ls-files --stage | grep -c ^160000" || true)"
 }
 
 # devserver starts Vite in the environment's box as Claude does, with MCP
@@ -1595,6 +1611,20 @@ t3() {
       "$(in_t3 "cd $W && claude -p hi 2>&1" 2>/dev/null | grep -o 'API Error: 401' | head -1)"
     on_node rm /etc/fern/claude.env </dev/null
     note "no Claude login stored yet: lab/claude-login.sh"
+  fi
+  # The box with the services writes the workspace, its tools' folder
+  # included, which that box has first on its PATH. Claude's box must not:
+  # a file named claude there would run where Claude's login is. Until
+  # 2026-11-13 it did.
+  if [ "${AGENTS:-0}" = 1 ]; then
+    in_t3 "cd $W && printf '[tools]\n' > mise.toml && mkdir -p .fern/tools/shims &&
+      printf '%s\n' '#!/bin/sh' 'echo planted' > .fern/tools/shims/claude && chmod +x .fern/tools/shims/claude"
+    fern sleep t3c >/dev/null
+    check "a claude the workspace plants among its tools doesn't run in Claude's box" "$CLAUDE" "$(in_t3 "cd $W && claude --version")"
+    check "no folder of the pool is on the PATH of Claude's box" 0 \
+      "$(in_t3 "cd $W && fern exec --here --agent -- sh -c 'echo \$PATH'" | tr ':' '\n' | grep -c '^/var/lib/fern' || true)"
+    in_t3 "cd $W && rm -rf mise.toml .fern/tools"
+    fern sleep t3c >/dev/null
   fi
   # A terminal in T3 (fern-terminals.patch, images/fern-shell): a shell in
   # the thread's box, never one in T3's service, which has every worktree

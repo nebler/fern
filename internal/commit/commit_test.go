@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -251,5 +252,124 @@ func TestCommitInALinkedWorktree(t *testing.T) {
 	}
 	if got := git("log", "-1", "--format=%s", "main"); got != "first" {
 		t.Errorf("main's last commit = %q, want it untouched", got)
+	}
+}
+
+// A folder of the worktree with a repository of its own is the box's to
+// make, config and all. Once git's index holds it as a submodule, git add,
+// git status and git commit with paths start a git in it, which runs the
+// filters its config names: the box's program, on the node. A .gitmodules
+// in the worktree undoes the settings that would stop that. So no commit
+// runs one, whichever way the folder came to be there, and none puts such a
+// folder into the index, where T3's git status would find it.
+func TestCommitNeverRunsANestedRepository(t *testing.T) {
+	// nest makes a repository in dir/name with one commit.
+	nest := func(t *testing.T, dir, name string, git func(args ...string) string) {
+		t.Helper()
+		sub := filepath.Join(dir, name)
+		write(t, dir, name+"/f.txt", "f\n")
+		git("init", "-q", "-b", "main", sub)
+		git("-C", sub, "add", ".")
+		git("-C", sub, "commit", "-qm", "theirs")
+	}
+	// arm gives the nested repository a filter that leaves a mark for every
+	// file git reads there, changes a file in it so that git has a reason
+	// to look, and asks through .gitmodules for
+	// submodules to be looked into whatever git's settings say.
+	arm := func(t *testing.T, dir, name, ran string, git func(args ...string) string) {
+		t.Helper()
+		sub := filepath.Join(dir, name)
+		git("-C", sub, "config", "filter.mark.clean", "sh -c 'echo ran >> "+ran+"; cat'")
+		git("-C", sub, "config", "core.fsmonitor", "sh -c 'echo ran >> "+ran+"'")
+		write(t, sub, ".git/info/attributes", "* filter=mark\n")
+		write(t, sub, "f.txt", "changed by the box\n")
+		write(t, dir, ".gitmodules", "[submodule \""+name+"\"]\n\tpath = "+name+"\n\turl = ./"+name+"\n\tignore = none\n")
+	}
+	tests := []struct {
+		name string
+		// setup makes the nested repository before the commits under test.
+		setup func(t *testing.T, dir, ran string, git func(args ...string) string)
+		paths [][]string // the paths of each commit, in order; nil is every change
+		// skipped is what the commits say they left out, between them.
+		skipped []string
+		// links is what the index holds as submodules afterwards.
+		links string
+	}{
+		{
+			name: "a repository the box made in a folder, committed twice",
+			setup: func(t *testing.T, dir, ran string, git func(args ...string) string) {
+				nest(t, dir, "vendor/x", git)
+				arm(t, dir, "vendor/x", ran, git)
+			},
+			paths:   [][]string{nil, nil, {"vendor"}, {"."}},
+			skipped: []string{"vendor/x/"},
+		},
+		{
+			name: "a submodule the repository has, whose folder the box filled",
+			setup: func(t *testing.T, dir, ran string, git func(args ...string) string) {
+				nest(t, dir, "sub", git)
+				// As the repository's own history has it, before the box.
+				git("add", "sub")
+				git("commit", "-qm", "a submodule")
+				arm(t, dir, "sub", ran, git)
+			},
+			paths: [][]string{nil, {"sub"}, {"."}, nil},
+			links: "sub",
+		},
+		{
+			name: "a tracked file the box replaced with a repository",
+			setup: func(t *testing.T, dir, ran string, git func(args ...string) string) {
+				if err := os.Remove(filepath.Join(dir, "b.txt")); err != nil {
+					t.Fatal(err)
+				}
+				nest(t, dir, "b.txt", git)
+				arm(t, dir, "b.txt", ran, git)
+			},
+			paths:   [][]string{nil, {"b.txt"}, nil},
+			skipped: []string{"b.txt/"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, home, git := repo(t)
+			ran := filepath.Join(t.TempDir(), "ran")
+			tt.setup(t, dir, ran, git)
+			var skipped []string
+			for i, paths := range tt.paths {
+				// Something of the worktree's own to commit each time.
+				write(t, dir, "a.txt", strings.Repeat("more\n", i+1))
+				req := commit.Request{Dir: dir, GitDir: filepath.Join(dir, ".git"), Message: "next", Paths: paths}
+				res, err := commit.Committer{Git: "git", Home: home}.Commit(t.Context(), req)
+				if err != nil && !errors.Is(err, commit.ErrNothing) {
+					t.Fatalf("Commit() %d with paths %v error: %v", i, paths, err)
+				}
+				for _, name := range res.Skipped {
+					if !slices.Contains(skipped, name) {
+						skipped = append(skipped, name)
+					}
+				}
+				if data, err := os.ReadFile(ran); err == nil {
+					t.Fatalf("after commit %d with paths %v, the nested repository's program had run: %q", i, paths, data)
+				}
+			}
+			if diff := cmp.Diff(tt.skipped, skipped); diff != "" {
+				t.Errorf("what the commits left out mismatch (-want +got):\n%s", diff)
+			}
+			var links []string
+			for _, line := range strings.Split(git("ls-files", "--stage"), "\n") {
+				if meta, path, ok := strings.Cut(line, "\t"); ok && strings.HasPrefix(meta, "160000 ") {
+					links = append(links, path)
+				}
+			}
+			if got := strings.Join(links, " "); got != tt.links {
+				t.Errorf("the index holds the submodules %q, want %q", got, tt.links)
+			}
+			if got := git("show", "--format=", "--name-only", "HEAD"); strings.Contains(got, "f.txt") {
+				t.Errorf("the last commit holds the nested repository's file: %q", got)
+			}
+			if got := git("log", "--format=%s", "-1"); got != "next" {
+				t.Errorf("the last commit is %q, want one of these", got)
+			}
+		})
 	}
 }
