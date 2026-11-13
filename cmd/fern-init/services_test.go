@@ -173,7 +173,22 @@ func TestSupervisorStopDoesNotRestart(t *testing.T) {
 // Without a stop command, stop sends SIGTERM to the service's process group,
 // which ends it long before the SIGKILL that would follow.
 func TestSupervisorStopTerminates(t *testing.T) {
-	s, _ := newService(t, service{Run: "sleep 600 & wait"})
+	// The service is the sleep itself (exec): a child it put in the
+	// background would, once the shell died of the SIGTERM, be an orphan
+	// that nothing reaps in a test, and a zombie counts as a member of the
+	// group, which the supervisor waits to empty until its SIGKILL, 3 s on.
+	// In a box tini is PID 1 and reaps it at once. Whether the test met that
+	// depended on whether the shell had forked yet (CI, 2026-11-13).
+	s, dir := newService(t, service{Run: "echo up > up; exec sleep 600"})
+	// Once it runs. Real processes, so no bubble: the wait is for the file.
+	for deadline := time.Now().Add(10 * time.Second); ; <-time.After(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "up")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the service didn't start")
+		}
+	}
 	start := time.Now()
 	s.stop(t.Context())
 	if took := time.Since(start); took >= killDelay {
