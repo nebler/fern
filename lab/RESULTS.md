@@ -1918,3 +1918,15 @@ gate has not run. The lab's timings
 that day mean nothing: the Mac's load average was between 30 and 90, and
 `devserver` failed once because installing Node took longer than the 90 s a
 wake gives it.
+
+**T3's terminals, 2026-11-13.** A review of T3's side found that the terminal
+pane starts a shell in T3's own service: outside every box, as the user that
+owns every worktree, with the server's logins in its environment. Fern's T3
+now starts none (`images/t3/fern-terminals.patch`, the ninth patch). In the
+lab, `terminal.open` from inside the node, as the pane calls it, answers
+status `error`, no process, and the event the pane prints: "Terminals are off
+on this Fern server: a shell here would run in T3's server, outside the
+thread's box. Ask the agent to run the command; its Bash runs in the box."
+T3's service holds one process before and after. `lab/check.sh t3` has both
+checks. Not on the VPS yet: its T3 waits for its thread to be idle. Not
+built: a terminal in the thread's box.

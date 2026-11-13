@@ -174,17 +174,21 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 # fern-golden.patch, a project's golden snapshot built when it is added;
 # fern-opencode.patch, an OpenCode server per worktree, started in it;
 # fern-newthread.patch, New worktree as a new project's own default, which
-# T3 doesn't overrule for the first thread of a project in its projects folder.
+# T3 doesn't overrule for the first thread of a project in its projects folder;
+# fern-terminals.patch, no terminals: their shells would run in T3's server,
+# outside the thread's box, and so would the project scripts typed into them.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
 RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch \
-    /tmp/fern-prewake.patch /tmp/fern-golden.patch /tmp/fern-opencode.patch /tmp/fern-newthread.patch
+    /tmp/fern-prewake.patch /tmp/fern-golden.patch /tmp/fern-opencode.patch /tmp/fern-newthread.patch \
+    /tmp/fern-terminals.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server
 RUN git config --global user.email build@fern && git config --global user.name build \
  && pnpm exec vp test run src/checkpointing/FernCheckpointStore.test.ts src/checkpointing/CheckpointStore.test.ts \
       src/orchestration-v2/CheckpointRollbackService.test.ts src/project/ProjectService.test.ts \
+ && pnpm exec vp test run src/terminal/Manager.test.ts -t "on a Fern server" \
  && pnpm run build:bundle
 
 # The packages the bundle loads at run time: the server's production

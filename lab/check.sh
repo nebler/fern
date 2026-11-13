@@ -1472,6 +1472,17 @@ t3() {
   check "claude outside a workspace is the local one" "$CLAUDE" "$(in_t3 'cd / && claude --version')"
   check "T3 releases idle provider sessions after 5 minutes (fern-sessions.patch)" 1 \
     "$(in_t3 'grep -l T3CODE_PROVIDER_IDLE_TIMEOUT_MS /opt/t3/apps/server/dist/*.mjs | wc -l' || true)"
+  # A terminal's shell would run in T3's service, outside any box. The pane's
+  # own call, from inside the node: a VPS's T3 has no port the Mac reaches
+  # without a tunnel.
+  local pair
+  pair=$(in_t3 "node /opt/t3/apps/server/dist/bin.mjs pair --ttl 2m --label 'fern check'" </dev/null |
+    sed -nE 's#^Pairing URL: http://[^/]+/#http://127.0.0.1:30773/#p')
+  check "T3 starts no terminal on the server, and says why (fern-terminals.patch)" \
+    "error pid=null Terminals are off on this Fern server" \
+    "$(in_t3 "T3_PAIR_URL='$pair' T3_CWD=/var/lib/fern/projects node --input-type=module -" <lab/t3-terminal.mjs 2>&1 | cut -c1-52)"
+  check "no shell runs in T3's service" 0 \
+    "$(on_node sh -c 'for p in $(cat /sys/fs/cgroup/system.slice/fern-t3.service/cgroup.procs); do cat /proc/$p/comm; done' </dev/null | grep -cxE 'sh|bash|zsh' || true)"
   # What the checkpoint hook (images/t3/fern-checkpoints.patch) does with a
   # worktree T3 made: adopt it at the first checkpoint, then snapshot,
   # replace and restore.
