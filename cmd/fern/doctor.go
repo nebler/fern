@@ -25,22 +25,28 @@ import (
 // address.
 type node struct {
 	etc, pool, proc, bin string // /etc/fern, /var/lib/fern, /proc, /usr/local/bin
+	sys                  string // /sys, where the kernel names a loop device's file and size
 	poolImage            string // the pool's sparse file's folder, /var/lib/fern-img
 	cgroup               string // the cgroup that holds a cgroup per box that is up, /sys/fs/cgroup/fern
 	bundles              string // the bundles of the boxes that may run, /run/fern/boxes
 	t3                   string // T3's server, http://127.0.0.1:30773
 	git                  string // the node's git, which makes Claude's commits
 	btrfs                string // btrfs-progs' btrfs
+	losetup              string // util-linux's losetup, for fern pool grow
 	journalctl           string // systemd's journalctl, for fern logs
 	github, cloudflare   string // GitHub's and Cloudflare's APIs
+	// room returns the size and the free space of the filesystem that holds
+	// a path, for fern pool grow.
+	room func(path string) (total, free uint64, err error)
 }
 
 // thisNode returns the node doctor runs on.
 func thisNode() node {
 	return node{
-		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
+		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", sys: "/sys", bin: "/usr/local/bin",
 		cgroup: "/sys/fs/cgroup/fern", bundles: "/run/fern/boxes",
-		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", journalctl: "journalctl", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
+		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", losetup: "losetup", journalctl: "journalctl",
+		github: github.API, cloudflare: "https://api.cloudflare.com/client/v4", room: statfsRoom,
 	}
 }
 
@@ -250,7 +256,7 @@ func (n node) checkPool() finding {
 	free := fs.Bavail * uint64(max(fs.Bsize, 0))
 	return finding{
 		name: "pool", ok: free >= minFree, detail: fmt.Sprintf("btrfs, %.1f GB free", float64(free)/1e9),
-		fix: "delete threads you no longer need in T3, or grow the pool (btrfs filesystem resize)",
+		fix: "delete threads you no longer need in T3, or grow the pool: `fern pool grow +10G`, if the server's disk has the room (`fern df`)",
 	}
 }
 
@@ -291,8 +297,7 @@ func (n node) checkRecords(ctx context.Context) (finding, bool) {
 	f := finding{
 		name: "pool records", ok: unallocated >= 1<<30 || left >= recordsLeast,
 		detail: fmt.Sprintf("btrfs has %d MiB left for its records, and %d MiB it could add", left>>20, unallocated>>20),
-		fix: "the pool can fail writes with free space showing: grow it (truncate -s +10G the pool's file, losetup -c its loop device, " +
-			"btrfs filesystem resize max " + n.pool + "), or delete threads that are done",
+		fix:    "the pool can fail writes with free space showing: grow it (`fern pool grow +10G`), or delete threads that are done",
 	}
 	return f, true
 }

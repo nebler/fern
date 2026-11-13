@@ -51,6 +51,16 @@ func TestParse(t *testing.T) {
 			want: command{name: "ls"},
 		},
 		{
+			name: "pool grow",
+			args: []string{"pool", "grow", "+10G"},
+			want: command{name: "pool", args: []string{"grow", "+10G"}},
+		},
+		{
+			name:    "pool grow without a size",
+			args:    []string{"pool", "grow"},
+			wantErr: true,
+		},
+		{
 			name: "which",
 			args: []string{"which", "/var/lib/fern/worktrees/r/b/src"},
 			want: command{name: "which", args: []string{"/var/lib/fern/worktrees/r/b/src"}},

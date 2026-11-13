@@ -42,6 +42,9 @@
 //	                                         holds it awake; the pool's room; what is wrong
 //	fern df                                  what uses the node's disk, and how much of
 //	                                         it nothing needs
+//	fern pool grow <size>                    make the pool larger, to 70G or by +10G, as
+//	                                         root on the node, with boxes running: its
+//	                                         file, its loop device, then btrfs
 //	fern gc                                  remove what nothing needs: old images, what
 //	                                         image builds left, snapshots past retention
 package main
@@ -176,6 +179,7 @@ func subcommands() []subcommand {
 		}},
 		{name: "top", run: top},
 		{name: "df", run: diskUsage},
+		{name: "pool", min: 2, max: 2, run: poolCommand},
 		{name: "gc", run: collect},
 		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {
 			return 0, cl.Backup(ctx)
