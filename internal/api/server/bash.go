@@ -373,7 +373,7 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 		s.calls.Store(key, c)
 		defer s.calls.CompareAndDelete(key, c)
 	}
-	conn, ex, err := s.dialBox(ctx, id, cancel, s.envs.Exec)
+	conn, ex, err := s.dialBox(ctx, id, cancel)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", 0, fmt.Errorf("no environment %s", id)

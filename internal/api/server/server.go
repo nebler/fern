@@ -109,9 +109,6 @@ func (s *Server) stopping() bool {
 	}
 }
 
-// opener counts a command in a box, waking it: actor.Group's Exec or Job.
-type opener func(ctx context.Context, id string, cancel context.CancelFunc) (*actor.Exec, error)
-
 // New returns a Server that reads from st and drv, changes environments
 // through envs and records every request with tr. With agentMCP, where agent
 // boxes reach MCPHandler, Claude runs in each environment's agent box.
@@ -338,7 +335,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if agent {
 		id = store.AgentBox(id)
 	}
-	box, ex, err := s.dialBox(spanCtx, id, cancel, s.envs.Exec)
+	box, ex, err := s.dialBox(spanCtx, id, cancel)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
@@ -592,13 +589,13 @@ func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) (url, token string)
 }
 
 // dialBox connects to environment id's box, waking it if needed, for a
-// command open counts. A box seen earlier may be gone (a crash, a box stopped
-// by hand): then it is woken once more.
-func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFunc, open opener) (*websocket.Conn, *actor.Exec, error) {
+// command its actor counts. A box seen earlier may be gone (a crash, a box
+// stopped by hand): then it is woken once more.
+func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFunc) (*websocket.Conn, *actor.Exec, error) {
 	var err error
 	for try := range 2 {
 		var ex *actor.Exec
-		if ex, err = open(ctx, id, cancel); err != nil {
+		if ex, err = s.envs.Exec(ctx, id, cancel); err != nil {
 			return nil, nil, err
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
