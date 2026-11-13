@@ -1,4 +1,4 @@
-# Only the Go sources, the wrappers (fern-claude, fern-opencode, box-opencode, fern-gh), T3's patches and settings
+# Only the Go sources, the wrappers (fern-claude, fern-opencode, box-opencode, fern-gh, fern-shell), T3's patches and settings
 # script, Fern's skills for Claude, the lab node's entrypoint, and what install.sh takes from the fern
 # image (the systemd units and the sample project) go into image builds.
 *
@@ -10,6 +10,7 @@
 !images/fern-opencode
 !images/box-opencode
 !images/fern-gh
+!images/fern-shell
 !images/t3
 !images/t3-settings.js
 !images/skills

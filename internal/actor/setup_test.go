@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -234,4 +235,94 @@ func TestGoldenBuildNotRepeatedAtOnce(t *testing.T) {
 			}
 		}
 	})
+}
+
+// What has gone wrong on the node reaches the thread: the box with Claude
+// is woken with a notice for a failed build of the checkout it has, and
+// for a pool that takes no more snapshots. A failed build of other files,
+// such as an older lockfile, is not this thread's.
+func TestNoticesAtClaudesWake(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(t *testing.T, worktree string, st *fakeStore) // after the build has failed
+		want   []string                                           // a part of each notice, in order
+	}{
+		{
+			name: "the build of this checkout failed",
+			want: []string{"build of this repository's starting point failed"},
+		},
+		{
+			name: "the checkout has changed since",
+			change: func(t *testing.T, worktree string, _ *fakeStore) {
+				if err := os.WriteFile(filepath.Join(worktree, "pnpm-lock.yaml"), []byte("newer\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "the pool is full too",
+			change: func(_ *testing.T, _ string, st *fakeStore) {
+				st.mu.Lock()
+				defer st.mu.Unlock()
+				st.space = store.Space{Pool: store.Volume{Total: 100 << 30, Free: 1 << 30}, Least: 5 << 30}
+			},
+			want: []string{"takes no new snapshots", "build of this repository's starting point failed"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				worktree := filepath.Join(t.TempDir(), "worktrees", "sample", "one")
+				for _, f := range []string{"services.yaml", ".fern/setup"} {
+					path := filepath.Join(worktree, f)
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("services: {pg: {run: ./pg.sh}}\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				cfg := actor.Config{
+					Idle: idle, Image: "box",
+					RunSetup: func(_ context.Context, _, _ string, _ []string, out io.Writer) (int, error) {
+						_, _ = io.WriteString(out, "pnpm: not found")
+						return 127, nil
+					},
+				}
+				g := actor.New(st, drv, cfg, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan struct{})
+				go func() { _ = g.Run(ctx); close(done) }()
+				defer func() { cancel(); <-done }()
+
+				if err := g.Create(t.Context(), "one", store.CreateOptions{Workspace: worktree}); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Wait()
+				failure, ok, _ := st.BuildFailure(t.Context(), setup.ID("sample"))
+				if !ok || !strings.Contains(failure.Error, "pnpm: not found") {
+					t.Fatalf("the builder's recorded failure = %+v, %t; want the script's output in it", failure, ok)
+				}
+				if tt.change != nil {
+					tt.change(t, worktree, st)
+				}
+				if err := g.Wake(t.Context(), "one"); err != nil {
+					t.Fatal(err)
+				}
+				got := drv.Woken("one").Notices
+				if len(got) != len(tt.want) {
+					t.Fatalf("notices = %q, want %d of them", got, len(tt.want))
+				}
+				for i, part := range tt.want {
+					if !strings.Contains(got[i], part) {
+						t.Errorf("notice %d = %q, want %q in it", i, got[i], part)
+					}
+				}
+				if len(tt.want) > 0 && !strings.Contains(got[len(got)-1], "pnpm: not found") {
+					t.Errorf("the build's notice = %q, want the script's output in it", got[len(got)-1])
+				}
+			})
+		})
+	}
 }

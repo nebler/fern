@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -39,6 +40,9 @@ type hint struct {
 	unreadable string
 	// notes are the active skill packs' notes (packNotes).
 	notes []string
+	// notices are what the daemon says has gone wrong on the server, for
+	// Claude to pass on (FERN_NOTICES, a JSON list of sentences).
+	notices []string
 }
 
 // briefClaude writes Claude's hint into claudeDir and gives it the active
@@ -55,6 +59,9 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	asked, err := setup.AskedLimits(dir)
 	errs = append(errs, err)
 	h.short = shortOf(asked, os.Getenv("FERN_BOX_LIMITS"))
+	if v := os.Getenv("FERN_NOTICES"); v != "" {
+		errs = append(errs, json.Unmarshal([]byte(v), &h.notices))
+	}
 	toolsKey, err := setup.ToolsKey(dir)
 	errs = append(errs, err)
 	h.tools = toolsKey != ""
@@ -109,6 +116,13 @@ func writeHint(claudeDir string, h hint) error {
 	fmt.Fprintln(&b, hintMark)
 	fmt.Fprintln(&b, "# You are in a Fern environment")
 	fmt.Fprintln(&b)
+	if len(h.notices) > 0 {
+		fmt.Fprintln(&b, "**Something is wrong on this server. Tell the person at the start of your next answer, briefly and in your own words, even if they asked about something else: nothing else shows it to them. Once is enough: not again if this conversation already has you saying it.**")
+		for _, n := range h.notices {
+			fmt.Fprintf(&b, "- %s\n", strings.Join(strings.Fields(n), " "))
+		}
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintln(&b, "- This thread's worktree is its own environment, in a sandboxed box. Other threads have their own copies; nothing you change here reaches them or the main branch's data.")
 	if h.unreadable != "" {
 		fmt.Fprintf(&b, "- **services.yaml can't be read, so the box that runs your Bash commands doesn't start: every Bash call fails until the file is right.** The fault: %s. Mend it with Read and Edit, which work without that box; the next Bash call starts the box with the file as it is then.\n", h.unreadable)

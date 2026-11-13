@@ -1,0 +1,41 @@
+#!/bin/sh
+# fern-shell is what a terminal in T3 runs on Fern's server, and the only
+# thing (images/t3/fern-terminals.patch): a shell in the box of the thread
+# whose folder the terminal is opened in. A shell of T3's own would run in
+# its service, outside every box: as the user that owns every worktree, with
+# the server's logins in its environment. Until 2026-11-13 that is what the
+# terminal pane gave anyone paired with the server.
+#
+# The shell runs in the box with the services, where Claude's Bash runs: the
+# thread's files, tools and database, and no login. Nothing of T3's
+# environment is passed on but the terminal's kind.
+#
+# An open terminal is an open command, which keeps its box awake (the idle
+# rule, architecture §6.3). So the shell ends itself after
+# $FERN_TERMINAL_IDLE seconds (1200, as the idle rule's human clock) at a
+# prompt with nothing typed; a command that runs keeps it, and the box, for
+# as long as it runs. The pane then starts a new one.
+set -eu
+pool=${FERN_POOL:-/var/lib/fern}
+case "$PWD/" in
+"$pool"/worktrees/*/?*)
+	# A worktree becomes an environment at its thread's first checkpoint
+	# (T3's hook, fern-checkpoints.patch), and a terminal can be opened
+	# before it. So it is made here, the same one, as fern-opencode does;
+	# making one that exists does nothing. It swaps the worktree's
+	# directory, which this shell must not be holding.
+	dir=$PWD
+	rest=${dir#"$pool"/worktrees/}
+	repo=${rest%%/*}
+	rest=${rest#*/}
+	workspace=$pool/worktrees/$repo/${rest%%/*}
+	cd /
+	fern create --path "$workspace" "t3-$(printf %s "$workspace" | sha256sum | cut -c1-16)" >/dev/null
+	cd "$dir"
+	export TMOUT="${FERN_TERMINAL_IDLE:-1200}"
+	exec fern exec -it --here -e TERM -e COLORTERM -e TMOUT -- /bin/bash
+	;;
+esac
+echo "No terminal here: this folder has no Fern box, and a shell would run on the server itself, in T3's own service."
+echo "Open the terminal in a thread that works in a New worktree, or ask the agent to run the command."
+exit 1

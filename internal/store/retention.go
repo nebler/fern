@@ -87,6 +87,12 @@ func (s *Store) checkFree() error {
 	if err != nil {
 		return err
 	}
+	return sp.Full()
+}
+
+// Full returns an ErrPoolFull that says which of the two has run out, the
+// pool or the disk under it, or nil while both have Least free.
+func (sp Space) Full() error {
 	if sp.Pool.Free < sp.Least {
 		return fmt.Errorf("%w: %.1f of %.1f GiB free; delete threads or environments you don't need",
 			ErrPoolFull, gib(sp.Pool.Free), gib(sp.Pool.Total))

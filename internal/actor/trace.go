@@ -121,3 +121,16 @@ func (t tracedStore) Sources(ctx context.Context, name string) ([]store.Snapshot
 	span.End(sp, err)
 	return refs, err
 }
+
+// A failed build's record and the pool's room are a file and two statfs
+// calls, on a wake's path: they get no span of their own.
+
+func (t tracedStore) SetBuildFailure(ctx context.Context, id string, f *store.BuildFailure) error {
+	return t.st.SetBuildFailure(ctx, id, f)
+}
+
+func (t tracedStore) BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error) {
+	return t.st.BuildFailure(ctx, id)
+}
+
+func (t tracedStore) Space() (store.Space, error) { return t.st.Space() }

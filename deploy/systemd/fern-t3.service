@@ -21,7 +21,25 @@ BindReadOnlyPaths=/etc/resolv.conf /etc/hosts
 # The image's root is read-only for it; T3 writes only to the pool.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/fern /run/fern
+# But not all of the pool: the environments' records, snapshots and Claude
+# folders, the images and the boxes' own files are the daemon's, and T3
+# asks it for what it needs of them (the socket). T3 runs as the user that
+# owns the Claude folders, and a line planted in one would run in that
+# thread's agent box, with its login. It still reads them. The + reads the
+# path inside the service's root, where the pool is bound: without it the
+# line names the node's own path, and changes nothing T3 sees.
+ReadOnlyPaths=-+/var/lib/fern/envs -+/var/lib/fern/images -+/var/lib/fern/boxes
 PrivateTmp=yes
+# It starts nothing with more rights than it has, and has no use for the
+# kernel's settings.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
 WorkingDirectory=/opt/t3
 # T3's home is the pool, so its worktrees (<home>/worktrees) are where Fern
 # expects workspaces; FERN_POOL is the checkpoint hook's. The user's home is

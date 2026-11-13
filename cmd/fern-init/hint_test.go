@@ -45,6 +45,16 @@ func TestWriteHint(t *testing.T) {
 	if got := read(); !strings.Contains(got, `The fault: services.yaml: unknown field "servces".`) || !strings.Contains(got, "every Bash call fails") {
 		t.Errorf("hint for a services.yaml that can't be read = %q, want the fault and what it means", got)
 	}
+	if got := read(); strings.Contains(got, "Something is wrong on this server") {
+		t.Errorf("hint with no notices = %q, want nothing on the server's faults", got)
+	}
+	if err := writeHint(dir, hint{notices: []string{"The build failed:\n  pnpm: not found", "No new snapshots."}}); err != nil {
+		t.Fatalf("writeHint() with notices error: %v", err)
+	}
+	if got := read(); !strings.Contains(got, "Tell the person") || !strings.Contains(got, "- The build failed: pnpm: not found\n- No new snapshots.\n") ||
+		strings.Index(got, "Something is wrong") > strings.Index(got, "commit") {
+		t.Errorf("hint with notices = %q, want each on a line of its own, before the rest, with the word to pass them on", got)
+	}
 	if err := writeHint(dir, hint{tools: true}); err != nil {
 		t.Fatalf("writeHint() with tools error: %v", err)
 	}

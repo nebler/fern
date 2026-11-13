@@ -45,6 +45,9 @@ type Store interface {
 	BuildSource(ctx context.Context, id string, src store.SnapshotRef) error
 	StripSource(ctx context.Context, id string) error
 	Sources(ctx context.Context, name string) ([]store.SnapshotRef, error)
+	SetBuildFailure(ctx context.Context, id string, f *store.BuildFailure) error
+	BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error)
+	Space() (store.Space, error)
 }
 
 // Driver runs boxes.
@@ -143,16 +146,14 @@ type Group struct {
 	// change: how long a change waited for its actor.
 	wakes, stops, restores, snapshots, queue, goldenBuilds *prometheus.HistogramVec
 	idleSleeps                                             prometheus.Counter
+	boxFailures                                            prometheus.Counter     // wakes that failed, and boxes that died under a command
 	goldens                                                *prometheus.CounterVec // new worktrees, by golden hit, miss or none
 	prewakeResults                                         *prometheus.CounterVec // pre-wakes, by what came of them
 
-	find   chan findRequest // to Run, for an environment's actor
-	builds chan string      // to Run's builder, the environments whose golden source to build
-	// failedBuilds are the builders whose last golden build failed. Only the
-	// goroutine that makes the builds (buildGoldens) touches it.
-	failedBuilds map[string]failedBuild
-	prewakes     chan string   // to Run's prewakers, environments to wake ahead
-	stopped      chan struct{} // closed when Run returns
+	find     chan findRequest // to Run, for an environment's actor
+	builds   chan string      // to Run's builder, the environments whose golden source to build
+	prewakes chan string      // to Run's prewakers, environments to wake ahead
+	stopped  chan struct{}    // closed when Run returns
 }
 
 type findRequest struct {
@@ -187,14 +188,16 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 		idleSleeps: metrics.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
+		boxFailures: metrics.NewCounter(prometheus.CounterOpts{
+			Name: "fern_box_failures_total", Help: "Wakes that failed, and boxes that stopped answering under a command, as one does that ran out of memory.",
+		}),
 		prewakeResults: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fern_prewakes_total",
 			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
 				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
 		}, []string{"result"}),
 		find: make(chan findRequest), builds: make(chan string, buildQueue), prewakes: make(chan string, prewakeQueue),
-		failedBuilds: make(map[string]failedBuild),
-		stopped:      make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 }
 
@@ -509,17 +512,22 @@ func (a *actor) wake(ctx context.Context) error {
 	if a.setup && box.Kind == runsc.Builder {
 		box.Kind = runsc.Setup
 	}
+	if box.Env.Claude != "" {
+		box.Notices = a.g.notices(ctx, env)
+	}
 	addr, err := a.g.driver.Wake(ctx, box)
 	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
 		a.crashes, a.crashCause = append(a.crashes, time.Now()), err.Error()
+		a.g.boxFailures.Inc()
 		return err
 	}
 	// The driver made the token at the box's start, or kept it since.
 	token, err := a.g.driver.Token(a.id)
 	if err != nil {
 		a.crashes, a.crashCause = append(a.crashes, time.Now()), err.Error()
+		a.g.boxFailures.Inc()
 		return fmt.Errorf("the token of %s: %w", a.id, err)
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))

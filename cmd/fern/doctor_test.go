@@ -89,6 +89,55 @@ func TestDoctor(t *testing.T) {
 	}
 }
 
+// doctor lists what the daemon knows has gone wrong, each with what to do,
+// and doesn't call backups that fail set up and well.
+func TestDoctorProblems(t *testing.T) {
+	d := newFakeDaemon(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backup.env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := node{etc: root, pool: root, poolImage: root, proc: root, bin: root, t3: "http://127.0.0.1:1", git: "false", btrfs: "false"}
+	for _, tt := range []struct {
+		name     string
+		problems []api.Problem
+		want     map[string]string // the findings about backups and builds
+	}{
+		{name: "nothing wrong", want: map[string]string{"backups": "ok"}},
+		{
+			name: "a failed build and failing backups",
+			problems: []api.Problem{
+				{Name: "backups", Detail: "the last backup failed: no route to host", Fix: "fern backup"},
+				{Name: "golden build", Detail: "golden-app-1234: .fern/setup exited with code 1", Fix: "mend the script"},
+			},
+			want: map[string]string{"backups": "fail: the last backup failed: no route to host", "golden build": "fail: golden-app-1234: .fern/setup exited with code 1"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d.mu.Lock()
+			d.problems = tt.problems
+			d.mu.Unlock()
+			got := make(map[string]string)
+			for _, f := range n.check(t.Context(), api.NewClient(d.socket)) {
+				if f.name != "backups" && f.name != "golden build" {
+					continue
+				}
+				switch {
+				case f.ok:
+					got[f.name] = "ok"
+				case f.fix == "":
+					t.Errorf("%s fails with no fix: %s", f.name, f.detail)
+				default:
+					got[f.name] = "fail: " + f.detail
+				}
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("findings (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // doctor says which permissions an account hasn't given the GitHub App, and
 // is content when each has given all Fern uses.
 func TestDoctorGitHub(t *testing.T) {

@@ -49,6 +49,8 @@ type fakeStore struct {
 	seeds   string                       // where a seeded environment's workspace is unpacked: seeds/<id>
 	forked  map[string]store.SnapshotRef // forks, by what they were forked from
 	sources []store.SnapshotRef          // what Sources returns: golden builds a last daemon left
+	failed  map[string]store.BuildFailure
+	space   store.Space // what Space returns: the zero value has room
 }
 
 func newFakeStore() *fakeStore {
@@ -163,6 +165,33 @@ func (f *fakeStore) StripSource(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.built = append(f.built, "strip "+id)
 	return nil
+}
+
+func (f *fakeStore) SetBuildFailure(_ context.Context, id string, failure *store.BuildFailure) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if failure == nil {
+		delete(f.failed, id)
+		return nil
+	}
+	if f.failed == nil {
+		f.failed = make(map[string]store.BuildFailure)
+	}
+	f.failed[id] = *failure
+	return nil
+}
+
+func (f *fakeStore) BuildFailure(_ context.Context, id string) (store.BuildFailure, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	failure, ok := f.failed[id]
+	return failure, ok, nil
+}
+
+func (f *fakeStore) Space() (store.Space, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.space, nil
 }
 
 func (f *fakeStore) Orphans(context.Context) ([]string, error) {
@@ -748,9 +777,17 @@ func TestMetrics(t *testing.T) {
 		if err := g.Restore(ctx, "demo", "missing"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("Restore(demo, missing) error = %v, want %v", err, store.ErrNotFound)
 		}
+		// A wake that fails is a box failure.
+		drv.FailWakes("demo", errors.New("out of memory"))
+		if err := g.Wake(ctx, "demo"); err == nil {
+			t.Fatal("Wake(demo) with a driver that fails worked")
+		}
 		got := counts(t, reg)
 		want := map[string]uint64{
 			"fern_wake_seconds{result=ok}":     1,
+			"fern_wake_seconds{result=error}":  1,
+			"fern_queue_seconds{change=wake}":  1,
+			"fern_box_failures_total":          1,
 			"fern_snapshot_seconds{result=ok}": 1,
 			// The idle sleep's stop and the restore's.
 			"fern_stop_seconds{result=ok}":          2,

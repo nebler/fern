@@ -27,6 +27,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -42,6 +43,7 @@ import (
 	"github.com/nebler/fern/internal/commit"
 	"github.com/nebler/fern/internal/disk"
 	"github.com/nebler/fern/internal/github"
+	"github.com/nebler/fern/internal/health"
 	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
@@ -319,6 +321,18 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		answer(w, freed, err)
 	})
 
+	// fern doctor: what is wrong now that would otherwise be a line in this
+	// daemon's log. The same list is a metric, with the pool's room.
+	checker := health.Checker{Store: st, Pool: pool}
+	if backer != nil {
+		checker.BackupEvery = *backupEvery
+	}
+	api.HandleFunc("GET /problems", func(w http.ResponseWriter, r *http.Request) {
+		problems, err := checker.Problems(r.Context())
+		answer(w, problems, err)
+	})
+	registerGauges(ctx, reg, checker, st, drv)
+
 	previews := preview.New(*previewHost, st, envs, log)
 	g, ctx := errgroup.WithContext(ctx)
 	apiSrv.Stopping = ctx.Done()
@@ -378,6 +392,49 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return errors.Join(errs...)
 	})
 	return g.Wait()
+}
+
+// registerGauges adds to reg what is read when the metrics are, not counted
+// as it happens: the node's problems, its environments, the boxes that are
+// up and the room the pool and the disk under it have. A value that can't
+// be read is -1. Listing the boxes runs runsc, once per read.
+func registerGauges(ctx context.Context, reg prometheus.Registerer, checker health.Checker, st *store.Store, drv *runsc.Driver) {
+	gauge := func(name, help string, read func() (float64, error)) {
+		promauto.With(reg).NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 {
+			v, err := read()
+			if err != nil {
+				return -1
+			}
+			return v
+		})
+	}
+	gauge("fern_problems", "What is wrong on the node now (fern doctor lists them): failed golden builds, failing backups, a full pool.", func() (float64, error) {
+		p, err := checker.Problems(ctx)
+		return float64(len(p)), err
+	})
+	gauge("fern_environments", "Environments in the pool, golden builders included.", func() (float64, error) {
+		envs, err := st.List(ctx)
+		return float64(len(envs)), err
+	})
+	gauge("fern_boxes_up", "Boxes that are running or starting, agent boxes included.", func() (float64, error) {
+		states, err := drv.States(ctx)
+		return float64(len(states)), err
+	})
+	space := func(pick func(store.Space) float64) func() (float64, error) {
+		return func() (float64, error) {
+			sp, err := st.Space()
+			return pick(sp), err
+		}
+	}
+	gauge("fern_pool_bytes", "The pool's size.", space(func(sp store.Space) float64 { return float64(sp.Pool.Total) }))
+	gauge("fern_pool_free_bytes", "The pool's free space.", space(func(sp store.Space) float64 { return float64(sp.Pool.Free) }))
+	gauge("fern_pool_least_free_bytes", "The free space below which new snapshots and environments are refused.", space(func(sp store.Space) float64 { return float64(sp.Least) }))
+	gauge("fern_disk_free_bytes", "The free space of the disk a pool that is a file is on; -1 for a pool on a partition of its own.", space(func(sp store.Space) float64 {
+		if sp.Under == nil {
+			return -1
+		}
+		return float64(sp.Under.Free)
+	}))
 }
 
 // metricsHandler serves reg's metrics at /metrics and Go's profiles at

@@ -33,28 +33,41 @@ index dfa850b2..e6dc2781 100644
      // A thread settles again after it is resumed, and an earlier settle shell
      // may still be busy; typing into it would feed its foreground program.
 diff --git a/apps/server/src/terminal/Manager.test.ts b/apps/server/src/terminal/Manager.test.ts
-index 65197ab6..641de14e 100644
+index 65197ab6..19d06b02 100644
 --- a/apps/server/src/terminal/Manager.test.ts
 +++ b/apps/server/src/terminal/Manager.test.ts
-@@ -1968,6 +1968,25 @@ it.layer(
+@@ -1968,6 +1968,38 @@ it.layer(
      }),
    );
  
-+  it.effect("starts no shell on a Fern server and says why", () =>
++  it.effect("runs fern-shell on a Fern server, and no shell of the server's", () =>
 +    Effect.gen(function* () {
-+      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-+        env: { ...process.env, FERN_POOL: "/var/lib/fern" },
++      const { manager, ptyAdapter } = yield* createManager(5, {
++        env: { ...process.env, FERN_POOL: "/var/lib/fern", SHELL: "/bin/zsh" },
++        shellResolver: () => "/bin/zsh",
 +      });
 +
 +      const snapshot = yield* manager.open(openInput());
 +
++      assert.equal(snapshot.status, "running");
++      expect(ptyAdapter.spawnInputs.map((input) => input.shell)).toEqual([
++        "/usr/local/bin/fern-shell",
++      ]);
++    }),
++  );
++
++  it.effect("tries no other shell on a Fern server when fern-shell can't start", () =>
++    Effect.gen(function* () {
++      const { manager, ptyAdapter } = yield* createManager(5, {
++        env: { ...process.env, FERN_POOL: "/var/lib/fern", SHELL: "/bin/zsh" },
++      });
++      ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
++
++      const snapshot = yield* manager.open(openInput());
++
 +      assert.equal(snapshot.status, "error");
-+      expect(ptyAdapter.spawnInputs).toEqual([]);
-+      const messages = (yield* getEvents).flatMap((event) =>
-+        event.type === "error" ? [event.message] : [],
-+      );
-+      expect(messages).toEqual([
-+        expect.stringContaining("Terminals are off on this Fern server"),
++      expect(ptyAdapter.spawnInputs.map((input) => input.shell)).toEqual([
++        "/usr/local/bin/fern-shell",
 +      ]);
 +    }),
 +  );
@@ -63,35 +76,34 @@ index 65197ab6..641de14e 100644
      Effect.gen(function* () {
        const platform = yield* HostProcess.Platform;
 diff --git a/apps/server/src/terminal/Manager.ts b/apps/server/src/terminal/Manager.ts
-index 0be928ce..a3c28e84 100644
+index 0be928ce..3e2fd028 100644
 --- a/apps/server/src/terminal/Manager.ts
 +++ b/apps/server/src/terminal/Manager.ts
-@@ -104,6 +104,18 @@ const MAX_TERMINAL_LABEL_LENGTH = 128;
+@@ -104,6 +104,16 @@ const MAX_TERMINAL_LABEL_LENGTH = 128;
  const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
  const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
  
 +/**
 + * On Fern (FERN_POOL names its pool) a terminal's shell would run in T3's
 + * server, outside the thread's box: with the server's files, and with the
-+ * logins in the server's environment. So none starts there, and the pane
-+ * says why.
++ * logins in the server's environment. So a terminal there runs fern-shell
++ * and nothing else: a shell in the box of the thread whose folder it is in,
++ * or a line saying that the folder has none. No other shell is tried after
++ * it, so none ever starts on the server.
 + */
-+class TerminalsOffError extends Schema.TaggedError<TerminalsOffError>()("TerminalsOffError", {}) {
-+  override get message(): string {
-+    return "Terminals are off on this Fern server: a shell here would run in T3's server, outside the thread's box. Ask the agent to run the command; its Bash runs in the box.";
-+  }
-+}
++const FERN_SHELL = "/usr/local/bin/fern-shell";
 +
  class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocessCheckError>()(
    "TerminalSubprocessCheckError",
    {
-@@ -2202,6 +2214,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
+@@ -2202,7 +2212,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
        increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
          Effect.andThen(
            Effect.gen(function* () {
-+            if (baseEnv.FERN_POOL?.trim()) {
-+              return yield* new TerminalsOffError();
-+            }
-             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+-            const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
++            const shellCandidates = baseEnv.FERN_POOL?.trim()
++              ? [{ shell: FERN_SHELL }]
++              : resolveShellCandidates(shellResolver, platform, baseEnv);
              const terminalEnv = createTerminalSpawnEnv(
                baseEnv,
+               session.runtimeEnv,

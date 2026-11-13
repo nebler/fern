@@ -166,12 +166,23 @@ func (b *Backer) Run(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Once makes a backup now, or returns ErrBusy if one is under way.
+// Once makes a backup now, or returns ErrBusy if one is under way. How it
+// went is kept in the pool (Status), unless the daemon's stop cut it short.
 func (b *Backer) Once(ctx context.Context) error {
 	if !b.running.TryLock() {
 		return ErrBusy
 	}
 	defer b.running.Unlock()
+	err := b.once(ctx)
+	if ctx.Err() == nil {
+		if rerr := b.record(err); rerr != nil {
+			b.log.WarnContext(ctx, "recording the backup's result failed", slog.Any("error", rerr))
+		}
+	}
+	return err
+}
+
+func (b *Backer) once(ctx context.Context) error {
 	m, err := b.manifest(ctx)
 	if err != nil {
 		return err

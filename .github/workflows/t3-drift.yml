@@ -1,0 +1,22 @@
+# Does T3's newest commit still take Fern's patches (images/t3)? The image
+# pins one commit of T3, so a patch that stopped applying, or a test of T3's
+# that the patches break, shows only when the pin is moved. This says so the
+# night T3 changes: lab/t3-drift.sh builds the patched stage of
+# images/Dockerfile on T3's newest commit. A failed run is the notice; it
+# publishes nothing.
+name: t3 drift
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  patches:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: lab/t3-drift.sh

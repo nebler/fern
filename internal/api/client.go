@@ -127,6 +127,12 @@ func (c *Client) GC(ctx context.Context) (Freed, error) {
 	return f, c.do(ctx, http.MethodPost, "/gc", nil, "", &f)
 }
 
+// Problems returns what is wrong on the node now that the daemon knows of.
+func (c *Client) Problems(ctx context.Context) ([]Problem, error) {
+	var p []Problem
+	return p, c.do(ctx, http.MethodGet, "/problems", nil, "", &p)
+}
+
 // FindByPath returns the environment whose workspace is path or holds it.
 func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
 	var envs []Env

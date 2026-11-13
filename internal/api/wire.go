@@ -82,6 +82,16 @@ type Freed struct {
 	Under   *Volume  `json:"under,omitempty"`
 }
 
+// Problem is something wrong on the node now that the daemon knows of
+// (GET /problems, fern doctor): a failed golden build, backups that fail, a
+// pool that takes no more snapshots.
+type Problem struct {
+	Name   string    `json:"name"`          // the part: "golden build", "backups", "disk"
+	At     time.Time `json:"at,omitzero"`   // when it went wrong, if that is known
+	Detail string    `json:"detail"`        // what is wrong, and what it means
+	Fix    string    `json:"fix,omitempty"` // what to do
+}
+
 // SnapshotRequest is the body of POST /envs/{id}/snapshots.
 type SnapshotRequest struct {
 	ID string `json:"id"`

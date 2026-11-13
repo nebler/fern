@@ -1927,6 +1927,28 @@ lab, `terminal.open` from inside the node, as the pane calls it, answers
 status `error`, no process, and the event the pane prints: "Terminals are off
 on this Fern server: a shell here would run in T3's server, outside the
 thread's box. Ask the agent to run the command; its Bash runs in the box."
-T3's service holds one process before and after. `lab/check.sh t3` has both
-checks. Not on the VPS yet: its T3 waits for its thread to be idle. Not
-built: a terminal in the thread's box.
+T3's service holds one process before and after. That afternoon the patch
+changed to a terminal that runs in the thread's box (`images/fern-shell`:
+`fern exec -it --here -- bash`). In the lab, through the pane's own calls
+(`lab/t3-terminal.mjs`, `lab/check.sh t3`): a terminal opened in a worktree
+that has no environment yet makes it one and answers from the box (the
+worktree as its folder, no daemon's socket, no login in its environment, the
+pane's 31 rows and 97 columns); a shell given 2 seconds at an idle prompt
+ends itself ("auto-logout"; 20 minutes otherwise), so the box can sleep; a
+terminal in a project's main folder prints "No terminal here: this folder
+has no Fern box" and ends; T3's service runs no shell. Not on the VPS yet:
+its T3 waits for its thread to be idle.
+
+**A failure reaches the thread, 2026-11-13.** `lab/check.sh golden`, with a
+setup script that prints "no such tool: frobnicate" and exits 3: the failure
+is in the builder's `build-failed.json`, `fern doctor` has `FAIL  golden
+build` with the script's words, `fern_problems` is above 0, and the hint of
+the thread's Claude starts with "Something is wrong on this server. Tell the
+person" and the script's words. With the script mended, the next worktree's
+build makes a golden, and the file and doctor's line are gone. `fern logs
+<env>` prints the daemon's lines about the thread and its running box's own
+log. T3's service has the environments read-only: it reads a thread's Claude
+folder and can't write it. Unit tests, the store's on btrfs, and the quick
+checks pass (the lab's timings were not looked at). On the VPS, by hand, with
+its thread working: SSH takes keys only, and 2 GB of swap; its disk is 85%
+full, 12 GB free.

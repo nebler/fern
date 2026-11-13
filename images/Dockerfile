@@ -175,8 +175,9 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 # fern-opencode.patch, an OpenCode server per worktree, started in it;
 # fern-newthread.patch, New worktree as a new project's own default, which
 # T3 doesn't overrule for the first thread of a project in its projects folder;
-# fern-terminals.patch, no terminals: their shells would run in T3's server,
-# outside the thread's box, and so would the project scripts typed into them.
+# fern-terminals.patch, a terminal runs fern-shell, a shell in its thread's
+# box, and never a shell of T3's server; T3's project scripts, which are
+# typed into a terminal before it is ready for them, are left out.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
 RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch \
@@ -217,6 +218,9 @@ COPY --from=claude /claude /usr/local/libexec/claude
 # The same for "opencode": fern-opencode runs a worktree's server in its box.
 COPY images/fern-opencode /usr/local/bin/opencode
 COPY --from=opencode /opencode /usr/local/libexec/opencode
+# A terminal in T3 runs fern-shell (fern-terminals.patch): a shell in the
+# thread's box.
+COPY images/fern-shell /usr/local/bin/fern-shell
 # T3 runs "gh" for pull requests: fern-gh gives the real one a token for
 # the repository from Fern's GitHub App, if there is one.
 COPY images/fern-gh /usr/local/bin/gh

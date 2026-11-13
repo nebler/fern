@@ -24,6 +24,8 @@ type fakeDaemon struct {
 	socket string
 	mu     sync.Mutex
 	got    []string
+	// problems is what GET /problems answers: nothing wrong, unless set.
+	problems []api.Problem
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -57,6 +59,11 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 			{Box: "demo", Awake: true, Running: []api.Running{{Kind: "exec", N: 7, Since: time.Now().Add(-90 * time.Second)}}, Why: "stays awake while a command or a preview request runs"},
 			{Box: "demo.agent", Why: "asleep"},
 		})
+	})
+	mux.HandleFunc("GET /problems", func(w http.ResponseWriter, _ *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		reply(w, append([]api.Problem{}, d.problems...))
 	})
 	mux.HandleFunc("GET /disk", func(w http.ResponseWriter, _ *http.Request) {
 		reply(w, api.Disk{

@@ -78,6 +78,10 @@ type Box struct {
 	ID   string    // its name: its environment's ID, or the environment's agent box's
 	Kind Kind      // what it runs
 	Env  store.Env // its folders and token; with Env.Claude "", it gets no Claude folder or login
+	// Notices are what its Claude is told has gone wrong on the node, for
+	// the person (actor's notices): fern-init puts them at the top of
+	// Claude's hint. Only a box with Claude's folder has a use for them.
+	Notices []string
 }
 
 // Config is where a Driver keeps its boxes and what it gives them.
@@ -566,6 +570,13 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	vars := boxVars(box, hex.EncodeToString(wakeID), token, login, d.cfg.MCPPort)
 	if skills != "" {
 		vars = append(vars, "FERN_SKILLS="+skills)
+	}
+	if len(box.Notices) > 0 {
+		notices, err := json.Marshal(box.Notices)
+		if err != nil {
+			return err
+		}
+		vars = append(vars, "FERN_NOTICES="+string(notices))
 	}
 	if box.Kind == Agent && d.cfg.T3MCP != "" {
 		vars = append(vars, "FERN_T3_ADDR="+d.cfg.T3MCP,

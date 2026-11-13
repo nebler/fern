@@ -112,6 +112,8 @@ type command struct {
 	idle    time.Duration // exec --hibernate
 	agent   bool          // exec --agent
 	account bool          // github-token --account
+	since   string        // logs --since
+	lines   int           // logs -n
 	argv    []string      // exec: the command
 }
 
@@ -162,6 +164,10 @@ func subcommands() []subcommand {
 			fs.BoolVar(&c.account, "account", false, "a token for an account the App is installed on, the one named or the only one, not for a repository")
 		}},
 		{name: "doctor", run: doctor},
+		{name: "logs", min: 1, max: 1, run: logs, flags: func(fs *flag.FlagSet, c *command) {
+			fs.StringVar(&c.since, "since", "24 hours ago", "how far back in the daemon's journal to look, as journalctl takes it")
+			fs.IntVar(&c.lines, "n", 100, "how many of the last lines to print, of the daemon's and of each box's")
+		}},
 		{name: "df", run: diskUsage},
 		{name: "gc", run: collect},
 		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {

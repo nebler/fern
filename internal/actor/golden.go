@@ -31,13 +31,6 @@ const buildQueue = 16
 // builder's box each time.
 const buildRetry = 15 * time.Minute
 
-// failedBuild is a builder's last golden build, if it failed: the key it
-// was for, and when.
-type failedBuild struct {
-	key string
-	at  time.Time
-}
-
 // errBuildWaits means a golden build wasn't made: the last one of the same
 // key failed less than buildRetry ago.
 var errBuildWaits = errors.New("the last build of this key failed; not built again yet")
@@ -232,16 +225,23 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 	// lockfile, and the golden is for the threads that start from what it
 	// was built from.
 	var key, script string
-	// failedBuilds is this goroutine's, which makes every build: the change
-	// below, on the builder's actor, gets a copy of what it reads.
-	last, waits := g.failedBuilds[id], false
+	// A failed build is recorded with the builder, on disk (store.BuildFailure):
+	// the next build of its key waits, a restart of the daemon keeps it, and
+	// the repository's threads and `fern doctor` say so. A build the daemon's
+	// stop cut short is no failure.
+	var last store.BuildFailure
+	waits := false
 	defer func() {
+		var rec error
 		switch {
-		case waits:
+		case waits, ctx.Err() != nil:
 		case err == nil:
-			delete(g.failedBuilds, id)
+			rec = g.store.SetBuildFailure(ctx, id, nil)
 		case key != "":
-			g.failedBuilds[id] = failedBuild{key: key, at: time.Now()}
+			rec = g.store.SetBuildFailure(ctx, id, &store.BuildFailure{Key: key, At: time.Now(), Error: err.Error()})
+		}
+		if rec != nil && !errors.Is(rec, store.ErrNotFound) {
+			g.log.WarnContext(ctx, "recording a golden build's result failed", slog.String("env", id), slog.Any("error", rec))
 		}
 	}()
 	err = g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
@@ -266,7 +266,11 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 			key = "" // an earlier build made it
 			return nil
 		}
-		if last.key == key && time.Since(last.at) < buildRetry {
+		failed := false
+		if last, failed, err = g.store.BuildFailure(ctx, id); err != nil {
+			return err
+		}
+		if failed && last.Key == key && time.Since(last.At) < buildRetry {
 			waits = true
 			return nil
 		}
@@ -285,7 +289,7 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 		return err
 	}
 	if waits {
-		return fmt.Errorf("%s: %w (%s ago)", id, errBuildWaits, time.Since(last.at).Round(time.Second))
+		return fmt.Errorf("%s: %w (%s ago)", id, errBuildWaits, time.Since(last.At).Round(time.Second))
 	}
 	if script != "" {
 		err := g.runSetup(ctx, id, script)

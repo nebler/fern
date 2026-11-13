@@ -1,7 +1,11 @@
-// Opens a terminal on T3's server, as the app's terminal pane does, and prints
-// what T3 answered: the session's status, its process and the error the pane
-// would show. lab/check.sh runs it in T3's own service (node from T3's image,
-// stdin as the script) with T3_PAIR_URL, a pairing link, and T3_CWD, a folder.
+// Opens a terminal on T3's server, as the app's terminal pane does, types a
+// line into it and prints what came back: "<status> | <what T3_EXPECT
+// matched>", or the end of what the terminal printed if nothing matched in
+// 30 s. lab/check.sh runs it in T3's own service (node from T3's image,
+// stdin as the script) with T3_PAIR_URL, a pairing link; T3_CWD, the folder
+// the terminal opens in; T3_TYPE, the line to type once it is up (optional);
+// T3_RESIZE, "cols rows" to resize it to before typing (optional); and
+// T3_EXPECT, a regular expression for the output.
 const url = new URL(process.env.T3_PAIR_URL);
 let res = await fetch(new URL("/oauth/token", url.origin), {
   method: "POST",
@@ -26,32 +30,50 @@ await new Promise((resolve, reject) => {
   ws.onopen = resolve;
   ws.onerror = () => reject(new Error("websocket: could not connect"));
 });
-const threadId = `check-${crypto.randomUUID()}`;
+
+const session = { threadId: `check-${crypto.randomUUID()}`, terminalId: "check" };
+const expect = new RegExp(process.env.T3_EXPECT ?? "$^");
 const send = (id, tag, payload) => ws.send(JSON.stringify({ _tag: "Request", id, tag, payload, headers: [] }));
-const answer = await new Promise((resolve, reject) => {
-  let opened = null;
-  let message = null;
-  const done = () => opened && message !== null && resolve({ ...opened, message });
+let status = "?";
+let printed = "";
+const matched = await new Promise((resolve) => {
+  const look = () => {
+    const m = expect.exec(printed);
+    if (m) resolve(m[0]);
+  };
   ws.onmessage = (event) => {
     const frame = JSON.parse(event.data);
     if (frame._tag === "Chunk") {
       for (const value of frame.values) {
-        if (value.threadId === threadId && value.type === "error") message = value.message;
+        if (value.threadId !== session.threadId) continue;
+        if (value.type === "output") printed += value.data;
+        if (value.type === "error") printed += `[terminal] ${value.message}`;
+        if (value.type === "exited") status = "exited";
       }
       ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
+      look();
     } else if (frame._tag === "Exit" && frame.requestId === "open") {
-      if (frame.exit._tag !== "Success") return reject(new Error(`terminal.open: ${JSON.stringify(frame.exit.cause)}`));
-      opened = frame.exit.value;
-      // A terminal that started has no error to wait for.
-      if (opened.status !== "error") message = "";
+      if (frame.exit._tag !== "Success") return resolve(`terminal.open failed: ${JSON.stringify(frame.exit.cause)}`);
+      if (status === "?") status = frame.exit.value.status;
+      if (status === "running") {
+        if (process.env.T3_RESIZE) {
+          const [cols, rows] = process.env.T3_RESIZE.split(" ").map(Number);
+          send("resize", "terminal.resize", { ...session, cols, rows });
+        }
+        // The shell in the box needs a moment before it reads what is typed.
+        if (process.env.T3_TYPE) setTimeout(() => send("write", "terminal.write", { ...session, data: `${process.env.T3_TYPE}\r` }), 3000);
+      }
+      look();
     }
-    done();
   };
-  setTimeout(() => reject(new Error("no answer from T3 in 10 s")), 10_000);
+  setTimeout(() => resolve(null), 30_000);
   send("events", "subscribeTerminalEvents", {});
-  send("open", "terminal.open", { threadId, terminalId: "check", cwd: process.env.T3_CWD });
+  send("open", "terminal.open", { ...session, cwd: process.env.T3_CWD });
 });
-if (answer.status !== "error") send("close", "terminal.close", { threadId, terminalId: "check" });
-console.log(`${answer.status} pid=${answer.pid} ${answer.message}`);
+// A shell that ended says so just after its last output.
+await new Promise((resolve) => setTimeout(resolve, 1500));
+console.log(`${status} | ${matched ?? `no match; it printed: ${JSON.stringify(printed.slice(-400))}`}`);
+send("close", "terminal.close", { ...session, deleteHistory: true });
+await new Promise((resolve) => setTimeout(resolve, 500));
 ws.close();
 process.exit(0);

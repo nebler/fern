@@ -76,6 +76,14 @@ func (f *fakeStore) Sources(context.Context, string) ([]store.SnapshotRef, error
 
 func (f *fakeStore) StripSource(context.Context, string) error { return nil }
 
+func (f *fakeStore) SetBuildFailure(context.Context, string, *store.BuildFailure) error { return nil }
+
+func (f *fakeStore) BuildFailure(context.Context, string) (store.BuildFailure, bool, error) {
+	return store.BuildFailure{}, false, nil
+}
+
+func (f *fakeStore) Space() (store.Space, error) { return store.Space{}, nil }
+
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

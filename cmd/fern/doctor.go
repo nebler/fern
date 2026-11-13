@@ -26,6 +26,7 @@ type node struct {
 	t3                   string // T3's server, http://127.0.0.1:30773
 	git                  string // the node's git, which makes Claude's commits
 	btrfs                string // btrfs-progs' btrfs
+	journalctl           string // systemd's journalctl, for fern logs
 	github, cloudflare   string // GitHub's and Cloudflare's APIs
 }
 
@@ -33,7 +34,7 @@ type node struct {
 func thisNode() node {
 	return node{
 		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
-		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
+		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", journalctl: "journalctl", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
 	}
 }
 
@@ -93,6 +94,7 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	ctxD, cancel := context.WithTimeout(ctx, 5*time.Second)
 	envs, err := cl.List(ctxD)
 	cancel()
+	daemonUp := err == nil
 	if err != nil {
 		add(finding{name: "daemon", detail: err.Error(), fix: "systemctl status fern-daemon; journalctl -u fern-daemon -n 50"})
 	} else {
@@ -183,11 +185,32 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	// as the author T3's git has.
 	add(n.checkCommits(ctx))
 
+	// What the daemon knows has gone wrong, which is otherwise a line in its
+	// log: failed golden builds, backups that fail, a pool that takes no
+	// more snapshots. An older daemon doesn't say.
+	var problems []api.Problem
+	if daemonUp {
+		ctxP, cancel := context.WithTimeout(ctx, 5*time.Second)
+		problems, _ = cl.Problems(ctxP)
+		cancel()
+	}
+	failing := func(name string) bool {
+		return slices.ContainsFunc(problems, func(p api.Problem) bool { return p.Name == name })
+	}
+
 	// Backups, which are optional.
-	if _, err := os.Stat(filepath.Join(n.etc, "backup.env")); err != nil {
+	switch _, err := os.Stat(filepath.Join(n.etc, "backup.env")); {
+	case err != nil:
 		add(finding{name: "backups", info: true, detail: "none: if this server is lost, its threads are (README: backups)"})
-	} else {
+	case !failing("backups"):
 		add(finding{name: "backups", ok: true, detail: "set up: hourly, encrypted; fern backup makes one now"})
+	}
+	for _, p := range problems {
+		detail := p.Detail
+		if !p.At.IsZero() {
+			detail += " (" + p.At.Local().Format("2 Jan 15:04") + ")"
+		}
+		add(finding{name: p.Name, detail: detail, fix: p.Fix})
 	}
 
 	// The GitHub App, which is optional.

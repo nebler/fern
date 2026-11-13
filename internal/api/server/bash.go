@@ -39,7 +39,7 @@ const bashLinger = 5 * time.Second
 
 // bashInput is a Bash call.
 type bashInput struct {
-	Command     string `json:"command" jsonschema:"the command to run, with /bin/sh, in the workspace"`
+	Command     string `json:"command" jsonschema:"the command to run, with /bin/bash, in the workspace"`
 	Timeout     int    `json:"timeout,omitempty" jsonschema:"milliseconds before the command is stopped; 120000 if 0, at most 600000"`
 	Description string `json:"description,omitempty" jsonschema:"what the command does, in a few words"`
 	// Background keeps the command running after the call, as a job.
@@ -64,7 +64,7 @@ type (
 	}
 	forkExecInput struct {
 		Env     string `json:"env" jsonschema:"the fork's ID, as env_fork gave it"`
-		Command string `json:"command" jsonschema:"the command to run, with /bin/sh, in the fork's workspace"`
+		Command string `json:"command" jsonschema:"the command to run, with /bin/bash, in the fork's workspace"`
 		Timeout int    `json:"timeout,omitempty" jsonschema:"milliseconds before the command is stopped; 120000 if 0, at most 600000"`
 	}
 	forkDeleteInput struct {

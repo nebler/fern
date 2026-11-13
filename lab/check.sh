@@ -1210,6 +1210,50 @@ golden() {
   check "Postgres runs on it (3 users)" 3 "$(sql gold5 'select count(*) from users')"
   for e in gold4 gold5 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
+
+  # A setup script that fails leaves no golden, and it shows where a person
+  # looks: fern doctor lists it, a metric counts it, and the thread's Claude
+  # is told, to pass it on. Until 2026-11-13 it was a line in the daemon's
+  # log. A build that works clears it.
+  W=/var/lib/fern/worktrees/golden-fails
+  G=$(golden_id golden-fails)
+  for e in gold6 gold7 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  tar_dir lab/sample-repo | in_daemon "rm -rf $W/one && mkdir -p $W/one/.fern && tar -x -C $W/one -f - &&
+    printf '%s\n' '#!/bin/sh' 'echo no such tool: frobnicate >&2' 'exit 3' > $W/one/.fern/setup &&
+    chmod +x $W/one/.fern/setup && chown -R 1000:1000 $W/one"
+  fern create gold6 --path $W/one >/dev/null
+  for _ in $(seq 120); do
+    in_daemon "test -e /var/lib/fern/envs/$G/build-failed.json" 2>/dev/null && break
+    sleep 1
+  done
+  check "a setup script that fails is recorded with its builder, and no golden is made" "yes 0" \
+    "$(succeeds in_daemon "grep -q frobnicate /var/lib/fern/envs/$G/build-failed.json") $(fern snapshots "$G" 2>/dev/null | grep -c '^golden-' || true)"
+  check "fern doctor lists the failed build, with what the script printed" 1 \
+    "$(fern doctor 2>/dev/null | grep -c "^FAIL  golden build .*$G.*frobnicate" || true)"
+  check "the daemon's metrics count it" yes \
+    "$(succeeds in_daemon "curl -sf http://127.0.0.1:9090/metrics | grep -q '^fern_problems [1-9]'")"
+  hint="fern exec gold6"
+  agent_boxes && hint="fern exec --agent gold6"
+  check "the thread's Claude is told, and to tell the person" yes \
+    "$($hint -- cat /var/lib/fern/envs/gold6/claude/CLAUDE.md | tr '\n' ' ' | grep -q 'Tell the person.*starting point failed.*frobnicate' && echo yes || echo no)"
+  # A box's own log lasts while it runs: the services' box is up after a command.
+  fern exec gold6 -- true
+  check "fern logs has the daemon's lines about the thread, and its running box's own log" "yes yes" \
+    "$(out=$(fern logs gold6 2>&1); { grep -q 'msg="box woke" env=gold6' <<<"$out" && echo yes || echo no; grep -q "== box gold6's own log" <<<"$out" && echo yes || echo no; } | xargs)"
+  in_daemon "printf '%s\n' '#!/bin/sh' 'mkdir -p .fern/built && echo mended > .fern/built/artifact' > $W/one/.fern/setup"
+  tar_dir lab/sample-repo | in_daemon "rm -rf $W/two && mkdir -p $W/two/.fern && tar -x -C $W/two -f - &&
+    cp -p $W/one/.fern/setup $W/two/.fern/setup && chown -R 1000:1000 $W/two"
+  fern create gold7 --path $W/two >/dev/null
+  key=
+  for _ in $(seq 120); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  check "the mended script builds a golden, and the failure is gone from disk and from doctor" "1 no 0" \
+    "$(grep -c . <<<"$key") $(succeeds in_daemon "test -e /var/lib/fern/envs/$G/build-failed.json") $(fern doctor 2>/dev/null | grep -c 'golden build' || true)"
+  for e in gold6 gold7 "$G"; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
 }
 
 claude() {
@@ -1472,17 +1516,6 @@ t3() {
   check "claude outside a workspace is the local one" "$CLAUDE" "$(in_t3 'cd / && claude --version')"
   check "T3 releases idle provider sessions after 5 minutes (fern-sessions.patch)" 1 \
     "$(in_t3 'grep -l T3CODE_PROVIDER_IDLE_TIMEOUT_MS /opt/t3/apps/server/dist/*.mjs | wc -l' || true)"
-  # A terminal's shell would run in T3's service, outside any box. The pane's
-  # own call, from inside the node: a VPS's T3 has no port the Mac reaches
-  # without a tunnel.
-  local pair
-  pair=$(in_t3 "node /opt/t3/apps/server/dist/bin.mjs pair --ttl 2m --label 'fern check'" </dev/null |
-    sed -nE 's#^Pairing URL: http://[^/]+/#http://127.0.0.1:30773/#p')
-  check "T3 starts no terminal on the server, and says why (fern-terminals.patch)" \
-    "error pid=null Terminals are off on this Fern server" \
-    "$(in_t3 "T3_PAIR_URL='$pair' T3_CWD=/var/lib/fern/projects node --input-type=module -" <lab/t3-terminal.mjs 2>&1 | cut -c1-52)"
-  check "no shell runs in T3's service" 0 \
-    "$(on_node sh -c 'for p in $(cat /sys/fs/cgroup/system.slice/fern-t3.service/cgroup.procs); do cat /proc/$p/comm; done' </dev/null | grep -cxE 'sh|bash|zsh' || true)"
   # What the checkpoint hook (images/t3/fern-checkpoints.patch) does with a
   # worktree T3 made: adopt it at the first checkpoint, then snapshot,
   # replace and restore.
@@ -1509,6 +1542,11 @@ t3() {
   check "the box keeps Claude's state outside the workspace" "$C" \
     "$(in_t3 "cd $W && fern exec $x -- sh -c 'echo \$CLAUDE_CONFIG_DIR'")"
   in_t3 "cd $W && fern exec $x -- sh -c 'echo kept > $C/note'"
+  # T3 runs as the user that owns Claude's folder, and a line planted there
+  # would run in the thread's agent box: its service has the environments
+  # read-only (deploy/systemd/fern-t3.service).
+  check "T3's service reads an environment's Claude folder, and can't write it" "kept no" \
+    "$(in_t3 "cat $C/note" | xargs) $(succeeds in_t3 "touch $C/planted")"
   check "Claude is told it is in a Fern environment" yes \
     "$(in_t3 "cd $W && fern exec $x -- cat $C/CLAUDE.md" | grep -q 'Fern environment' && echo yes || echo no)"
   check "git works in the box" init "$(in_t3 "cd $W && fern exec --here -- git log --format=%s -1")"
@@ -1558,6 +1596,33 @@ t3() {
     on_node rm /etc/fern/claude.env </dev/null
     note "no Claude login stored yet: lab/claude-login.sh"
   fi
+  # A terminal in T3 (fern-terminals.patch, images/fern-shell): a shell in
+  # the thread's box, never one in T3's service, which has every worktree
+  # and the server's logins. The pane's own calls, from inside the node: a
+  # VPS's T3 has no port the Mac reaches without a tunnel. The worktree has
+  # no environment yet, as before a thread's first checkpoint.
+  local W2=/var/lib/fern/worktrees/t3check/two pair e2
+  e2=t3-$(printf %s "$W2" | shasum -a 256 | cut -c1-16)
+  fern rm "$e2" 2>/dev/null || true
+  in_t3 "cd $R && git worktree add -q -b t3/two $W2"
+  terminal() { # the folder, the line to type, what to wait for
+    pair=$(in_t3 "node /opt/t3/apps/server/dist/bin.mjs pair --ttl 2m --label 'fern check'" </dev/null |
+      sed -nE 's#^Pairing URL: http://[^/]+/#http://127.0.0.1:30773/#p')
+    in_t3 "T3_PAIR_URL='$pair' T3_CWD='$1' T3_TYPE='$2' T3_EXPECT='$3' T3_RESIZE='97 31' node --input-type=module -" <lab/t3-terminal.mjs 2>&1
+  }
+  # In the box there is no daemon's socket, the login isn't in the
+  # environment, and the terminal's size is the pane's.
+  check "a terminal in a thread's worktree is a shell in its box, at the pane's size" "running | at=$W2 socket=no login=0 idle=1200 size=31 97" \
+    "$(terminal "$W2" 'echo at=$PWD socket=$(test -e /run/fern/fern.sock && echo yes || echo no) login=$(env | grep -c ^CLAUDE_CODE_OAUTH) idle=$TMOUT size=$(stty size)' "at=/[^\r\n]* size=[0-9]+ [0-9]+")"
+  # An open terminal keeps its box awake, so the shell ends at an idle
+  # prompt: after 20 minutes, here after the 2 seconds it is given.
+  check "the shell ends itself at an idle prompt, so the box can sleep" "exited | auto-logout" "$(terminal "$W2" 'TMOUT=2' 'auto-logout')"
+  check "the worktree became the thread's environment for it" "$W2" "$(fern ls | awk -v id="$e2" '$1 == id { print $NF }')"
+  check "a terminal in a project's main folder starts no shell, and says why" "exited | No terminal here: this folder has no Fern box" \
+    "$(terminal "$R" '' 'No terminal here: this folder has no Fern box')"
+  check "no shell runs in T3's service" 0 \
+    "$(on_node sh -c 'for p in $(cat /sys/fs/cgroup/system.slice/fern-t3.service/cgroup.procs); do cat /proc/$p/comm; done' </dev/null | grep -cxE 'sh|bash|zsh|dash' || true)"
+  fern rm "$e2" >/dev/null 2>&1 || true
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
