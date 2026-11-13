@@ -323,8 +323,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// metric, with the pool's room. Kills in a box count from here on.
 	// btrfs's room for its own records is read by a program, at most every
 	// ten minutes, by these looks only: never on a wake's or a snapshot's way.
-	checker := health.Checker{Store: st, Pool: pool, Boxes: envs, Records: &health.Records{Btrfs: "btrfs", Pool: pool},
-		Memory: health.NewMemory(runsc.Cgroup)}
+	checker := health.Checker{
+		Store: st, Pool: pool, Boxes: envs,
+		Records: &health.Records{Btrfs: "btrfs", Pool: pool},
+		Memory:  health.NewMemory(runsc.Cgroup),
+	}
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}

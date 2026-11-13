@@ -19,7 +19,8 @@ limits() {
   limit=$(on_node cat /sys/fs/cgroup/fern/memory.max </dev/null)
   want=$((total - 1610612736 > total / 2 ? total - 1610612736 : total / 2))
   check "the boxes together have a memory limit" "$want" "$limit"
-  check "… and are slowed a tenth before it" "$((limit - limit / 10))" "$(on_node cat /sys/fs/cgroup/fern/memory.high </dev/null)"
+  # The kernel keeps it in whole pages.
+  check "… and are slowed a tenth before it" "$(((limit - limit / 10) / 4096 * 4096))" "$(on_node cat /sys/fs/cgroup/fern/memory.high </dev/null)"
   check "doctor doesn't list memory" 0 "$(fern doctor 2>/dev/null | grep -c '^FAIL  memory' || true)"
   # A services.yaml fern-init can't read ends it as the box starts. The wake
   # says so from the box's log, and doesn't wait out its two minutes.
