@@ -35,8 +35,15 @@ func TestWriteHint(t *testing.T) {
 	if got := read(); strings.Contains(got, "postgres") || strings.Contains(got, "Cloudflare") || strings.Contains(got, "setup script") {
 		t.Errorf("hint after the services went = %q, want it replaced, and nothing on Cloudflare or a setup script", got)
 	}
-	if got := read(); !strings.Contains(got, "use the `commit` tool") || !strings.Contains(got, "never in /tmp") || strings.Contains(got, "mise install") {
-		t.Errorf("hint = %q, want it to name the commit tool and say that /tmp doesn't last, and nothing on tools", got)
+	if got := read(); !strings.Contains(got, "use the `commit` tool") || !strings.Contains(got, "never in /tmp") || strings.Contains(got, "mise install") ||
+		strings.Contains(got, "can't be read") {
+		t.Errorf("hint = %q, want it to name the commit tool and say that /tmp doesn't last, and nothing on tools or a broken services.yaml", got)
+	}
+	if err := writeHint(dir, hint{unreadable: "services.yaml: unknown field \"servces\""}); err != nil {
+		t.Fatalf("writeHint() with a services.yaml it can't read error: %v", err)
+	}
+	if got := read(); !strings.Contains(got, `The fault: services.yaml: unknown field "servces".`) || !strings.Contains(got, "every Bash call fails") {
+		t.Errorf("hint for a services.yaml that can't be read = %q, want the fault and what it means", got)
 	}
 	if err := writeHint(dir, hint{tools: true}); err != nil {
 		t.Fatalf("writeHint() with tools error: %v", err)

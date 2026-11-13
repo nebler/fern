@@ -27,6 +27,12 @@ const (
 	maxOutput      = 30_000
 )
 
+// shell runs Bash's commands. It was /bin/sh until 2026-11-13, which in the
+// box is dash: `make &> log` ran make in the background and made an empty
+// log, with exit code 0, and `[[`, `<(…)`, arrays and `source` failed, under
+// a tool named Bash that says to use it as one would Bash.
+const shell = "/bin/bash"
+
 // bashLinger is how long the services' box stays up after the last Bash
 // call: an agent's commands come in bursts, and one within it pays no wake.
 const bashLinger = 5 * time.Second
@@ -197,7 +203,8 @@ func (s *Server) bashServer(id string) *mcp.Server {
 			"Run servers that must keep running, such as `npm run dev`, with run_in_background: they keep running " +
 			"after your turn, until KillShell stops them or the box sleeps, 20 minutes after its last use. " +
 			"A command stops at its timeout, 10 minutes at most: run a longer build or test run with run_in_background " +
-			"too, and wait for it with BashOutput's wait_seconds, not with sleep.",
+			"too, and wait for it with BashOutput's wait_seconds, not with sleep. " +
+			"Output past 30,000 characters is cut in the middle: send long output to a file in the workspace and read the part you need.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in bashInput) (*mcp.CallToolResult, any, error) {
 		if in.Background {
 			jobID, err := s.startJob(ctx, id, in, callKey(req))
@@ -213,7 +220,7 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		text := out
 		switch {
 		case err != nil:
-			res.IsError, text = true, err.Error()
+			res.IsError, text = true, lostBox(out, err)
 		case code != 0:
 			text += fmt.Sprintf("\n[exit code %d]", code)
 		}
@@ -225,7 +232,8 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		Meta: alwaysLoad(),
 		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs. " +
 			"With wait_seconds it answers when the command has ended, or after that long: wait for a build or a test run " +
-			"this way, with one call for up to ten minutes, instead of looking again and again with sleep.",
+			"this way, with one call for up to ten minutes, instead of looking again and again with sleep. " +
+			"Each call returns at most 30,000 characters and then forgets them: a command that prints more should write to a file in the workspace.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
 		text, err := s.readJob(ctx, id, in.ID, time.Duration(in.Wait)*time.Second)
 		if err != nil {
@@ -280,7 +288,10 @@ func (s *Server) addForkTools(srv *mcp.Server, id string) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "env_exec",
 		Description: "Runs a shell command in a fork of this thread (env_fork), in its workspace, with its services, " +
-			"and returns what it printed and its exit code. Calls for different forks run at the same time.",
+			"and returns what it printed and its exit code. Calls for different forks run at the same time. " +
+			"A fork's files are at another path than this thread's, where env_exec starts: use relative paths, and expect what was built " +
+			"with this thread's path in it (a virtualenv, a CMake cache) to need making again. A call stops at its timeout, 10 minutes " +
+			"at most, and a fork has no background commands: split longer work into several calls.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in forkExecInput) (*mcp.CallToolResult, any, error) {
 		if err := ownFork(id, in.Env); err != nil {
 			return toolError(err), nil, nil
@@ -367,13 +378,20 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 		if errors.Is(err, store.ErrNotFound) {
 			return "", 0, fmt.Errorf("no environment %s", id)
 		}
+		// The box's start counts against the command's time, and its first
+		// start installs the repository's tools: alone, "context deadline
+		// exceeded" said nothing of either.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", 0, fmt.Errorf("the box was still starting when the command's %s were over, and the command never ran: "+
+				"a box's first start installs the repository's tools, which can take a minute or two. Run it again, with a longer timeout", timeout)
+		}
 		return "", 0, err
 	}
 	defer ex.CloseAndSleep(bashLinger)
 	defer func() { _ = conn.CloseNow() }()
 	// Both streams are written from one goroutine.
 	out := boxexec.NewClipped(maxOutput)
-	req := boxexec.Request{Argv: []string{"/bin/sh", "-c", in.Command}}
+	req := boxexec.Request{Argv: []string{shell, "-c", in.Command}}
 	streams := boxexec.Streams{Stdout: out, Stderr: out}
 	var code int
 	if key != "" {
@@ -389,6 +407,19 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 		return out.String(), 0, err
 	}
 	return out.String(), code, nil
+}
+
+// lostBox is what Claude reads when a command's box went away under it: the
+// box was restored or put to sleep, or it died, most often of the command's
+// own memory use at the box's limit. What the command had printed is kept;
+// the bare cause was a WebSocket error that said nothing of the box.
+func lostBox(out string, err error) string {
+	if out == "" {
+		return err.Error()
+	}
+	return out + "\n[the command's box went away before it ended: " + err.Error() + ". " +
+		"A box that runs out of memory is stopped whole, with everything running in it; `free -m` in a new command shows what it has. " +
+		"The next command starts the box again.]"
 }
 
 // clip keeps the start and end of output longer than maxOutput.

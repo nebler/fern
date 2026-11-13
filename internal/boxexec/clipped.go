@@ -46,5 +46,5 @@ func (c *Clipped) String() string {
 	if left == 0 {
 		return string(c.head) + string(tail)
 	}
-	return string(c.head) + fmt.Sprintf("\n[… %d bytes left out …]\n", left) + string(tail)
+	return string(c.head) + fmt.Sprintf("\n[… %d bytes left out here, for good: send long output to a file and read the part you need …]\n", left) + string(tail)
 }

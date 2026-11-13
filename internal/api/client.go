@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
+	"syscall"
 
 	"github.com/coder/websocket"
 
@@ -33,6 +35,18 @@ func NewClient(socket string) *Client {
 		},
 	}
 	return &Client{hc: &http.Client{Transport: tr}}
+}
+
+// unreachable says what to do about a daemon that can't be reached, in
+// front of the cause: the cause alone is a dial error naming a socket.
+func unreachable(err error) error {
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("the daemon isn't running (systemctl status fern-daemon; journalctl -u fern-daemon -n 50): %w", err)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("no permission for the daemon's socket: run this as root: %w", err)
+	}
+	return err
 }
 
 // base is the URL prefix for requests; the host is ignored by the transport.
@@ -266,7 +280,7 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return unreachable(fmt.Errorf("%s %s: %w", method, path, err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= http.StatusMultipleChoices {

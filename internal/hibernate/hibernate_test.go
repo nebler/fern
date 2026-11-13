@@ -272,6 +272,11 @@ func TestStaysWhileBusy(t *testing.T) {
 		{"permission asked", []string{initialize, user("ask")}, func(t *testing.T, s *session, _ *fakeClaude) {
 			s.send(t, `{"type":"control_response","response":{"subtype":"success","request_id":"p1"}}`)
 		}},
+		// A steer: Claude answers the second message with a result of its own,
+		// for the part of the turn it cut short, and the turn goes on.
+		{"a message sent while a turn runs", []string{initialize, user("hold"), user("steer")}, func(_ *testing.T, _ *session, f *fakeClaude) {
+			f.out <- `{"type":"result","subtype":"success"}`
+		}},
 		{"background task", []string{initialize, user("task")}, func(_ *testing.T, _ *session, f *fakeClaude) {
 			f.out <- `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
 		}},

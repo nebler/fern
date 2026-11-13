@@ -1,10 +1,12 @@
 package boxexec_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,5 +263,43 @@ func TestMCPRelayStreamsAToolCall(t *testing.T) {
 				t.Errorf("the stream held %q, want %q", body, want)
 			}
 		})
+	}
+}
+
+// A wait that ends because the box stops, with its job still running, is an
+// error, not the job's end: the daemon read the empty answer it used to get
+// as "ended", asked the box that was killing the job how it had ended, and
+// told Claude it was running, or had exited with code 137, for good.
+func TestJobWaitEndsWithTheBox(t *testing.T) {
+	jobs := boxexec.NewJobs(token, t.TempDir(), nil, slog.New(slog.DiscardHandler))
+	mux := http.NewServeMux()
+	jobs.Register(mux)
+	// As fern-init's server: its requests end when the box is told to stop.
+	stop, cancel := context.WithCancel(t.Context())
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.BaseContext = func(net.Listener) context.Context { return stop }
+	srv.Start()
+	t.Cleanup(srv.Close)
+	t.Cleanup(jobs.Close)
+	c := boxexec.JobClient{HC: srv.Client(), Addr: srv.Listener.Addr().String(), Token: token}
+
+	if err := c.Start(t.Context(), sh("server", "sleep 300")); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- c.Wait(t.Context(), "server") }()
+	// The wait is under way once the job is listed as running and a moment
+	// has passed for the request to arrive; then the box stops.
+	if infos, err := c.List(t.Context()); err != nil || len(infos) != 1 || !infos[0].Running {
+		t.Fatalf("List() = %+v, %v; want the job running", infos, err)
+	}
+	cancel()
+	select {
+	case err := <-waited:
+		if err == nil {
+			t.Error("Wait() returned no error for a job that was still running when its box stopped")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Wait() didn't return when the box stopped")
 	}
 }

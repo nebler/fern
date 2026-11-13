@@ -25,6 +25,7 @@ type node struct {
 	poolImage            string // the pool's sparse file's folder, /var/lib/fern-img
 	t3                   string // T3's server, http://127.0.0.1:30773
 	git                  string // the node's git, which makes Claude's commits
+	btrfs                string // btrfs-progs' btrfs
 	github, cloudflare   string // GitHub's and Cloudflare's APIs
 }
 
@@ -32,7 +33,7 @@ type node struct {
 func thisNode() node {
 	return node{
 		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
-		t3: "http://127.0.0.1:30773", git: "git", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
+		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", github: github.API, cloudflare: "https://api.cloudflare.com/client/v4",
 	}
 }
 
@@ -126,6 +127,12 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(f)
 	}
 
+	// btrfs keeps its own records in room it sets aside as it goes: with
+	// none left to set aside, writes fail while free space still shows.
+	if f, ok := n.checkRecords(ctx); ok {
+		add(f)
+	}
+
 	// The pool is a sparse file: what it can still hold is what the disk
 	// under it has.
 	if err := unix.Statfs(n.poolImage, &fs); err == nil {
@@ -204,6 +211,70 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(n.checkCloudflare(ctx, token))
 	}
 	return out
+}
+
+// recordsLeast is the room for btrfs's records below which doctor fails, when
+// the filesystem has nothing unallocated to add to it.
+const recordsLeast = 256 << 20
+
+// checkRecords says whether btrfs has room for its metadata: what is left of
+// what it has set aside, when the device has nothing unallocated to set
+// aside more. statfs, which the daemon's guard and the checks above read,
+// doesn't show it: on 2026-11-13 a pool said 3.4 GiB free with 1 MiB
+// unallocated and its metadata three quarters used, about 2 GiB of writes
+// from failing. false means btrfs didn't say.
+func (n node) checkRecords(ctx context.Context) (finding, bool) {
+	out, err := exec.CommandContext(ctx, n.btrfs, "filesystem", "usage", "-b", n.pool).Output()
+	if err != nil {
+		return finding{}, false
+	}
+	unallocated, size, used, ok := metadataRoom(string(out))
+	if !ok {
+		return finding{}, false
+	}
+	left := size - min(used, size)
+	f := finding{
+		name: "pool records", ok: unallocated >= 1<<30 || left >= recordsLeast,
+		detail: fmt.Sprintf("btrfs has %d MiB left for its records, and %d MiB it could add", left>>20, unallocated>>20),
+		fix: "the pool can fail writes with free space showing: grow it (truncate -s +10G the pool's file, losetup -c its loop device, " +
+			"btrfs filesystem resize max " + n.pool + "), or delete threads that are done",
+	}
+	return f, true
+}
+
+// metadataRoom reads from `btrfs filesystem usage -b` what the device has
+// unallocated, and the size and use of the metadata it has set aside.
+func metadataRoom(usage string) (unallocated, size, used uint64, ok bool) {
+	var haveUnallocated, haveMetadata bool
+	for line := range strings.SplitSeq(usage, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, found := strings.CutPrefix(line, "Device unallocated:"); found {
+			unallocated, haveUnallocated = number(rest)
+		}
+		if rest, found := strings.CutPrefix(line, "Metadata,"); found {
+			// Metadata,DUP: Size:1073741824, Used:781533184 (72.79%)
+			if _, after, found := strings.Cut(rest, "Size:"); found {
+				size, haveMetadata = number(after)
+			}
+			if _, after, found := strings.Cut(rest, "Used:"); found {
+				var usedOK bool
+				used, usedOK = number(after)
+				haveMetadata = haveMetadata && usedOK
+			}
+		}
+	}
+	return unallocated, size, used, haveUnallocated && haveMetadata
+}
+
+// number reads the digits s starts with, after spaces.
+func number(s string) (uint64, bool) {
+	s = strings.TrimSpace(s)
+	end := strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' })
+	if end < 0 {
+		end = len(s)
+	}
+	n, err := strconv.ParseUint(s[:end], 10, 64)
+	return n, err == nil
 }
 
 // checkCommits says whether Claude's commit tool can commit: the node needs

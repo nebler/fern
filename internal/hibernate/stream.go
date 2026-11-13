@@ -49,9 +49,13 @@ type message struct {
 // reads the SDK's lines (Claude's stdin), Out Claude's (its stdout). It is
 // safe for concurrent use: the two directions run in their own goroutines.
 type stream struct {
-	mu       sync.Mutex
-	session  string              // from Claude's init message
-	busy     bool                // a user message went in and no result came out since
+	mu      sync.Mutex
+	session string // from Claude's init message
+	// pending is how many user messages went in without a result coming
+	// out. A message sent while a turn runs (a steer) gets a result of its
+	// own, for the part it cut short, and the turn goes on: one flag, which
+	// that result cleared, left Claude looking idle in the middle of a turn.
+	pending  int
 	toClaude map[string]struct{} // the SDK's control requests that Claude hasn't answered
 	toSDK    map[string]struct{} // Claude's control requests that the SDK hasn't answered
 	tasks    int                 // background tasks, from Claude's newest background_tasks_changed
@@ -83,7 +87,7 @@ func (s *stream) In(line []byte) {
 	}
 	switch m.Type {
 	case "user":
-		s.busy = true
+		s.pending++
 	case "control_request":
 		s.toClaude[m.RequestID] = struct{}{}
 		if m.Request != nil && slices.Contains(replayed, m.Request.Subtype) {
@@ -122,7 +126,7 @@ func (s *stream) Out(line []byte) bool {
 			delete(s.running, m.TaskID)
 		}
 	case "result":
-		s.busy = false
+		s.pending = max(s.pending-1, 0)
 	case "control_request":
 		s.toSDK[m.RequestID] = struct{}{}
 	case "control_response":
@@ -145,7 +149,7 @@ func (s *stream) Out(line []byte) bool {
 func (s *stream) idleSince() (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	idle := s.session != "" && !s.busy && len(s.toClaude) == 0 && len(s.toSDK) == 0 &&
+	idle := s.session != "" && s.pending == 0 && len(s.toClaude) == 0 && len(s.toSDK) == 0 &&
 		s.tasks == 0 && len(s.running) == 0
 	return s.lastLine, idle
 }

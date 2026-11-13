@@ -53,9 +53,19 @@ func run(ctx context.Context, log *slog.Logger) error {
 	env := toolsEnv(dir, os.Environ())
 
 	services, guessed, err := loadServices(dir)
+	// Claude's box starts with a services.yaml that can't be read: Claude
+	// may be there to mend it, and its hint says what is wrong with it. The
+	// box that runs the services doesn't.
+	unreadable := ""
 	if err != nil {
-		return err
+		if os.Getenv("FERN_SERVICES") != "off" {
+			return err
+		}
+		unreadable = err.Error()
 	}
+	// What the environment's box runs, for Claude's hint: an agent box runs
+	// none of it, and until 2026-11-13 its hint named none either.
+	described := services
 	// An agent box runs Claude next to the box that runs the services, which
 	// installs the tools they share. A golden builder's first box installs
 	// them for the repository's setup script, which comes before the
@@ -82,7 +92,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint and the skills, only less well.
-		if err := briefClaude(claude, dir, services, guessed); err != nil {
+		if err := briefClaude(claude, dir, described, guessed, unreadable); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint and skills failed", slog.Any("error", err))
 		}
 	}

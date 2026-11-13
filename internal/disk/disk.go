@@ -225,6 +225,13 @@ func (k *Keeper) inUse(id string) bool {
 // install fetches again what it needs), and the snapshots past their
 // retention. What it couldn't remove is in the answer, not an error.
 func (k *Keeper) Free(ctx context.Context) (api.Freed, error) {
+	return k.free(ctx, true)
+}
+
+// free is Free, with Podman's images or without them: they are on the
+// server's disk, not in the pool, so removing them gives a pool that is low
+// by itself nothing, and costs the next image build its layers.
+func (k *Keeper) free(ctx context.Context, podman bool) (api.Freed, error) {
 	var freed api.Freed
 	imgs, err := image.List(k.images())
 	if err != nil {
@@ -240,7 +247,7 @@ func (k *Keeper) Free(ctx context.Context) (api.Freed, error) {
 		}
 		freed.Removed = append(freed.Removed, fmt.Sprintf("image %.12s, which a tag pointed to before", img.ID))
 	}
-	if k.cfg.Podman != nil {
+	if podman && k.cfg.Podman != nil {
 		out, err := k.cfg.Podman(ctx, "image", "prune", "--all", "--force")
 		switch n := len(bytes.Fields(out)); {
 		case errors.Is(err, exec.ErrNotFound):
@@ -295,26 +302,34 @@ func (k *Keeper) Run(ctx context.Context, interval time.Duration) {
 			k.log.WarnContext(ctx, "reading the pool's free space failed", slog.Any("error", err))
 			continue
 		}
-		if !low(sp) || !last.IsZero() && time.Since(last) < again {
+		poolLow, underLow := low(sp)
+		if !poolLow && !underLow || !last.IsZero() && time.Since(last) < again {
 			continue
 		}
 		last = time.Now()
-		freed, err := k.Free(ctx)
+		freed, err := k.free(ctx, underLow)
 		if err != nil {
 			k.log.WarnContext(ctx, "freeing disk space failed", slog.Any("error", err))
 			continue
 		}
-		k.log.WarnContext(ctx, "the disk was low: freed what nothing needs",
+		attrs := []any{
+			slog.Bool("pool_low", poolLow), slog.Bool("disk_low", underLow),
 			slog.Any("removed", freed.Removed), slog.Any("failed", freed.Failed),
-			slog.Uint64("pool_free", freed.Pool.Free), slog.Uint64("pool_least", sp.Least))
+			slog.Uint64("pool_free", freed.Pool.Free), slog.Uint64("pool_least", sp.Least),
+		}
+		if len(freed.Removed) == 0 {
+			// Until 2026-11-13 this said "freed what nothing needs" once an
+			// hour, having freed nothing, and pruned Podman each time.
+			k.log.WarnContext(ctx, "the disk is low and nothing is left to free: delete threads that are done, or grow the pool; "+
+				"fern df shows what uses it, and below pool_least new snapshots are refused", attrs...)
+			continue
+		}
+		k.log.WarnContext(ctx, "the disk was low: freed what nothing needs", attrs...)
 	}
 }
 
-// low reports whether the pool or the disk under it is close to where the
-// store refuses new snapshots.
-func low(sp store.Space) bool {
-	if sp.Pool.Free < 2*sp.Least {
-		return true
-	}
-	return sp.Under != nil && sp.Under.Free < max(2*sp.Least, sp.Under.Total/10)
+// low reports whether the pool, and whether the disk under it, is close to
+// where the store refuses new snapshots.
+func low(sp store.Space) (pool, under bool) {
+	return sp.Pool.Free < 2*sp.Least, sp.Under != nil && sp.Under.Free < max(2*sp.Least, sp.Under.Total/10)
 }

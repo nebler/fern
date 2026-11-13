@@ -131,6 +131,7 @@ func (a *actor) endExec(n, wake int, how ending, level slog.Level) {
 			// The first to say so of this wake: the next command wakes it again.
 			a.phase, a.addr, a.token = boxMaybeUp, "", ""
 			a.crashes = append(a.crashes, time.Now())
+			a.crashCause = "it stopped answering under a command, as a box does that ran out of memory"
 			a.g.log.WarnContext(ctx, "box didn't answer", slog.String("env", a.id), slog.Int("exec", n))
 		}
 		r, ok := a.running[n]

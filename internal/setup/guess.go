@@ -145,7 +145,7 @@ func MakeGuess(dir string) (Guess, error) {
 	if pg != nil {
 		url := fmt.Sprintf("postgres://%s:%s@localhost:5432/%s", pg.user, pg.password, pg.db)
 		web = fmt.Sprintf("export DATABASE_URL=${DATABASE_URL:-%s}; %s", url, web)
-		fmt.Fprintf(&services, "  postgres:\n    run: %s\n    stop: pg_ctl stop -D .fern/pg -m fast\n    ready: test -e .fern/pg-ready && pg_isready -q -h 127.0.0.1\n",
+		fmt.Fprintf(&services, "  postgres:\n    run: %s\n    stop: pg_ctl stop -D .fern/pg -m fast\n    ready: test -e .fern/pg/fern-ready && pg_isready -q -h 127.0.0.1\n",
 			quote(postgresRun(pg)))
 	}
 	// A golden build's first start installs the dependencies; a thread's
@@ -368,17 +368,27 @@ func composeEnv(v any) map[string]string {
 // postgresRun runs Postgres with its data in the environment (.fern/pg), on
 // localhost:5432 and the image's socket, and once creates the role and the
 // database the compose file's do; trust auth takes any password.
+//
+// The data folder ignores itself for git, and the marker of the first start
+// is in it: a repository that takes Fern's guess has no .gitignore for
+// .fern, and until 2026-11-13 T3's checkpoints added the running database to
+// the repository's git objects at every turn, a revert wrote git's copy of
+// it over the snapshot's, and the commit tool would have committed it. The
+// .gitignore can't be there before initdb, which wants an empty folder. A
+// database made before then has its marker beside the folder: it moves in.
 func postgresRun(pg *postgres) string {
 	return strings.Join([]string{
 		`set -e`,
 		`PGDATA=.fern/pg`,
 		`if [ ! -s $PGDATA/PG_VERSION ]; then rm -rf $PGDATA; mkdir -p .fern; initdb --no-sync -D $PGDATA -U postgres --auth=trust >/dev/null; fi`,
+		`[ -e $PGDATA/.gitignore ] || echo '*' > $PGDATA/.gitignore`,
+		`if [ -e .fern/pg-ready ]; then mv .fern/pg-ready $PGDATA/fern-ready; fi`,
 		`rm -f $PGDATA/postmaster.pid`,
 		`postgres -D $PGDATA -k /tmp -c listen_addresses=127.0.0.1 &`,
-		`if [ ! -e .fern/pg-ready ]; then until pg_isready -q -h 127.0.0.1; do sleep 0.2; done`,
+		`if [ ! -e $PGDATA/fern-ready ]; then until pg_isready -q -h 127.0.0.1; do sleep 0.2; done`,
 		fmt.Sprintf(`psql -q -h 127.0.0.1 -U postgres -c "DO \$\$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%[1]s') THEN CREATE ROLE %[1]s LOGIN SUPERUSER; END IF; END\$\$"`, pg.user),
 		fmt.Sprintf(`(psql -q -h 127.0.0.1 -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '%[1]s'" | grep -q 1 || createdb -h 127.0.0.1 -U postgres -O %[2]s %[1]s)`, pg.db, pg.user),
-		`touch .fern/pg-ready; fi`,
+		`touch $PGDATA/fern-ready; fi`,
 		`wait`,
 	}, "\n")
 }

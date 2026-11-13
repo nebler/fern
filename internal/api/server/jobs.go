@@ -121,7 +121,7 @@ func (s *Server) startJob(ctx context.Context, id string, in bashInput, key stri
 	if err != nil {
 		return "", err
 	}
-	err = j.box.Start(ctx, boxexec.JobRequest{ID: jobID, Argv: []string{"/bin/sh", "-c", in.Command}})
+	err = j.box.Start(ctx, boxexec.JobRequest{ID: jobID, Argv: []string{shell, "-c", in.Command}})
 	if err != nil && !errors.Is(err, boxexec.ErrJobExists) {
 		j.cancel()
 		ex.Close()
@@ -212,8 +212,15 @@ func (s *Server) keepJob(wctx context.Context, id string, j *job, ex *actor.Exec
 			// Its box may be gone without its actor knowing yet.
 			j.state.Store(int32(jobLost))
 		default:
-			// The job still counts, so its box is up.
-			if o, err := j.box.Read(wctx, j.id); err == nil {
+			// The job still counts, so its box is up. A box that says the job
+			// still runs is on its way down, with an older fern-init whose wait
+			// ended without saying why: the job didn't end by itself.
+			o, err := j.box.Read(wctx, j.id)
+			if err == nil && o.Running {
+				j.state.Store(int32(jobLost))
+				break
+			}
+			if err == nil {
 				j.keep(o)
 			}
 			j.state.Store(int32(jobExited))
@@ -228,7 +235,8 @@ func (s *Server) findJob(id, jobID string) (*job, error) {
 	if j, ok := s.jobs.byEnv[id][jobID]; ok {
 		return j, nil
 	}
-	return nil, fmt.Errorf("no background command %s", jobID)
+	return nil, fmt.Errorf("no background command %s: the daemon keeps them in memory, so one is forgotten when the daemon restarts after its box has slept. "+
+		"If it wrote to a file in the worktree, read that", jobID)
 }
 
 // readJob returns environment id's job jobID's output since the last read,
@@ -251,6 +259,12 @@ func (s *Server) readJob(ctx context.Context, id, jobID string, wait time.Durati
 			ex.CloseAndSleep(bashLinger)
 		}
 		cancel()
+		// A daemon that stops ends the watch, not the job: this call's answer
+		// goes nowhere (MCPHandler), and reading the box now would take the
+		// output from the call the relay sends the next daemon.
+		if s.stopping() {
+			return "", errors.New("the daemon is restarting")
+		}
 	}
 	if j.is(jobBoxStopped) {
 		return j.stopped(), nil // without a call to a box that isn't there

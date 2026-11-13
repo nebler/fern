@@ -1140,8 +1140,13 @@ func TestFailingWakes(t *testing.T) {
 				t.Fatalf("wake %d: %v, want the driver's error", i+1, err)
 			}
 		}
-		if _, err := g.Exec(t.Context(), "demo", func() {}); !errors.Is(err, actor.ErrCrashing) {
+		_, err := g.Exec(t.Context(), "demo", func() {})
+		if !errors.Is(err, actor.ErrCrashing) {
 			t.Fatalf("fourth command: %v, want ErrCrashing without another wake", err)
+		}
+		// Whoever reads it can't read the box's log: it says why.
+		if !strings.Contains(err.Error(), "the last time because: runsc: boom") {
+			t.Errorf("fourth command: %v, want it to say why the box last failed", err)
 		}
 		drv.FailWakes("demo", nil)
 		if err := g.Wake(t.Context(), "demo"); err != nil {

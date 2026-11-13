@@ -210,9 +210,13 @@ func (g *Group) Run(ctx context.Context) error {
 	// An actor ends when its box sleeps; the next one goes on counting
 	// the box's crashes.
 	crashes := make(map[string][]time.Time)
+	causes := make(map[string]string)
 	exited := make(chan *actor)
 	start := func(id string, awake bool) *actor {
-		a := &actor{id: id, g: g, mailbox: make(chan message), done: make(chan struct{}), crashes: slices.Clone(crashes[id])}
+		a := &actor{
+			id: id, g: g, mailbox: make(chan message), done: make(chan struct{}),
+			crashes: slices.Clone(crashes[id]), crashCause: causes[id],
+		}
 		actors[id] = a
 		wg.Go(func() {
 			a.run(ctx, awake)
@@ -232,9 +236,10 @@ func (g *Group) Run(ctx context.Context) error {
 		}
 		delete(actors, a.id)
 		if cs := recent(a.crashes); len(cs) > 0 {
-			crashes[a.id] = cs
+			crashes[a.id], causes[a.id] = cs, a.crashCause
 		} else {
 			delete(crashes, a.id)
+			delete(causes, a.id)
 		}
 	}
 	states, err := g.driver.States(ctx)
@@ -416,7 +421,10 @@ type actor struct {
 	stopWatch func()
 	// crashes are when the box was found dead or failed to wake, within
 	// crashWindow; Run reads them once the actor is done, for the next.
-	crashes []time.Time
+	// crashCause is why, the last time: what whoever is told that it keeps
+	// crashing needs, and can't read from a log on the node.
+	crashes    []time.Time
+	crashCause string
 	// setup makes the next wake of a golden builder's box the one for its
 	// repository's setup script (runsc.Setup): a build sets it for that
 	// step (buildGolden).
@@ -484,9 +492,10 @@ func (a *actor) wake(ctx context.Context) error {
 		return nil
 	}
 	if a.crashes = recent(a.crashes); len(a.crashes) >= crashLimit {
-		return fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, and is woken again after %s, or by fern wake; "+
-			"its log is boxes/%s/log in the pool", a.id, ErrCrashing, len(a.crashes), crashWindow,
-			a.crashes[0].Add(crashWindow).Format(time.TimeOnly), a.id)
+		return fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, the last time because: %s. "+
+			"It is tried again in %s, or at once by `fern wake %s` on the server, where its log is boxes/%s/log in the pool",
+			a.id, ErrCrashing, len(a.crashes), crashWindow, a.crashCause,
+			time.Until(a.crashes[0].Add(crashWindow)).Round(time.Second), a.id, a.id)
 	}
 	// Set first: a wake that fails half-way may leave the box running. Its
 	// idle times start now, so a slow wake isn't put back to sleep at once.
@@ -504,13 +513,13 @@ func (a *actor) wake(ctx context.Context) error {
 	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
-		a.crashes = append(a.crashes, time.Now())
+		a.crashes, a.crashCause = append(a.crashes, time.Now()), err.Error()
 		return err
 	}
 	// The driver made the token at the box's start, or kept it since.
 	token, err := a.g.driver.Token(a.id)
 	if err != nil {
-		a.crashes = append(a.crashes, time.Now())
+		a.crashes, a.crashCause = append(a.crashes, time.Now()), err.Error()
 		return fmt.Errorf("the token of %s: %w", a.id, err)
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))

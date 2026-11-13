@@ -34,6 +34,9 @@ type hint struct {
 	// tools: the repository pins tools, or Fern guessed some, which the box
 	// installs with mise when it starts (setup.ToolsKey).
 	tools bool
+	// unreadable is why services.yaml can't be read; "" if it can. The box
+	// that runs Claude's commands doesn't start until it can.
+	unreadable string
 	// notes are the active skill packs' notes (packNotes).
 	notes []string
 }
@@ -41,8 +44,8 @@ type hint struct {
 // briefClaude writes Claude's hint into claudeDir and gives it the active
 // skill packs, for the repository in workspace dir. A repository file it
 // can't read leaves out what it would have said, not the rest.
-func briefClaude(claudeDir, dir string, services map[string]service, guessed bool) error {
-	h := hint{services: services, guessed: guessed, preview: os.Getenv("FERN_PREVIEW")}
+func briefClaude(claudeDir, dir string, services map[string]service, guessed bool, unreadable string) error {
+	h := hint{services: services, guessed: guessed, preview: os.Getenv("FERN_PREVIEW"), unreadable: unreadable}
 	var errs []error
 	cloudflare, err := setup.IsCloudflare(dir)
 	errs = append(errs, err)
@@ -107,6 +110,9 @@ func writeHint(claudeDir string, h hint) error {
 	fmt.Fprintln(&b, "# You are in a Fern environment")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "- This thread's worktree is its own environment, in a sandboxed box. Other threads have their own copies; nothing you change here reaches them or the main branch's data.")
+	if h.unreadable != "" {
+		fmt.Fprintf(&b, "- **services.yaml can't be read, so the box that runs your Bash commands doesn't start: every Bash call fails until the file is right.** The fault: %s. Mend it with Read and Edit, which work without that box; the next Bash call starts the box with the file as it is then.\n", h.unreadable)
+	}
 	if len(h.services) > 0 {
 		fmt.Fprintf(&b, "- The box runs this repository's services (services.yaml): %s. Use them directly; one that isn't running yet starts at its first connection.\n",
 			strings.Join(slices.Sorted(maps.Keys(h.services)), ", "))
@@ -115,7 +121,8 @@ func writeHint(claudeDir string, h hint) error {
 			fmt.Fprintln(&b, "- The repository has no services.yaml: Fern guessed these from package.json (and docker-compose's Postgres, as DATABASE_URL). If one doesn't run right, write a services.yaml at the root to replace the guess; `cat .fern/tools/guess.toml` shows the Node and package manager it chose.")
 		}
 	}
-	fmt.Fprintln(&b, "- Only the worktree lasts. The box your Bash commands run in stops a few seconds after a command returns, unless a background command is running, and starts again at the next one with an empty /tmp and no processes. Keep anything you need later in the worktree, in a folder git ignores (such as .fern/scratch with a .gitignore of `*`), never in /tmp.")
+	fmt.Fprintln(&b, "- Only the worktree lasts. The box your Bash commands run in stops a few seconds after a command returns, unless a background command is running, and starts again at the next one with an empty /tmp and no processes. Keep anything you need later in the worktree, in a folder git ignores (such as .fern/scratch with a .gitignore of `*`), never in /tmp. The home folder there is /tmp too: what an installer puts under `~` (rustup, `pip install --user`, `cargo install`, `npm install -g`) is gone at the next command, so point installers into the worktree.")
+	fmt.Fprintln(&b, "- Read, Write and Edit run beside that box, not in it: they see the worktree as Bash does, and nothing else of it. A file Bash wrote to /tmp isn't there for Read; write it into the worktree.")
 	if h.tools {
 		fmt.Fprintln(&b, "- The box installs the tools this repository pins (mise) when it starts, which is quick once they are there. If one is missing (`command not found`), the install failed or ran out of time: run `mise install` with Bash, with run_in_background if it is slow, and read what it says.")
 	}

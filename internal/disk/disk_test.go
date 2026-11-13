@@ -218,19 +218,22 @@ func TestRunFreesWhenLow(t *testing.T) {
 		return sp
 	}
 	tests := []struct {
-		name  string
-		space *store.Space
-		want  int32 // times freed in 90 minutes
+		name   string
+		space  *store.Space
+		want   int32 // times freed in 90 minutes
+		podman int   // of them, with Podman's images
 	}{
-		{"room on both", roomy(), 0},
-		{"a pool close to refusing snapshots", low(func(sp *store.Space) { sp.Pool.Free = 4 * gib }), 2},
-		{"a disk under the pool with less than a tenth free", low(func(sp *store.Space) { sp.Under.Free = 7 * gib }), 2},
-		{"a pool on a partition of its own", low(func(sp *store.Space) { sp.Under = nil }), 0},
+		{"room on both", roomy(), 0, 0},
+		// Podman's images are on the server's disk: removing them gives a
+		// full pool nothing.
+		{"a pool close to refusing snapshots", low(func(sp *store.Space) { sp.Pool.Free = 4 * gib }), 2, 0},
+		{"a disk under the pool with less than a tenth free", low(func(sp *store.Space) { sp.Under.Free = 7 * gib }), 2, 2},
+		{"a pool on a partition of its own", low(func(sp *store.Space) { sp.Under = nil }), 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				cfg, _ := node(t, nil)
+				cfg, calls := node(t, nil)
 				pool, envs := &fakePool{}, &fakeEnvs{}
 				pool.space.Store(tt.space)
 				ctx, cancel := context.WithCancel(t.Context())
@@ -245,6 +248,9 @@ func TestRunFreesWhenLow(t *testing.T) {
 				<-done
 				if got := envs.pruned.Load(); got != tt.want {
 					t.Errorf("freed %d times in 90 minutes, want %d", got, tt.want)
+				}
+				if got := len(*calls); got != tt.podman {
+					t.Errorf("Podman's images were removed %d times, want %d: %v", got, tt.podman, *calls)
 				}
 			})
 		})

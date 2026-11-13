@@ -34,6 +34,9 @@ func TestDoctor(t *testing.T) {
 		"proc/sys/net/ipv4/ip_forward":    "0\n",
 		"proc/meminfo":                    "MemTotal: 8000000 kB\nMemAvailable:    2048000 kB\n",
 		"bin/runsc":                       "#!/bin/sh\necho 'runsc version release-20261012'\n",
+		// A pool with no room left for btrfs's records: 100 MiB of 1 GiB
+		// left, and 1 MiB unallocated.
+		"bin/btrfs": "#!/bin/sh\necho '    Device unallocated:		           1048576'\necho 'Metadata,DUP: Size:1073741824, Used:968884224 (90.23%)'\n",
 		// A git that knows an author's name, and no e-mail.
 		"bin/git": "#!/bin/sh\ncase $5 in user.name) echo Ada ;; esac\n",
 	} {
@@ -61,6 +64,7 @@ func TestDoctor(t *testing.T) {
 	defer cf.Close()
 	n.cloudflare = cf.URL
 	n.git = filepath.Join(root, "bin/git")
+	n.btrfs = filepath.Join(root, "bin/btrfs")
 
 	got := make(map[string]string)
 	for _, f := range n.check(t.Context(), api.NewClient(d.socket)) {
@@ -78,7 +82,7 @@ func TestDoctor(t *testing.T) {
 	want := map[string]string{
 		"daemon": "ok", "T3": "ok", "Claude login": "ok", "pool": "fail", "gVisor": "ok", "box image": "ok",
 		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info", "backups": "info",
-		"Cloudflare": "info", "commits": "info",
+		"Cloudflare": "info", "commits": "info", "pool records": "fail",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)
@@ -118,5 +122,27 @@ func TestDoctorGitHub(t *testing.T) {
 				t.Errorf("checkGitHub() = %+v, want ok %v, %q, and a fix unless ok", got, tc.wantOK, tc.wantDetail)
 			}
 		})
+	}
+}
+
+func TestMetadataRoom(t *testing.T) {
+	const usage = `Overall:
+    Device size:		       64424509440
+    Device allocated:		       53686042624
+    Device unallocated:		       10738466816
+    Used:			       49719373824
+
+Data,single: Size:51521781760, Used:48090607616 (93.34%)
+   /dev/loop0	51521781760
+
+Metadata,DUP: Size:1073741824, Used:781533184 (72.79%)
+   /dev/loop0	2147483648
+`
+	unallocated, size, used, ok := metadataRoom(usage)
+	if !ok || unallocated != 10738466816 || size != 1073741824 || used != 781533184 {
+		t.Errorf("metadataRoom() = %d, %d, %d, %t; want 10738466816, 1073741824, 781533184, true", unallocated, size, used, ok)
+	}
+	if _, _, _, ok := metadataRoom("ERROR: not a btrfs filesystem\n"); ok {
+		t.Error("metadataRoom() of an error message says it read the numbers")
 	}
 }

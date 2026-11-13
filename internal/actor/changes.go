@@ -176,6 +176,11 @@ func (g *Group) PruneAll(ctx context.Context) error {
 	}
 	for _, env := range envs {
 		err := g.do(ctx, "prune", env.ID, func(ctx context.Context, _ *actor) error {
+			// A builder keeps fewer, of goldens: until its next build it had
+			// as many as it was left with.
+			if setup.IsBuilder(env.ID) {
+				return g.store.PruneGoldens(ctx, env.ID)
+			}
 			return g.store.Prune(ctx, env.ID)
 		})
 		if ctx.Err() != nil {

@@ -916,12 +916,12 @@ func TestClipped(t *testing.T) {
 		{
 			name:   "one long write",
 			writes: []string{strings.Repeat("a", 50) + strings.Repeat("b", 1000) + strings.Repeat("c", 50)},
-			want:   strings.Repeat("a", 50) + "\n[… 1000 bytes left out …]\n" + strings.Repeat("c", 50),
+			want:   strings.Repeat("a", 50) + "\n[… 1000 bytes left out here, for good: send long output to a file and read the part you need …]\n" + strings.Repeat("c", 50),
 		},
 		{
 			name:   "small writes",
 			writes: slices.Repeat([]string{"x"}, 1000),
-			want:   strings.Repeat("x", 50) + "\n[… 900 bytes left out …]\n" + strings.Repeat("x", 50),
+			want:   strings.Repeat("x", 50) + "\n[… 900 bytes left out here, for good: send long output to a file and read the part you need …]\n" + strings.Repeat("x", 50),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

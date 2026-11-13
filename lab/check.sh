@@ -1517,8 +1517,10 @@ t3() {
   check "and so is one in a project T3 cloned into its home" yes \
     "$(in_t3 "mkdir -p \$HOME/fern-check-clone && cd \$HOME/fern-check-clone && claude --resume 00000000-0000-4000-8000-000000000000 -p hi 2>&1; true" | grep -q 'New worktree' && echo yes || echo no)"
   in_t3 "rm -rf \$HOME/fern-check-clone"
-  check "T3's new threads are New worktrees, and deleting one removes it" "worktree true" \
-    "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete'")"
+  check "T3's new threads are New worktrees, and deleting one removes it, untracked files and all" "worktree true tracked-changes" \
+    "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete + \" \" + s.storageCleanup.worktreeKeepWhen'")"
+  check "T3 doesn't offer its browser, or write text with a Codex the image lacks" "false false" \
+    "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.enableAgentBrowserAccess + \" \" + s.providerInstances.codex.enabled'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
   metric t3.checkpoint_ms "checkpoint snapshot, ms" "$(resource_op t3.checkpoint snapshot --replace t3c c1 | took)"
   in_t3 "echo v2 > $W/a.txt"
@@ -1577,7 +1579,7 @@ guess() {
     return
   fi
   check "it holds the guessed tools, node_modules and the database" "yes yes yes yes" \
-    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in .fern/tools/guess.toml .fern/tools/installs/pnpm node_modules/.pnpm .fern/pg-ready; do test -e \$p && echo yes || echo no; done" | xargs)"
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in .fern/tools/guess.toml .fern/tools/installs/pnpm node_modules/.pnpm .fern/pg/fern-ready .fern/pg/.gitignore; do test -e \$p && echo yes || echo no; done" | xargs)"
   fern create guess2 --path $W/two >/dev/null
   start=$(now_ms)
   check "a preview wakes the thread and the guessed dev server serves" yes \
@@ -1716,7 +1718,7 @@ next() {
     return
   fi
   check "it holds npm's node_modules, Next and the database" "yes yes" \
-    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in node_modules/next .fern/pg-ready; do test -e \$p && echo yes || echo no; done" | xargs)"
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in node_modules/next .fern/pg/fern-ready; do test -e \$p && echo yes || echo no; done" | xargs)"
   fern create next2 --path $W/two >/dev/null
   start=$(now_ms)
   page=$(on_node curl -s -m 300 -H "Host: next2.localhost:30780" http://127.0.0.1:30780/ </dev/null | sed 's/<!-- -->//g')

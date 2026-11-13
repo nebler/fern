@@ -225,6 +225,11 @@ func (js *Jobs) wait(w http.ResponseWriter, r *http.Request) {
 	case <-j.ended:
 		w.WriteHeader(http.StatusNoContent)
 	case <-r.Context().Done():
+		// The client has gone, or the box is stopping and its jobs with it:
+		// not the job's own end. Without a status this was a 200, which the
+		// daemon read as "ended" and then asked a box that was killing the
+		// job how it had ended.
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 }
 
