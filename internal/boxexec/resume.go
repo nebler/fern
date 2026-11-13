@@ -143,14 +143,17 @@ func (c *sessionClient) ackIn(n uint64) {
 func (c *sessionClient) sendStdin(ctx context.Context, conn *websocket.Conn, next uint64) {
 	for {
 		c.mu.Lock()
-		for next >= c.inBase+uint64(len(c.in)) && ctx.Err() == nil {
+		// Frames the box has acknowledged are gone from c.in: start at the
+		// first one kept. Raised before the wait, not after: a next below
+		// inBase with nothing kept would skip the wait and index an empty
+		// buffer (a test panicked so, 2026-11-13).
+		for next = max(next, c.inBase); next >= c.inBase+uint64(len(c.in)) && ctx.Err() == nil; next = max(next, c.inBase) {
 			c.changed.Wait()
 		}
 		if ctx.Err() != nil {
 			c.mu.Unlock()
 			return
 		}
-		next = max(next, c.inBase)
 		frame := c.in[next-c.inBase]
 		c.mu.Unlock()
 		if conn.Write(ctx, websocket.MessageBinary, frame) != nil {

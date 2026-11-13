@@ -69,6 +69,13 @@ type session struct {
 	stdin   chan []byte        // to the command, from feed
 	over    chan struct{}      // closed when the command's handler is done
 	settled chan struct{}      // closed when outcome leaves open
+	// opened is closed once the first connection is the session's: a later
+	// one waits for it (serveSession). The session is listed before its
+	// command starts, and its first connection served only after that; a
+	// second connection that came in between was served first, and the
+	// first then took over from it and gave the command the stdin it had
+	// buffered a second time (a test saw it once in 150 runs, 2026-11-13).
+	opened chan struct{}
 
 	mu      sync.Mutex
 	changed sync.Cond // on mu: any of what follows changed, or a connection's context ended
@@ -90,6 +97,7 @@ func newSession(grace time.Duration, kill context.CancelFunc) *session {
 	s := &session{
 		grace: grace, kill: kill,
 		stdin: make(chan []byte), over: make(chan struct{}), settled: make(chan struct{}),
+		opened: make(chan struct{}),
 	}
 	s.changed.L = &s.mu
 	return s
@@ -222,6 +230,11 @@ func (s *session) serve(ctx context.Context, conn *websocket.Conn, seen uint64) 
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
+	}
+	select {
+	case <-s.opened:
+	default:
+		close(s.opened)
 	}
 	s.mu.Unlock()
 	if old != nil {
@@ -451,6 +464,14 @@ func (s *Server) serveSession(ctx context.Context, conn *websocket.Conn, req Req
 	s.mu.Unlock()
 	switch {
 	case sess != nil:
+		// Not before the connection that started it: it would take over
+		// from this one.
+		select {
+		case <-sess.opened:
+		case <-sess.settled:
+		case <-ctx.Done():
+			return
+		}
 		sess.serve(ctx, conn, req.Seen)
 	case finished:
 		// All that is left of it: its client asked again because it lost it.
