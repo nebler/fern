@@ -163,6 +163,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	var relayErr chan error
 	var relay *http.Server
 	if daemon := os.Getenv("FERN_MCP"); daemon != "" {
+		// The daemon asks every agent box whether it has the relay, to tell
+		// apart one running since before 2026-11-12, which doesn't answer
+		// as this does: the route goes when the daemon stops asking (tools'
+		// mcpURL).
 		mux.Handle("GET "+mcprelay.Path, mcprelay.Check(token))
 		relay = &http.Server{
 			Addr:              "127.0.0.1:" + strconv.Itoa(mcprelay.Port),

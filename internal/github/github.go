@@ -125,6 +125,22 @@ func Load(dir, base string) (*App, error) {
 // name is an owner's or a repository's name as GitHub allows them.
 var name = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
 
+// remote matches a GitHub remote's URL in the forms git takes, over HTTPS
+// (with a user in it or not) or SSH: its owner and repository.
+var remote = regexp.MustCompile(`^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
+
+// Repository returns the owner and repository a git remote's URL names, as
+// `git remote get-url origin` prints it: https://github.com/o/r(.git),
+// git@github.com:o/r(.git) or ssh://git@github.com/o/r(.git). It is false
+// for anything else, such as another host's.
+func Repository(url string) (owner, repo string, ok bool) {
+	m := remote.FindStringSubmatch(strings.TrimSpace(url))
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
 // gitPermissions are what git and gh need. workflows lets a push change
 // .github/workflows; an App that may not is asked without it.
 var (

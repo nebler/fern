@@ -11,7 +11,6 @@ import (
 
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/backup"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -60,7 +59,7 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 		return nil, err
 	}
 	for _, env := range envs {
-		if _, source := setup.BuilderOf(env.ID); !setup.IsBuilder(env.ID) || source {
+		if _, source := store.BuilderOf(env.ID); !store.IsBuilder(env.ID) || source {
 			continue
 		}
 		failed, ok, err := c.Store.BuildFailure(ctx, env.ID)

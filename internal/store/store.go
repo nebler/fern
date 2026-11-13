@@ -23,6 +23,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -148,6 +150,57 @@ func ForkOf(fork string) (string, int, bool) {
 		return "", 0, false
 	}
 	return fork[:i], n, true
+}
+
+// builderPrefix starts the IDs of the environments that build goldens.
+const builderPrefix = "golden-"
+
+// IsBuilder reports whether environment id builds golden snapshots. Its box
+// gets no credentials: what it makes goes into every thread of its
+// repository.
+func IsBuilder(id string) bool { return strings.HasPrefix(id, builderPrefix) }
+
+// sourceSuffix ends the ID of the environment that holds a checkout sent
+// ahead of a repository's first worktree, until its golden build has copied
+// it. An ID from BuilderID ends in hex, so the suffix can't be part of one.
+const sourceSuffix = "-src"
+
+// SourceID returns the ID of the environment that holds repo's checkout for
+// a golden build ahead of its first worktree.
+func SourceID(repo string) string { return BuilderID(repo) + sourceSuffix }
+
+// BuilderOf returns the ID of the builder whose source environment id is,
+// from SourceID, or false if id isn't one.
+func BuilderOf(id string) (string, bool) {
+	if !IsBuilder(id) {
+		return "", false
+	}
+	return strings.CutSuffix(id, sourceSuffix)
+}
+
+// BuilderID returns the ID of the environment that builds repo's golden
+// snapshots.
+func BuilderID(repo string) string {
+	sum := sha256.Sum256([]byte(repo))
+	name := strings.ToLower(repo)
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	// A readable part and a hash, so that two names that read the same
+	// (My_App, my-app) stay apart, within a DNS label's 63 characters.
+	readable := strings.Trim(b.String(), "-")
+	if len(readable) > 30 {
+		readable = strings.Trim(readable[:30], "-")
+	}
+	if readable == "" {
+		readable = "repo"
+	}
+	return builderPrefix + readable + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
 func checkSnapID(id string) error {

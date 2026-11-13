@@ -19,7 +19,7 @@ const (
 
 // notices returns what has gone wrong on the node that the person working
 // in environment env should hear of, a sentence or two each: its Claude is
-// told at its box's start (runsc.Box.Notices, fern-init's hint) and passes
+// told at its box's start (claudeVars, fern-init's hint) and passes
 // it on. The thread is where the person looks; the daemon's log is not.
 // Something that can't be read is left out: a notice never holds up a wake.
 //
@@ -36,7 +36,7 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 		}
 	}
 	// The repository of a worktree is its parent folder (golden).
-	builder := setup.ID(filepath.Base(filepath.Dir(env.Workspace)))
+	builder := store.BuilderID(filepath.Base(filepath.Dir(env.Workspace)))
 	failed, ok, err := g.store.BuildFailure(ctx, builder)
 	if err != nil || !ok {
 		return out

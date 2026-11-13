@@ -412,7 +412,7 @@ func TestCloseAndSleep(t *testing.T) {
 // Each box is woken with what it runs and gets: Claude's folder goes only
 // to the box that runs Claude, and never to a golden builder's.
 func TestBoxes(t *testing.T) {
-	builder := setup.ID("r")
+	builder := store.BuilderID("r")
 	for _, tc := range []struct {
 		name   string
 		agents bool
@@ -952,7 +952,7 @@ func TestGolden(t *testing.T) {
 			t.Fatal(err)
 		}
 		synctest.Wait()
-		builder := setup.ID("sample")
+		builder := store.BuilderID("sample")
 		key, err := setup.Key(filepath.Join(repo, "one"), "box")
 		if err != nil {
 			t.Fatal(err)
@@ -1023,7 +1023,7 @@ func TestPrebuild(t *testing.T) {
 		st, drv := newFakeStore(), runsc.NewFake("box")
 		st.seeds = filepath.Join(tmp, "seeds")
 		g := start(t, st, drv, idle)
-		builder, src := setup.ID("sample"), setup.SourceID("sample")
+		builder, src := store.BuilderID("sample"), store.SourceID("sample")
 		key, err := setup.Key(wt, "box")
 		if err != nil {
 			t.Fatal(err)
@@ -1068,7 +1068,7 @@ func TestPrebuild(t *testing.T) {
 			t.Fatal(err)
 		}
 		synctest.Wait()
-		if exists(setup.SourceID("plain")) || exists(setup.ID("plain")) {
+		if exists(store.SourceID("plain")) || exists(store.BuilderID("plain")) {
 			t.Error("a repository without a setup contract left a source or a builder, want neither")
 		}
 	})

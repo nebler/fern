@@ -88,10 +88,21 @@ func (s *Server) running(by int) {
 	}
 }
 
+// Authorized reports whether r carries token as its bearer token, which
+// the daemon sends with every request to a box's fern-init; one that
+// doesn't is answered here, with 401. The comparison takes the same time
+// whatever the request sent, so it tells nothing of the token.
+func Authorized(w http.ResponseWriter, r *http.Request, token string) bool {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // ServeActivity answers with the box's Activity.
 func (s *Server) ServeActivity(w http.ResponseWriter, r *http.Request) {
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if !Authorized(w, r, s.token) {
 		return
 	}
 	s.mu.Lock()
@@ -129,9 +140,7 @@ func NewServer(token, dir string, env []string, log *slog.Logger) *Server {
 
 // ServeHTTP runs one command over a WebSocket.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	want := "Bearer " + s.token
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if !Authorized(w, r, s.token) {
 		return
 	}
 	conn, err := Accept(w, r)

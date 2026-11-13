@@ -14,27 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"sigs.k8s.io/yaml"
-
 	"github.com/nebler/fern/internal/setup"
 )
 
-// service is one entry in services.yaml. Commands are shell scripts, run
-// with /bin/sh -c in the workspace.
-type service struct {
-	Run   string `json:"run"`
-	Stop  string `json:"stop,omitempty"`  // graceful stop; else SIGTERM
-	Ready string `json:"ready,omitempty"` // exits 0 when the service is ready
-	// Listen is where the service accepts connections, "unix:PATH" or
-	// "tcp:PORT": fern-init holds it and starts the service on demand, at
-	// its first connection (onDemand). Without it, the service starts with
-	// the box.
-	Listen string `json:"listen,omitempty"`
-	// Port is the port the service serves on, which it gets as PORT. The
-	// first service with one, by name, is the environment's default
-	// preview (internal/preview).
-	Port int `json:"port,omitempty"`
-}
+// service is one entry in services.yaml, as setup reads it and fern-init
+// runs it: its commands are shell scripts, run with /bin/sh -c in the
+// workspace, and one with Listen is started on demand (onDemand).
+type service setup.Service
 
 // environ returns the environment the service's commands run with: env,
 // and PORT if it has a port.
@@ -57,22 +43,16 @@ func loadServices(dir string) (services map[string]service, guessed bool, err er
 	return services, guessed, err
 }
 
-// parseServices parses services.yaml; every service needs a run command.
+// parseServices parses services.yaml as the box that runs it does, strictly
+// (setup.ParseServices), and returns its services: every one needs a run
+// command, a port that is one and a socket fern-init can listen on. What
+// else the file holds (golden.inputs, limits) is the daemon's to read.
 func parseServices(data []byte) (map[string]service, error) {
-	var f struct {
-		Services map[string]service `json:"services"`
-		// Golden lists the files a golden build depends on; the daemon reads
-		// it (internal/setup), fern-init doesn't.
-		Golden struct {
-			Inputs []string `json:"inputs,omitempty"`
-		} `json:"golden"`
-		// Limits are what the box asks to be given; the daemon reads them
-		// too, when it wakes the box (internal/runsc).
-		Limits setup.Limits `json:"limits"`
+	f, err := setup.ParseServices(data)
+	if err != nil || f.Services == nil {
+		return nil, err
 	}
-	if err := yaml.UnmarshalStrict(data, &f); err != nil {
-		return nil, fmt.Errorf("services.yaml: %w", err)
-	}
+	services := make(map[string]service, len(f.Services))
 	for name, svc := range f.Services {
 		if svc.Run == "" {
 			return nil, fmt.Errorf("services.yaml: service %q: run is required", name)
@@ -85,8 +65,9 @@ func parseServices(data []byte) (map[string]service, error) {
 				return nil, fmt.Errorf("services.yaml: service %q: %w", name, err)
 			}
 		}
+		services[name] = service(svc)
 	}
-	return f.Services, nil
+	return services, nil
 }
 
 // Stopping a box must fit in the daemon's 15s grace (runsc's stopGrace),

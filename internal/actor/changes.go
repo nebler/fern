@@ -8,8 +8,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/nebler/fern/internal/runsc"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -178,7 +176,7 @@ func (g *Group) PruneAll(ctx context.Context) error {
 		err := g.do(ctx, "prune", env.ID, func(ctx context.Context, _ *actor) error {
 			// A builder keeps fewer, of goldens: until its next build it had
 			// as many as it was left with.
-			if setup.IsBuilder(env.ID) {
+			if store.IsBuilder(env.ID) {
 				return g.store.PruneGoldens(ctx, env.ID)
 			}
 			return g.store.Prune(ctx, env.ID)
@@ -278,26 +276,4 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 		g.log.InfoContext(ctx, "box touched", slog.String("env", id), slog.Int("active", commands))
 		return nil
 	})
-}
-
-// boxOf returns box id of env as the driver is to wake it. This is where
-// it is decided what each box runs and gets:
-//
-//   - a golden builder's box runs the services, started at once, and gets
-//     no Claude: what it writes goes into every thread of the repository;
-//   - with agent boxes, an agent box runs Claude and no services, and the
-//     environment's own box the services and no Claude, so it can't plant
-//     settings in Claude's folder;
-//   - without, the environment's box runs both.
-func (g *Group) boxOf(id string, env store.Env) runsc.Box {
-	box := runsc.Box{ID: id, Kind: runsc.Services, Env: env}
-	switch {
-	case setup.IsBuilder(id):
-		box.Kind, box.Env.Claude = runsc.Builder, ""
-	case store.IsAgentBox(id):
-		box.Kind = runsc.Agent
-	case g.cfg.Agents:
-		box.Env.Claude = ""
-	}
-	return box
 }

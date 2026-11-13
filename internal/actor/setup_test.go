@@ -84,7 +84,7 @@ func TestGoldenSetupScript(t *testing.T) {
 					}
 				}
 				st, drv := newFakeStore(), runsc.NewFake("box")
-				builder := setup.ID("sample")
+				builder := store.BuilderID("sample")
 				// What the script found when it ran.
 				var mu sync.Mutex
 				var ran []string
@@ -230,7 +230,7 @@ func TestGoldenBuildNotRepeatedAtOnce(t *testing.T) {
 				t.Errorf("%s's snapshots = %v, want its golden source gone", step.worktree, got)
 			}
 			st.mu.Unlock()
-			if got := state(t, drv, setup.ID("sample")); got != runsc.Asleep {
+			if got := state(t, drv, store.BuilderID("sample")); got != runsc.Asleep {
 				t.Errorf("the builder's box after %s: %s, want %s", step.worktree, got, runsc.Asleep)
 			}
 		}
@@ -300,7 +300,7 @@ func TestNoticesAtClaudesWake(t *testing.T) {
 					t.Fatal(err)
 				}
 				synctest.Wait()
-				failure, ok, _ := st.BuildFailure(t.Context(), setup.ID("sample"))
+				failure, ok, _ := st.BuildFailure(t.Context(), store.BuilderID("sample"))
 				if !ok || !strings.Contains(failure.Error, "pnpm: not found") {
 					t.Fatalf("the builder's recorded failure = %+v, %t; want the script's output in it", failure, ok)
 				}
@@ -310,7 +310,7 @@ func TestNoticesAtClaudesWake(t *testing.T) {
 				if err := g.Wake(t.Context(), "one"); err != nil {
 					t.Fatal(err)
 				}
-				got := drv.Woken("one").Notices
+				got := noticesOf(t, drv.Woken("one"))
 				if len(got) != len(tt.want) {
 					t.Fatalf("notices = %q, want %d of them", got, len(tt.want))
 				}

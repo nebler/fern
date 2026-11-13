@@ -55,20 +55,3 @@ func TestGitHubToken(t *testing.T) {
 		t.Errorf("fern github-token --account of an account without the App = %d, want 1", code)
 	}
 }
-
-func TestGitHubRepository(t *testing.T) {
-	for remote, want := range map[string]string{
-		"https://github.com/owner/app.git":    "owner/app",
-		"https://github.com/owner/app":        "owner/app",
-		"git@github.com:owner/app.git":        "owner/app",
-		"ssh://git@github.com/owner/app.git":  "owner/app",
-		"https://gitlab.com/owner/app.git":    "",
-		"https://github.com/owner":            "",
-		"https://github.com/owner/app/tree/x": "",
-	} {
-		got, ok := githubRepository(remote)
-		if got != want || ok != (want != "") {
-			t.Errorf("githubRepository(%q) = %q, %t; want %q", remote, got, ok, want)
-		}
-	}
-}

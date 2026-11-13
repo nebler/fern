@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/envfile"
 	"github.com/nebler/fern/internal/github"
 )
 
@@ -223,7 +224,8 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		add(checkGitHub(ctx, app))
 	}
 	// Cloudflare's token, which is optional too.
-	switch token, err := fileVar(filepath.Join(n.etc, "cloudflare.env"), "CLOUDFLARE_API_TOKEN"); {
+	vars, err := envfile.Read(filepath.Join(n.etc, "cloudflare.env"))
+	switch token := vars["CLOUDFLARE_API_TOKEN"]; {
 	case errors.Is(err, os.ErrNotExist):
 		add(finding{name: "Cloudflare", info: true, detail: "no token: Claude can't set up deploys or use Cloudflare's MCP server (README)"})
 	case err != nil:
@@ -402,20 +404,6 @@ func (n node) checkCloudflare(ctx context.Context, token string) finding {
 		}
 	}
 	return finding{name: "Cloudflare", ok: true, detail: "token works: Claude sets up deploys and gets Cloudflare's MCP server in Cloudflare repositories"}
-}
-
-// fileVar returns the value of name in the env file, "" if it has none.
-func fileVar(file, name string) (string, error) {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "", err
-	}
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), name+"="); ok {
-			return strings.Trim(v, `"'`), nil
-		}
-	}
-	return "", nil
 }
 
 // checkT3 asks T3's server whether it is up.

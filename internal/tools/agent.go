@@ -231,6 +231,14 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 // token itself, so the agent is given none. An agent box still running from
 // before the relay has none, and one from before 2026-11-12 has a relay that
 // adds no token: their agent gets the token in its arguments, as it did.
+//
+// The question to the box (mcprelay.Has) and both of those answers serve
+// only an agent box that has run, without a sleep, since before 2026-11-12:
+// a box outlives the daemon and keeps the fern-init it started with. They
+// can go, with mcprelay.Check, Has and fern-init's route for them, once no
+// node runs such a box: each has slept, or its node has restarted, since
+// the node got a box image from that day or later. Every agent box then has
+// the relay that adds the token, and this is its address and no token.
 func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) (url, token string) {
 	relay, auth := mcprelay.Has(ctx, s.boxes, ex.Addr, ex.Token)
 	if !relay {

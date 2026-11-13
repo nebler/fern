@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/nebler/fern/internal/setup"
 )
 
@@ -135,42 +137,6 @@ func TestKeyErrors(t *testing.T) {
 	}
 }
 
-func TestID(t *testing.T) {
-	dns := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-	ids := map[string]bool{}
-	for _, repo := range []string{"sample", "My_App", "my-app", "___", "a-very-long-repository-name-that-goes-on-and-on"} {
-		id := setup.ID(repo)
-		if !dns.MatchString(id) {
-			t.Errorf("ID(%q) = %q, not a DNS label", repo, id)
-		}
-		if ids[id] {
-			t.Errorf("ID(%q) = %q, the same as another repository's", repo, id)
-		}
-		ids[id] = true
-	}
-}
-
-func TestSourceID(t *testing.T) {
-	dns := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-	for _, repo := range []string{"sample", "src", "a-very-long-repository-name-that-goes-on-and-on"} {
-		id := setup.SourceID(repo)
-		if !dns.MatchString(id) {
-			t.Errorf("SourceID(%q) = %q, not a DNS label", repo, id)
-		}
-		if got, ok := setup.BuilderOf(id); !ok || got != setup.ID(repo) {
-			t.Errorf("BuilderOf(SourceID(%q)) = %q, %v; want %q, true", repo, got, ok, setup.ID(repo))
-		}
-		if _, ok := setup.BuilderOf(setup.ID(repo)); ok {
-			t.Errorf("BuilderOf(ID(%q)) is a source, want not", repo)
-		}
-	}
-	for _, id := range []string{"t3-abc-src", "src"} {
-		if _, ok := setup.BuilderOf(id); ok {
-			t.Errorf("BuilderOf(%q) is a source, want not: no builder's", id)
-		}
-	}
-}
-
 func TestPreviewPort(t *testing.T) {
 	for _, tc := range []struct {
 		name, yaml string
@@ -261,6 +227,56 @@ func TestScript(t *testing.T) {
 			got, err := setup.Script(dir)
 			if err != nil || got != tt.want {
 				t.Errorf("Script() = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// One parser reads services.yaml for the box and for the daemon. The box
+// refuses a field it doesn't know; the daemon's readers pass over it, and
+// take their own part. Both refuse a field of the wrong type, wherever it
+// is.
+func TestServicesReaders(t *testing.T) {
+	const whole = "services:\n  web:\n    run: vite\n    ready: curl -f localhost:5173\n    port: 5173\n" +
+		"golden: {inputs: [seed.sql]}\nlimits: {cpus: 3, memory: 4096}\n"
+	parsed := setup.ServicesYAML{
+		Services: map[string]setup.Service{"web": {Run: "vite", Ready: "curl -f localhost:5173", Port: 5173}},
+		Limits:   setup.Limits{CPUs: 3, Memory: 4096},
+	}
+	parsed.Golden.Inputs = []string{"seed.sql"}
+	for _, tc := range []struct {
+		name, yaml string
+		box        bool // the box takes it
+		daemon     bool // the daemon's readers do
+	}{
+		{name: "a whole file", yaml: whole, box: true, daemon: true},
+		{name: "a field nobody knows", yaml: whole + "restart: always\n", daemon: true},
+		{name: "a field of the wrong type", yaml: "services:\n  web:\n    run: vite\n    port: lots\n"},
+		{name: "not YAML", yaml: "services: ["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := setup.ParseServices([]byte(tc.yaml))
+			if (err == nil) != tc.box {
+				t.Errorf("ParseServices() error = %v, want none: %t", err, tc.box)
+			}
+			if tc.box {
+				if diff := cmp.Diff(parsed, got); diff != "" {
+					t.Errorf("ParseServices() (-want +got):\n%s", diff)
+				}
+			}
+			dir := t.TempDir()
+			write(t, dir, "services.yaml", tc.yaml)
+			write(t, dir, "seed.sql", "x")
+			limits, err := setup.AskedLimits(dir)
+			if (err == nil) != tc.daemon || tc.daemon && limits != parsed.Limits {
+				t.Errorf("AskedLimits() = %+v, %v; want %+v, no error: %t", limits, err, parsed.Limits, tc.daemon)
+			}
+			port, err := setup.PreviewPort(dir)
+			if (err == nil) != tc.daemon || tc.daemon && port != 5173 {
+				t.Errorf("PreviewPort() = %d, %v; want 5173, no error: %t", port, err, tc.daemon)
+			}
+			if _, err := setup.Key(dir, "box"); (err == nil) != tc.daemon {
+				t.Errorf("Key() error = %v, want none: %t", err, tc.daemon)
 			}
 		})
 	}

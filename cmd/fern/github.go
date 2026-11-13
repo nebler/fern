@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/github"
 )
 
 // gitCredential is git's credential helper in T3's server (fern
@@ -68,10 +69,11 @@ func githubToken(ctx context.Context, c command, cl *api.Client, std stdio) (int
 		if err != nil {
 			return 1, fmt.Errorf("the origin remote: %w", err)
 		}
-		var ok bool
-		if repo, ok = githubRepository(strings.TrimSpace(string(out))); !ok {
+		owner, name, ok := github.Repository(string(out))
+		if !ok {
 			return 1, fmt.Errorf("origin isn't a GitHub repository: %s", out)
 		}
+		repo = owner + "/" + name
 	}
 	token, err := cl.GitHubToken(ctx, repo)
 	if err != nil {
@@ -79,20 +81,4 @@ func githubToken(ctx context.Context, c command, cl *api.Client, std stdio) (int
 	}
 	_, err = fmt.Fprintln(std.out, token)
 	return 0, err
-}
-
-// githubRepository returns owner/repo of a GitHub remote URL, in any of the
-// forms git takes: https://github.com/o/r(.git), git@github.com:o/r(.git),
-// ssh://git@github.com/o/r(.git).
-func githubRepository(remote string) (string, bool) {
-	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
-		if rest, ok := strings.CutPrefix(remote, prefix); ok {
-			rest = strings.TrimSuffix(strings.TrimSuffix(rest, "/"), ".git")
-			owner, repo, ok := strings.Cut(rest, "/")
-			if ok && owner != "" && repo != "" && !strings.Contains(repo, "/") {
-				return owner + "/" + repo, true
-			}
-		}
-	}
-	return "", false
 }

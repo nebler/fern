@@ -7,7 +7,6 @@ package background
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,8 +120,7 @@ func (js *Jobs) Register(mux *http.ServeMux) {
 
 func (js *Jobs) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+js.token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !boxexec.Authorized(w, r, js.token) {
 			return
 		}
 		h(w, r)

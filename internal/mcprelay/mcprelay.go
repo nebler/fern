@@ -7,13 +7,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/nebler/fern/internal/boxexec"
 )
 
 const (
@@ -289,11 +290,14 @@ func (w flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Check answers that this box has the relay.
+// Check answers that this box has the relay, and that the relay adds the
+// box's token. Every fern-init since 2026-11-12 says both, so the answer
+// tells the daemon something only of an agent box running since before
+// then: Check, Has and Path can go when tools' mcpURL stops asking, which
+// says when that is.
 func Check(token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !boxexec.Authorized(w, r, token) {
 			return
 		}
 		w.Header().Set(relayAuthHeader, "1")
@@ -303,7 +307,7 @@ func Check(token string) http.Handler {
 
 // Has reports whether the box whose fern-init is at addr has the relay, and
 // whether that relay adds the box's token itself: one in a box started
-// before 2026-11-12 doesn't.
+// before 2026-11-12 doesn't. It goes with Check.
 func Has(ctx context.Context, hc *http.Client, addr, token string) (relay, auth bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+Path, nil)
 	if err != nil {

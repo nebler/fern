@@ -35,7 +35,6 @@ import (
 
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/image"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
@@ -73,18 +72,20 @@ const (
 	Setup
 )
 
-// Box is a box to wake.
+// Box is a box to wake, and all it is started with. Whoever wakes it decides
+// that (actor's boxOf): the driver starts what it is given.
 type Box struct {
 	ID   string    // its name: its environment's ID, or the environment's agent box's
-	Kind Kind      // what it runs
-	Env  store.Env // its folders and token; with Env.Claude "", it gets no Claude folder or login
-	// Notices are what its Claude is told has gone wrong on the node, for
-	// the person (actor's notices): fern-init puts them at the top of
-	// Claude's hint. Only a box with Claude's folder has a use for them.
-	Notices []string
+	Kind Kind      // what it runs: its network (an agent box may reach the daemon) and how long its wake may take
+	Env  store.Env // its folders, which it gets at their own paths; with Env.Claude "", no Claude folder
+	// Vars are its fern-init's variables, NAME=value, after the image's own
+	// and the two each start makes anew: its token and its wake's ID.
+	Vars []string
+	// Limits are what it may use. A box with none isn't started.
+	Limits Limits
 }
 
-// Config is where a Driver keeps its boxes and what it gives them.
+// Config is where a Driver keeps its boxes.
 type Config struct {
 	Pool    string   // the pool, /var/lib/fern
 	Bundles string   // the boxes' bundles, on the node's tmpfs: /run/fern/boxes
@@ -92,27 +93,7 @@ type Config struct {
 	Images  string   // where images are unpacked (fern image load): <pool>/images
 	Image   string   // the box image's tag, such as fern-box:dev
 	DNS     []string // the resolvers boxes use
-	// Login returns Claude's login, or "" if there is none yet.
-	Login func(ctx context.Context) (string, error)
-	// Skills returns the skill packs the node turns on for Claude, such as
-	// "beginner design": a box with Claude's folder learns them as
-	// FERN_SKILLS (fern-init). May be nil: none.
-	Skills  func(ctx context.Context) (string, error)
-	MCPPort int // the daemon's port agent boxes may reach
-	// T3MCP is where T3 serves its own MCP server for its Claude, on the
-	// node's loopback, such as 127.0.0.1:30773; "" for none. An agent box's
-	// fern-init listens there, in the box, and passes the calls to the
-	// daemon (FERN_T3_ADDR, FERN_T3_MCP), which passes them to T3.
-	T3MCP string
-	// Preview is where people open previews, such as localhost:30780
-	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
-	// to hand out links; "" means there are none.
-	Preview string
-	// Limits are services' boxes' limits; the zero value means DefaultLimits.
-	Limits Limits
-	// MaxLimits is the most a repository's services.yaml may ask for its
-	// box; the zero value means Limits, so that it can only ask for less.
-	MaxLimits Limits
+	MCPPort int      // the daemon's port agent boxes may reach, which the firewall opens to them
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -520,16 +501,8 @@ func (d *Driver) allocate(b layout) (int, error) {
 func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	_, sp := d.tracer.Start(ctx, "start")
 	defer func() { span.End(sp, err) }()
-	login, skills := "", ""
-	if box.Env.Claude != "" && d.cfg.Login != nil {
-		if login, err = d.cfg.Login(ctx); err != nil {
-			return fmt.Errorf("claude login: %w", err)
-		}
-	}
-	if box.Env.Claude != "" && d.cfg.Skills != nil {
-		if skills, err = d.cfg.Skills(ctx); err != nil {
-			return fmt.Errorf("claude's skills: %w", err)
-		}
+	if err := box.Limits.Check(); err != nil {
+		return fmt.Errorf("its limits: %w", err)
 	}
 	// A fresh /tmp at every wake.
 	if err := os.RemoveAll(b.tmp); err != nil {
@@ -567,42 +540,7 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	if err := os.WriteFile(filepath.Join(b.dir, tokenFile), []byte(token), 0o600); err != nil {
 		return err
 	}
-	vars := boxVars(box, hex.EncodeToString(wakeID), token, login, d.cfg.MCPPort)
-	if skills != "" {
-		vars = append(vars, "FERN_SKILLS="+skills)
-	}
-	if len(box.Notices) > 0 {
-		notices, err := json.Marshal(box.Notices)
-		if err != nil {
-			return err
-		}
-		vars = append(vars, "FERN_NOTICES="+string(notices))
-	}
-	if box.Kind == Agent && d.cfg.T3MCP != "" {
-		vars = append(vars, "FERN_T3_ADDR="+d.cfg.T3MCP,
-			"FERN_T3_MCP=http://"+net.JoinHostPort(DaemonHost, strconv.Itoa(d.cfg.MCPPort))+"/t3/"+box.Env.ID)
-	}
-	if d.cfg.Preview != "" {
-		// {port} is for the box to fill in.
-		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
-	}
-	asked, askedErr := setup.AskedLimits(box.Env.Workspace)
-	if box.Kind == Agent {
-		// Claude's box doesn't depend on the repository's services.yaml, which
-		// Claude may be there to mend. It learns what the services' box gets,
-		// to say so when the repository asks for more (fern-init's hint).
-		if services, err := d.cfg.limitsOf(Services, asked); askedErr == nil && err == nil {
-			vars = append(vars, boxLimitsVar(services))
-		}
-		asked = setup.Limits{}
-	} else if askedErr != nil {
-		return askedErr
-	}
-	lim, err := d.cfg.limitsOf(box.Kind, asked)
-	if err != nil {
-		return err
-	}
-	s := boxSpec(box, b, d.imageEnv, vars, lim)
+	s := boxSpec(box, b, d.imageEnv, startVars(hex.EncodeToString(wakeID), token, box.Vars))
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
@@ -786,7 +724,10 @@ func (d *Driver) Token(id string) (string, error) {
 	b := d.layout(id)
 	data, err := os.ReadFile(filepath.Join(b.dir, tokenFile))
 	if errors.Is(err, fs.ErrNotExist) {
-		// A box started before 2026-11-12 has it in its spec only.
+		// A box started before 2026-11-12 has it in its spec only. This
+		// serves a box, of any kind, that has run without a sleep since
+		// then, and can go once no node runs one: every box has been
+		// started since, as all are after a restart of the node.
 		token, _, err := bundleVars(b)
 		return token, err
 	}

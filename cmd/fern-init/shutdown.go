@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"net/http"
 	"strconv"
+
+	"github.com/nebler/fern/internal/boxexec"
 )
 
 // shutdown starts the same service shutdown as SIGTERM, for a request that
 // names this wake of the box, wakeID.
 func shutdown(token, wakeID string, cancel context.CancelFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !boxexec.Authorized(w, r, token) {
 			return
 		}
 		// A second fence behind the token, which is this wake's own: a delayed

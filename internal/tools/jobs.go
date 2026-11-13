@@ -16,7 +16,6 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/background"
 	"github.com/nebler/fern/internal/runsc"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -361,7 +360,7 @@ func (js *jobs) adoptAll(ctx context.Context) {
 		return
 	}
 	for box, state := range states {
-		if state != runsc.Running || setup.IsBuilder(box) {
+		if state != runsc.Running || store.IsBuilder(box) {
 			continue
 		}
 		// Jobs run in environments' own boxes.

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -20,8 +19,7 @@ const maxTouchBody = 8 << 20
 // Paths that leave dir, or aren't regular files, are passed over.
 func touch(token, dir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !boxexec.Authorized(w, r, token) {
 			return
 		}
 		var req boxexec.TouchRequest

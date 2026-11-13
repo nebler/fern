@@ -137,8 +137,8 @@ func TestSleep(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			box := Box{ID: "demo", Env: env}
-			config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "tok", "", 7071), DefaultLimits))
+			box := Box{ID: "demo", Env: env, Limits: DefaultLimits}
+			config, err := json.Marshal(boxSpec(box, b, nil, startVars("w1", "tok", nil)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,8 +377,8 @@ func TestToken(t *testing.T) {
 	if err := os.MkdirAll(b.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	box := Box{ID: "demo", Env: env}
-	config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "from-the-spec", "", 7071), DefaultLimits))
+	box := Box{ID: "demo", Env: env, Limits: DefaultLimits}
+	config, err := json.Marshal(boxSpec(box, b, nil, startVars("w1", "from-the-spec", nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

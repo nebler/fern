@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/yaml"
@@ -153,13 +152,9 @@ func goldenInputs(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var f struct {
-		Golden struct {
-			Inputs []string `json:"inputs"`
-		} `json:"golden"`
-	}
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("services.yaml: %w", err)
+	f, err := parseServices(data, false)
+	if err != nil {
+		return nil, err
 	}
 	var paths []string
 	for _, p := range f.Golden.Inputs {
@@ -183,6 +178,62 @@ func ServicesFile(dir string) (data []byte, guessed bool, err error) {
 	return g.Services, g.Services != nil, err
 }
 
+// ServicesYAML is a repository's services.yaml: what its box runs, what its
+// golden snapshot depends on and what its box asks to be given.
+type ServicesYAML struct {
+	Services map[string]Service `json:"services"`
+	// Golden lists, under inputs, the files a golden build depends on beyond
+	// the contract's and the lockfiles, such as a seed (Key).
+	Golden struct {
+		Inputs []string `json:"inputs,omitempty"`
+	} `json:"golden"`
+	Limits Limits `json:"limits"`
+}
+
+// Service is one entry under services: in services.yaml. Its commands are
+// shell scripts, which fern-init runs with /bin/sh -c in the workspace.
+type Service struct {
+	Run   string `json:"run"`
+	Stop  string `json:"stop,omitempty"`  // graceful stop; else SIGTERM
+	Ready string `json:"ready,omitempty"` // exits 0 when the service is ready
+	// Listen is where the service accepts connections, "unix:PATH" or
+	// "tcp:PORT": fern-init holds it and starts the service on demand, at
+	// its first connection. Without it, the service starts with the box.
+	Listen string `json:"listen,omitempty"`
+	// Port is the port the service serves on, which it gets as PORT. The
+	// first service with one, by name, is the environment's default
+	// preview (PreviewPort).
+	Port int `json:"port,omitempty"`
+}
+
+// ParseServices parses a services.yaml, data, for the box that is to run
+// it (fern-init): a field it doesn't know, or one given twice, is an error,
+// so a box never runs with part of its file left out, such as a ready check
+// under a misspelt name.
+func ParseServices(data []byte) (ServicesYAML, error) { return parseServices(data, true) }
+
+// parseServices is the one parser of services.yaml, for its two kinds of
+// reader. Both refuse a file that isn't YAML or has a field of the wrong
+// type, and they differ in one thing:
+//
+//   - strict, the box's (ParseServices): a field it doesn't know is an
+//     error;
+//   - not strict, the daemon's (Key's golden inputs, AskedLimits and
+//     PreviewPort): a field it doesn't know is passed over. Each takes its
+//     own part of a file the box judges as a whole, and the box's refusal is
+//     what reaches the thread: a wake that fails with the field's name.
+func parseServices(data []byte, strict bool) (ServicesYAML, error) {
+	unmarshal := yaml.Unmarshal
+	if strict {
+		unmarshal = yaml.UnmarshalStrict
+	}
+	var f ServicesYAML
+	if err := unmarshal(data, &f); err != nil {
+		return ServicesYAML{}, fmt.Errorf("services.yaml: %w", err)
+	}
+	return f, nil
+}
+
 // Limits are what a repository's services.yaml asks for its box, under
 // limits:. A field left out, or 0, asks for the node's default.
 type Limits struct {
@@ -202,13 +253,8 @@ func AskedLimits(dir string) (Limits, error) {
 	if err != nil {
 		return Limits{}, err
 	}
-	var f struct {
-		Limits Limits `json:"limits"`
-	}
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		return Limits{}, fmt.Errorf("services.yaml: %w", err)
-	}
-	return f.Limits, nil
+	f, err := parseServices(data, false)
+	return f.Limits, err
 }
 
 // PreviewPort returns the port of the first service in dir's services.yaml
@@ -220,13 +266,9 @@ func PreviewPort(dir string) (int, error) {
 	if err != nil || data == nil {
 		return 0, err
 	}
-	var f struct {
-		Services map[string]struct {
-			Port int `json:"port"`
-		} `json:"services"`
-	}
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		return 0, fmt.Errorf("services.yaml: %w", err)
+	f, err := parseServices(data, false)
+	if err != nil {
+		return 0, err
 	}
 	for _, name := range slices.Sorted(maps.Keys(f.Services)) {
 		if p := f.Services[name].Port; p > 0 && p <= 65535 {
@@ -306,54 +348,4 @@ func readFile(dir, p string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is over %d MiB", p, maxFile>>20)
 	}
 	return io.ReadAll(io.LimitReader(f, maxFile))
-}
-
-// builderPrefix starts the IDs of the environments that build goldens.
-const builderPrefix = "golden-"
-
-// IsBuilder reports whether environment id builds golden snapshots. Its box
-// gets no credentials: what it makes goes into every thread of its
-// repository.
-func IsBuilder(id string) bool { return strings.HasPrefix(id, builderPrefix) }
-
-// sourceSuffix ends the ID of the environment that holds a checkout sent
-// ahead of a repository's first worktree, until its golden build has copied
-// it. An ID from ID ends in hex, so the suffix can't be part of one.
-const sourceSuffix = "-src"
-
-// SourceID returns the ID of the environment that holds repo's checkout for
-// a golden build ahead of its first worktree.
-func SourceID(repo string) string { return ID(repo) + sourceSuffix }
-
-// BuilderOf returns the ID of the builder whose source environment id is,
-// from SourceID, or false if id isn't one.
-func BuilderOf(id string) (string, bool) {
-	if !IsBuilder(id) {
-		return "", false
-	}
-	return strings.CutSuffix(id, sourceSuffix)
-}
-
-// ID returns the ID of the environment that builds repo's golden snapshots.
-func ID(repo string) string {
-	sum := sha256.Sum256([]byte(repo))
-	name := strings.ToLower(repo)
-	var b strings.Builder
-	for _, r := range name {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('-')
-		}
-	}
-	// A readable part and a hash, so that two names that read the same
-	// (My_App, my-app) stay apart, within a DNS label's 63 characters.
-	readable := strings.Trim(b.String(), "-")
-	if len(readable) > 30 {
-		readable = strings.Trim(readable[:30], "-")
-	}
-	if readable == "" {
-		readable = "repo"
-	}
-	return builderPrefix + readable + "-" + hex.EncodeToString(sum[:])[:8]
 }

@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/nebler/fern/internal/github"
 )
 
 // Secrets sets a GitHub repository's Actions secrets: the daemon's GitHub
@@ -19,19 +20,6 @@ type Secrets interface {
 // cloudflareSecret is the repository secret Fern's deploy workflow reads
 // (images/skills/fern-deploy).
 const cloudflareSecret = "CLOUDFLARE_API_TOKEN"
-
-// githubRemote matches a GitHub remote, over HTTPS or SSH: its owner and
-// repository.
-var githubRemote = regexp.MustCompile(`^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
-
-// githubRepo returns the owner and repository of a GitHub remote's URL.
-func githubRepo(remote string) (owner, repo string, ok bool) {
-	m := githubRemote.FindStringSubmatch(strings.TrimSpace(remote))
-	if m == nil {
-		return "", "", false
-	}
-	return m[1], m[2], true
-}
 
 // addCloudflareTools adds to srv the tool with which environment id's
 // Claude connects its repository to Cloudflare: the daemon sets the
@@ -74,7 +62,7 @@ func (s *Server) connectCloudflare(ctx context.Context, id string) (string, erro
 	if code != 0 {
 		return "", fmt.Errorf("the repository has no remote named origin: %s", strings.TrimSpace(out))
 	}
-	owner, repo, ok := githubRepo(out)
+	owner, repo, ok := github.Repository(out)
 	if !ok {
 		return "", fmt.Errorf("origin %q isn't a GitHub repository", strings.TrimSpace(out))
 	}

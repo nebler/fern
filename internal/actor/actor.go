@@ -25,7 +25,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/runsc"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
@@ -80,6 +79,31 @@ type Config struct {
 	// default preview can be rendered ahead (preview.Server.Warm). A full
 	// channel drops it.
 	Woken chan<- string
+	// Login returns Claude's login, or "" if there is none yet: a box with
+	// Claude's folder gets it. nil: none.
+	Login func(ctx context.Context) (string, error)
+	// Skills returns the skill packs the node turns on for Claude, such as
+	// "beginner design": a box with Claude's folder learns them as
+	// FERN_SKILLS (fern-init). nil: none.
+	Skills func(ctx context.Context) (string, error)
+	// MCPPort is the daemon's port agent boxes may reach: they learn it as
+	// FERN_MCP.
+	MCPPort int
+	// T3MCP is where T3 serves its own MCP server for its Claude, on the
+	// node's loopback, such as 127.0.0.1:30773; "" for none. An agent box's
+	// fern-init listens there, in the box, and passes the calls to the
+	// daemon (FERN_T3_ADDR, FERN_T3_MCP), which passes them to T3.
+	T3MCP string
+	// Preview is where people open previews, such as localhost:30780
+	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
+	// to hand out links; "" means there are none.
+	Preview string
+	// Limits are services' boxes' limits; the zero value means
+	// runsc.DefaultLimits.
+	Limits runsc.Limits
+	// MaxLimits is the most a repository's services.yaml may ask for its
+	// box; the zero value means Limits, so that it can only ask for less.
+	MaxLimits runsc.Limits
 	// SetupTimeout is how long a repository's setup script may run in a
 	// golden build; 0 means DefaultSetupTimeout.
 	SetupTimeout time.Duration
@@ -436,8 +460,8 @@ type actor struct {
 	crashes    []time.Time
 	crashCause string
 	// setup makes the next wake of a golden builder's box the one for its
-	// repository's setup script (runsc.Setup): a build sets it for that
-	// step (buildGolden).
+	// repository's setup script (boxOf): a build sets it for that step
+	// (buildGolden).
 	setup bool
 }
 
@@ -515,14 +539,7 @@ func (a *actor) wake(ctx context.Context) error {
 	a.phase = boxMaybeUp
 	start := time.Now()
 	ctx, sp := span.Start(ctx, a.g.tracer, "box.wake", a.id)
-	box := a.g.boxOf(a.id, env)
-	if a.setup && box.Kind == runsc.Builder {
-		box.Kind = runsc.Setup
-	}
-	if box.Env.Claude != "" {
-		box.Notices = a.g.notices(ctx, env)
-	}
-	addr, err := a.g.driver.Wake(ctx, box)
+	addr, err := a.startBox(ctx, env)
 	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
@@ -540,7 +557,7 @@ func (a *actor) wake(ctx context.Context) error {
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
 	a.phase, a.addr, a.token = boxUp, addr, token
 	a.wakes++
-	if a.g.cfg.Woken != nil && store.EnvOfBox(a.id) == a.id && !setup.IsBuilder(a.id) {
+	if a.g.cfg.Woken != nil && store.EnvOfBox(a.id) == a.id && !store.IsBuilder(a.id) {
 		select {
 		case a.g.cfg.Woken <- a.id:
 		default:
@@ -548,6 +565,16 @@ func (a *actor) wake(ctx context.Context) error {
 	}
 	a.watch(ctx, env.Workspace)
 	return nil
+}
+
+// startBox has the driver wake a's box, of env, with what boxOf decides it
+// runs and gets, and returns its exec address.
+func (a *actor) startBox(ctx context.Context, env store.Env) (string, error) {
+	box, err := a.g.boxOf(ctx, a.id, env, a.setup)
+	if err != nil {
+		return "", fmt.Errorf("wake %s: %w", a.id, err)
+	}
+	return a.g.driver.Wake(ctx, box)
 }
 
 // stopBox stops the box, then cancels the commands still counted as running

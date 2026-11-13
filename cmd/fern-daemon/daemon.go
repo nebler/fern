@@ -41,6 +41,7 @@ import (
 	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/commit"
 	"github.com/nebler/fern/internal/disk"
+	"github.com/nebler/fern/internal/envfile"
 	"github.com/nebler/fern/internal/github"
 	"github.com/nebler/fern/internal/health"
 	"github.com/nebler/fern/internal/preview"
@@ -236,9 +237,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), Skills: fileSkills(skillsFile, defaultSkills), MCPPort: mcpPort, T3MCP: t3MCP(*t3), Preview: previewAt,
-		Limits: limits, MaxLimits: most,
+		DNS: strings.Split(*boxDNS, ","), MCPPort: mcpPort,
 	}, tr, reg)
+	// What boxes get is the actors' to decide (actor's boxOf).
+	cfg.Login, cfg.Skills = fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), fileSkills(skillsFile, defaultSkills)
+	cfg.MCPPort, cfg.T3MCP, cfg.Preview = mcpPort, t3MCP(*t3), previewAt
+	cfg.Limits, cfg.MaxLimits = limits, most
 	// Golden keys name the image's content, not its tag.
 	if cfg.Image, err = drv.Prepare(ctx); err != nil {
 		return fmt.Errorf("prepare the node for boxes: %w", err)
@@ -423,19 +427,11 @@ func metricsHandler(reg *prometheus.Registry) http.Handler {
 // no restart: "" while there is none.
 func fileVar(file, name string) func(ctx context.Context) (string, error) {
 	return func(context.Context) (string, error) {
-		data, err := os.ReadFile(file)
+		vars, err := envfile.Read(file)
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil
 		}
-		if err != nil {
-			return "", err
-		}
-		for line := range strings.Lines(string(data)) {
-			if v, ok := strings.CutPrefix(strings.TrimSpace(line), name+"="); ok {
-				return v, nil
-			}
-		}
-		return "", nil
+		return vars[name], err
 	}
 }
 

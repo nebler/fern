@@ -322,3 +322,28 @@ func TestHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestRepository(t *testing.T) {
+	for _, tc := range []struct {
+		url         string
+		owner, repo string
+	}{
+		{url: "https://github.com/owner/app.git", owner: "owner", repo: "app"},
+		{url: "https://github.com/owner/app", owner: "owner", repo: "app"},
+		{url: "https://github.com/owner/app.git/\n", owner: "owner", repo: "app"},
+		{url: "https://x-access-token@github.com/owner/app.git", owner: "owner", repo: "app"},
+		{url: "git@github.com:owner/app.git", owner: "owner", repo: "app"},
+		{url: "ssh://git@github.com/owner/my.app_2.git", owner: "owner", repo: "my.app_2"},
+		{url: "https://gitlab.com/owner/app.git"},
+		{url: "https://github.com.evil.example/owner/app.git"},
+		{url: "https://github.com/owner"},
+		{url: "https://github.com/owner/app/tree/x"},
+		{url: "https://github.com/owner/app?x=1"},
+		{url: ""},
+	} {
+		owner, repo, ok := github.Repository(tc.url)
+		if owner != tc.owner || repo != tc.repo || ok != (tc.owner != "") {
+			t.Errorf("Repository(%q) = %q, %q, %t; want %q, %q", tc.url, owner, repo, ok, tc.owner, tc.repo)
+		}
+	}
+}

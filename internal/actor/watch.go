@@ -8,7 +8,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -27,7 +26,7 @@ const touchTimeout = 5 * time.Second
 // watch is the services' box's, not the agent box's: the agent box often
 // sleeps right after a write, and its changes must still be passed on.
 func (a *actor) watch(ctx context.Context, workspace string) {
-	if a.g.cfg.Watcher == nil || !a.g.cfg.Agents || store.IsAgentBox(a.id) || setup.IsBuilder(a.id) || a.stopWatch != nil {
+	if a.g.cfg.Watcher == nil || !a.g.cfg.Agents || store.IsAgentBox(a.id) || store.IsBuilder(a.id) || a.stopWatch != nil {
 		return
 	}
 	// The watch outlives the wake that starts it, and isn't part of its trace.

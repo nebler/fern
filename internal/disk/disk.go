@@ -23,7 +23,6 @@ import (
 
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/image"
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -104,7 +103,7 @@ func (k *Keeper) Usage(ctx context.Context) (api.Disk, error) {
 			return api.Disk{}, err
 		}
 		part := api.DiskPart{Kind: "environment", Name: env.ID, Total: u.Total, Exclusive: u.Exclusive}
-		if setup.IsBuilder(env.ID) {
+		if store.IsBuilder(env.ID) {
 			part.Kind = "golden"
 		} else if rel, err := filepath.Rel(k.cfg.Root, env.Workspace); err == nil {
 			part.Note = rel

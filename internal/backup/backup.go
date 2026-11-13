@@ -8,7 +8,6 @@
 package backup
 
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -27,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/setup"
+	"github.com/nebler/fern/internal/envfile"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -40,22 +39,11 @@ type Config struct {
 
 // LoadConfig reads the config at path, or returns nil if there is none.
 func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	vals, err := envfile.Read(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	vals := make(map[string]string)
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "="); ok && !strings.HasPrefix(k, "#") {
-			vals[k] = strings.Trim(v, `"'`)
-		}
-	}
-	if err := sc.Err(); err != nil {
 		return nil, err
 	}
 	key, err := ParseKey(vals["FERN_BACKUP_KEY"])
@@ -195,7 +183,7 @@ func (b *Backer) once(ctx context.Context) error {
 	var errs []error
 	for _, env := range envs {
 		// A golden builder's work is built again from its repository.
-		if setup.IsBuilder(env.ID) {
+		if store.IsBuilder(env.ID) {
 			continue
 		}
 		live[env.ID] = true

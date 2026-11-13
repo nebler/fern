@@ -81,9 +81,9 @@ Three nouns. Everything else is a property of one of them.
 | **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box (§5) | `internal/api`, `internal/api/server` |
 | **tools** | for agent boxes, an MCP server with Claude's tools: Bash and its background commands in the environment's box, `commit`, the forks (`env_fork`, `env_exec`, `env_delete`) and `cloudflare_connect` (§5); and the settings that point an agent at them in place of its own shell as it starts | `internal/tools` |
 | **actor** | one goroutine per box while it may run: makes its environment's changes **one at a time**, counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too | `internal/actor` |
-| **box policy** | decides what each box runs and gets: services or Claude, Claude's folder and login or not (`Group.boxOf`) | `internal/actor` |
+| **box policy** | decides what each box runs and gets: services or Claude; Claude's folder, login, skill packs and notices or not; its other variables and its limits (`Group.boxOf`) | `internal/actor` |
 | **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and each environment's record. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
-| **runsc driver** | wakes and stops boxes: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
+| **runsc driver** | wakes and stops boxes, each with the variables and limits the box policy gave it and a token of its own: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
 | **setup** | reads the setup contract and computes golden keys | `internal/setup` |
 | **image** | unpacks `docker save` streams into the pool, as box and T3 roots (`fern image load`) | `internal/image` |
 | **commit** | makes a thread's git commits on the node, for Claude, whose box has the git folder read-only (§5, §13) | `internal/commit` |
@@ -388,7 +388,7 @@ The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons i
 | Network | a network namespace and veth per wake, a /30 from `10.89.0.0/16`; the internet only (§13) |
 | Stop | `POST /stop` to fern-init (the services' `stop:` commands, then SIGTERM and kill), `runsc kill` after 15 s; then the network, overlay and cgroup go |
 
-**Two boxes per environment** (the default, `--agent-boxes`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The **environment's box** runs the services and gets no Claude folder or login. The **agent box**, `<env>.agent`, runs Claude (`fern exec --agent`, which fern-claude passes) with its file tools and no services; its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's box, waking it, and lets it sleep 5 s after the last. A restore, sleep or delete stops both; a pre-wake wakes the agent box. A golden builder's box runs the services, started at once, and gets no Claude at all. The actor decides this in one place (`Group.boxOf`).
+**Two boxes per environment** (the default, `--agent-boxes`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The **environment's box** runs the services and gets no Claude folder or login. The **agent box**, `<env>.agent`, runs Claude (`fern exec --agent`, which fern-claude passes) with its file tools and no services; its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's box, waking it, and lets it sleep 5 s after the last. A restore, sleep or delete stops both; a pre-wake wakes the agent box. A golden builder's box runs the services, started at once, and gets no Claude at all. The actor decides this in one place (`Group.boxOf`), with every variable a box's fern-init gets and the box's limits: it reads Claude's login, the node's skill packs and the limits the repository's `services.yaml` asks for as it wakes the box. The driver starts what it is given, and adds only what each start makes anew: the box's token and the wake's ID.
 
 **Bash runs bash (since 2026-11-13).** The tool's commands ran with `/bin/sh`, which in the box is dash: `make &> log` put make in the background and made an empty log with exit code 0, under a tool that says to use it as one would Bash. A command whose box goes away under it (a restore, a sleep, or the box stopped for its memory) answers with what it had printed and a sentence saying so, where it answered with a WebSocket error alone; one that never ran because the box was still starting when its timeout passed says that.
 
@@ -589,6 +589,7 @@ internal/commit/     git commits in a thread's worktree, made on the node for a 
 internal/health/     what is wrong on the node now: failed builds, failing backups, a full pool
 internal/backup/     hourly backups to an S3 bucket, encrypted on the node, and the restore
 internal/github/     tokens from the person's GitHub App, for T3's git and gh
+internal/envfile/    the node's settings files in /etc/fern, NAME=value lines as systemd reads them
 internal/setup/      setup contract, golden keys
 internal/span/       trace spans
 lab/                 the lab: setup, integration checks, perf gate, A/B, profiler

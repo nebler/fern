@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"syscall"
 	"testing"
@@ -996,5 +997,41 @@ func TestForkOf(t *testing.T) {
 	}
 	if got := store.ForkID("t3-abc", 3); got != "t3-abc-fork-3" {
 		t.Errorf("ForkID(t3-abc, 3) = %q", got)
+	}
+}
+
+func TestBuilderID(t *testing.T) {
+	dns := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	ids := map[string]bool{}
+	for _, repo := range []string{"sample", "My_App", "my-app", "___", "a-very-long-repository-name-that-goes-on-and-on"} {
+		id := store.BuilderID(repo)
+		if !dns.MatchString(id) {
+			t.Errorf("BuilderID(%q) = %q, not a DNS label", repo, id)
+		}
+		if ids[id] {
+			t.Errorf("BuilderID(%q) = %q, the same as another repository's", repo, id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestSourceID(t *testing.T) {
+	dns := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	for _, repo := range []string{"sample", "src", "a-very-long-repository-name-that-goes-on-and-on"} {
+		id := store.SourceID(repo)
+		if !dns.MatchString(id) {
+			t.Errorf("SourceID(%q) = %q, not a DNS label", repo, id)
+		}
+		if got, ok := store.BuilderOf(id); !ok || got != store.BuilderID(repo) {
+			t.Errorf("BuilderOf(SourceID(%q)) = %q, %v; want %q, true", repo, got, ok, store.BuilderID(repo))
+		}
+		if _, ok := store.BuilderOf(store.BuilderID(repo)); ok {
+			t.Errorf("BuilderOf(BuilderID(%q)) is a source, want not", repo)
+		}
+	}
+	for _, id := range []string{"t3-abc-src", "src"} {
+		if _, ok := store.BuilderOf(id); ok {
+			t.Errorf("BuilderOf(%q) is a source, want not: no builder's", id)
+		}
 	}
 }

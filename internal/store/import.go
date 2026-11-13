@@ -17,6 +17,13 @@ import (
 // pool: a row per environment and per snapshot. A pool made before then
 // has one, and so does a backup taken before then, which a restore unpacks
 // to the same place.
+//
+// This file serves only those two: a pool no daemon from 2026-11-12 or
+// later has opened yet (the first such Open moves the index aside), and a
+// restore of a backup from before. It can go, with the SQLite driver here
+// and backup's indexName, once every pool has been opened by such a daemon
+// and no backup taken before that day is left that anyone would restore: a
+// node's latest backup is the one a restore reads.
 const legacyIndex = "state/fern.sqlite"
 
 // importIndex writes a record for every environment in the legacy index

@@ -2,14 +2,11 @@ package runsc
 
 import (
 	"net/netip"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -30,10 +27,12 @@ func binds(s spec) map[string]string {
 }
 
 func TestBoxSpec(t *testing.T) {
-	box := Box{ID: env.ID, Kind: Services, Env: env}
+	box := Box{
+		ID: env.ID, Kind: Services, Env: env,
+		Vars: []string{"CLAUDE_CONFIG_DIR=" + env.Claude}, Limits: Limits{CPUs: 1.5, Memory: 3 << 30, Pids: 500},
+	}
 	b := newLayout("/run/boxes", "/pool", box.ID)
-	lim := Limits{CPUs: 1.5, Memory: 3 << 30, Pids: 500}
-	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "tok", "login", 7071), lim)
+	s := boxSpec(box, b, []string{"PATH=/bin"}, startVars("w1", "tok", box.Vars))
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
@@ -54,10 +53,9 @@ func TestBoxSpec(t *testing.T) {
 	if s.Process.User.UID != store.BoxUID || len(s.Process.Capabilities.Bounding) != 0 || !s.Process.NoNewPrivileges {
 		t.Errorf("process runs as %+v with capabilities %v, want the box's user, none", s.Process.User, s.Process.Capabilities)
 	}
-	for _, v := range []string{"PATH=/bin", "FERN_BOX_TOKEN=tok", "FERN_WAKE_ID=w1", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"} {
-		if !slices.Contains(s.Process.Env, v) {
-			t.Errorf("env lacks %s: %v", v, s.Process.Env)
-		}
+	// The image's variables, the start's own, then the box's.
+	if diff := cmp.Diff([]string{"PATH=/bin", "FERN_BOX_TOKEN=tok", "FERN_WAKE_ID=w1", "CLAUDE_CONFIG_DIR=" + env.Claude}, s.Process.Env); diff != "" {
+		t.Errorf("env (-want +got):\n%s", diff)
 	}
 	if res := s.Linux.Resources; s.Linux.CgroupsPath != "/fern/demo" || res.CPU.Quota != 150_000 || res.CPU.Period != 100_000 ||
 		res.Memory.Limit != 3<<30 || res.Pids.Limit != 500 {
@@ -65,51 +63,6 @@ func TestBoxSpec(t *testing.T) {
 	}
 	if ns := s.Linux.Namespaces[1]; ns.Type != "network" || ns.Path != b.netns() {
 		t.Errorf("network namespace %+v, want %s", ns, b.netns())
-	}
-}
-
-// Each kind of box turns off what it doesn't run, and a box without
-// Claude's folder gets no Claude variables.
-func TestBoxVars(t *testing.T) {
-	noClaude := env
-	noClaude.Claude = ""
-	for _, tc := range []struct {
-		name string
-		box  Box
-		want []string // the variables beyond the token, the wake and the workspace
-	}{
-		{
-			"services with Claude",
-			Box{ID: "demo", Kind: Services, Env: env},
-			[]string{"CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
-		},
-		{"services", Box{ID: "demo", Kind: Services, Env: noClaude}, nil},
-		{
-			"agent",
-			Box{ID: "demo.agent", Kind: Agent, Env: env},
-			[]string{"FERN_SERVICES=off", "FERN_MCP=http://fern-daemon:7071", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
-		},
-		{"builder", Box{ID: "golden-r", Kind: Builder, Env: noClaude}, []string{"FERN_ON_DEMAND=off"}},
-		{"builder, for the setup script", Box{ID: "golden-r", Kind: Setup, Env: noClaude}, []string{"FERN_SERVICES=later"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			login := ""
-			if tc.box.Env.Claude != "" {
-				login = "login" // Wake reads it only for a box with Claude
-			}
-			got := boxVars(tc.box, "w1", "tok", login, 7071)[3:]
-			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
-				t.Errorf("vars (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-// An agent box learns what its environment's own box gets.
-func TestBoxLimitsVar(t *testing.T) {
-	got := boxLimitsVar(Limits{CPUs: 2.5, Memory: 5 << 30, Pids: 8192})
-	if want := "FERN_BOX_LIMITS=2.5:5120:8192"; got != want {
-		t.Errorf("boxLimitsVar() = %q, want %q", got, want)
 	}
 }
 
@@ -185,41 +138,6 @@ func TestBoxOfCgroup(t *testing.T) {
 		if got := boxOfCgroup(tc.data); got != tc.want {
 			t.Errorf("boxOfCgroup(%q) = %q, want %q", tc.data, got, tc.want)
 		}
-	}
-}
-
-// A services' box gets the configured limits, or what its repository asks
-// for up to the most it may, and so do a golden builder's; an agent box gets
-// the defaults.
-func TestLimitsOf(t *testing.T) {
-	big := Limits{CPUs: 4, Memory: 8 << 30, Pids: 9000}
-	all := setup.Limits{CPUs: 3, Memory: 4096, Pids: 6000}
-	for _, tc := range []struct {
-		name    string
-		cfg     Config
-		kind    Kind
-		asked   setup.Limits
-		want    Limits
-		wantErr bool
-	}{
-		{name: "unset", kind: Services, want: DefaultLimits},
-		{name: "set", cfg: Config{Limits: big}, kind: Services, want: big},
-		{name: "an agent box", cfg: Config{Limits: big, MaxLimits: big}, kind: Agent, asked: all, want: DefaultLimits},
-		{name: "a builder", cfg: Config{MaxLimits: big}, kind: Builder, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
-		{name: "a builder's box for the setup script", cfg: Config{MaxLimits: big}, kind: Setup, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
-		{name: "asked for less", kind: Services, asked: setup.Limits{Memory: 512}, want: Limits{CPUs: 2, Memory: 512 << 20, Pids: 4096}},
-		{name: "asked for more than the node gives", kind: Services, asked: all, want: DefaultLimits},
-		{name: "asked for more, under the most", cfg: Config{MaxLimits: big}, kind: Services, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
-		{name: "asked for more than the most", cfg: Config{MaxLimits: big}, kind: Services, asked: setup.Limits{CPUs: 64, Memory: 1 << 20, Pids: 1 << 20}, want: big},
-		{name: "asked for too little", kind: Services, asked: setup.Limits{Memory: 1}, wantErr: true},
-		{name: "asked for less than nothing", cfg: Config{MaxLimits: big}, kind: Services, asked: setup.Limits{CPUs: -1}, wantErr: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.cfg.limitsOf(tc.kind, tc.asked)
-			if (err != nil) != tc.wantErr || got != tc.want {
-				t.Errorf("limitsOf(%v, %+v) = %+v, %v; want %+v, error %t", tc.kind, tc.asked, got, err, tc.want, tc.wantErr)
-			}
-		})
 	}
 }
 

@@ -2,12 +2,9 @@ package runsc
 
 import (
 	"fmt"
-	"net"
 	"path/filepath"
 	"slices"
-	"strconv"
 
-	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -91,8 +88,8 @@ type Limits struct {
 	Pids   int64 // processes and threads
 }
 
-// DefaultLimits are a box's limits unless Config says otherwise, and always
-// an agent box's.
+// DefaultLimits are a box's limits unless the node is set up with others
+// (actor.Config), and always an agent box's.
 var DefaultLimits = Limits{CPUs: 2, Memory: 2 << 30, Pids: 4096}
 
 // minMemory is the least memory a box may be given. A box with only idle
@@ -112,45 +109,12 @@ func (l Limits) Check() error {
 	return nil
 }
 
-// limitsOf returns the limits of a box of kind. An agent box has the
-// defaults. A services' box has the configured ones, or what its repository
-// asked for, up to the configured most: the workspace's services.yaml is
-// the agent's to write, so it must not be able to take the whole node. A
-// golden builder's boxes have the same: a setup script builds what a thread
-// would, and one sized for the repository's box doesn't fit a smaller one.
-func (c Config) limitsOf(kind Kind, asked setup.Limits) (Limits, error) {
-	if kind == Agent {
-		return DefaultLimits, nil
-	}
-	lim := c.Limits
-	if lim == (Limits{}) {
-		lim = DefaultLimits
-	}
-	most := c.MaxLimits
-	if most == (Limits{}) {
-		most = lim
-	}
-	if asked.CPUs != 0 {
-		lim.CPUs = min(asked.CPUs, most.CPUs)
-	}
-	if asked.Memory != 0 {
-		lim.Memory = min(asked.Memory<<20, most.Memory)
-	}
-	if asked.Pids != 0 {
-		lim.Pids = min(asked.Pids, most.Pids)
-	}
-	if err := lim.Check(); err != nil {
-		return Limits{}, fmt.Errorf("services.yaml: limits: %w", err)
-	}
-	return lim, nil
-}
-
 // boxSpec returns the spec of box: fern-init (under tini, which reaps
 // orphans) as the box's user with no capabilities, a read-only root, the
 // environment's folders at their own paths and the box's own /tmp. image is
 // the image's environment; vars are the box's own (its token, its login).
-func boxSpec(box Box, b layout, image, vars []string, lim Limits) spec {
-	env := box.Env
+func boxSpec(box Box, b layout, image, vars []string) spec {
+	env, lim := box.Env, box.Limits
 	none := []string{}
 	mounts := []mount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
@@ -204,35 +168,9 @@ func boxSpec(box Box, b layout, image, vars []string, lim Limits) spec {
 	}
 }
 
-// boxLimitsVar tells an agent box's fern-init what its environment's own box
-// gets: CPUs, MiB of memory and processes, as FERN_BOX_LIMITS=2:2048:4096.
-func boxLimitsVar(lim Limits) string {
-	return fmt.Sprintf("FERN_BOX_LIMITS=%g:%d:%d", lim.CPUs, lim.Memory>>20, lim.Pids)
-}
-
-// boxVars are the variables fern-init needs: the token that authenticates
-// the daemon, the wake's ID (stop requests name it), the workspace, what
-// box's kind turns off, and Claude's folder and login if it gets them.
-func boxVars(box Box, wakeID, token, login string, mcpPort int) []string {
-	vars := []string{
-		"FERN_BOX_TOKEN=" + token,
-		"FERN_WAKE_ID=" + wakeID,
-		"FERN_WORKSPACE=" + box.Env.Workspace,
-	}
-	switch box.Kind {
-	case Services:
-	case Agent:
-		vars = append(vars, "FERN_SERVICES=off", "FERN_MCP=http://"+net.JoinHostPort(DaemonHost, strconv.Itoa(mcpPort)))
-	case Builder:
-		vars = append(vars, "FERN_ON_DEMAND=off")
-	case Setup:
-		vars = append(vars, "FERN_SERVICES=later")
-	}
-	if box.Env.Claude != "" {
-		vars = append(vars, "CLAUDE_CONFIG_DIR="+box.Env.Claude)
-	}
-	if login != "" {
-		vars = append(vars, "CLAUDE_CODE_OAUTH_TOKEN="+login)
-	}
-	return vars
+// startVars are the variables of one start of a box: the token that
+// authenticates the daemon and the wake's ID (stop requests name it), which
+// each start makes anew, and then vars.
+func startVars(wakeID, token string, vars []string) []string {
+	return slices.Concat([]string{"FERN_BOX_TOKEN=" + token, "FERN_WAKE_ID=" + wakeID}, vars)
 }

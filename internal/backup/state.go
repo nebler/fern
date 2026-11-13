@@ -25,7 +25,9 @@ import (
 // folder.
 // indexName is the SQLite index an archive made before 2026-11-12 holds in
 // the records' place. A restore still unpacks it, and the daemon's store
-// makes the records from it at its next start.
+// makes the records from it at its next start (store's importIndex). No
+// archive made since has one: this goes, with that import, once no node's
+// latest backup is from before that day, or none of those will be restored.
 const indexName = "fern.sqlite"
 
 // stateDirs are the pool's folders the archive holds whole: T3's data and
