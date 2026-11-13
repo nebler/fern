@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ type node struct {
 	btrfs                string // btrfs-progs' btrfs
 	losetup              string // util-linux's losetup, for fern pool grow
 	journalctl           string // systemd's journalctl, for fern logs
+	reboot               string // the file a Debian or Ubuntu system has while it asks for a reboot, /var/run/reboot-required
 	github, cloudflare   string // GitHub's and Cloudflare's APIs
 	// room returns the size and the free space of the filesystem that holds
 	// a path, for fern pool grow.
@@ -47,6 +49,7 @@ func thisNode() node {
 		cgroup: "/sys/fs/cgroup/fern", bundles: "/run/fern/boxes",
 		t3: "http://127.0.0.1:30773", git: "git", btrfs: "btrfs", losetup: "losetup", journalctl: "journalctl",
 		github: github.API, cloudflare: "https://api.cloudflare.com/client/v4", room: statfsRoom,
+		reboot: "/var/run/reboot-required",
 	}
 }
 
@@ -135,12 +138,6 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	// The pool and its free space.
 	add(n.checkPool())
 
-	// btrfs keeps its own records in room it sets aside as it goes: with
-	// none left to set aside, writes fail while free space still shows.
-	if f, ok := n.checkRecords(ctx); ok {
-		add(f)
-	}
-
 	// The pool is a sparse file: what it can still hold is what the disk
 	// under it has.
 	if f, ok := n.checkDisk(); ok {
@@ -183,13 +180,18 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		})
 	}
 
+	// A reboot the system asks for, after an update of its kernel or
+	// libraries.
+	add(n.checkReboot(time.Now()))
+
 	// Commits: the node's git makes Claude's (its box can't write to git),
 	// as the author T3's git has.
 	add(n.checkCommits(ctx))
 
 	// What the daemon knows has gone wrong, which is otherwise a line in its
 	// log: failed golden builds, backups that fail, a pool that takes no
-	// more snapshots. An older daemon doesn't say.
+	// more snapshots or has no room left for btrfs's records, a turn's
+	// snapshot that failed. An older daemon doesn't say.
 	var problems []api.Problem
 	if daemonUp {
 		ctxP, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -203,7 +205,8 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	// Backups, which are optional.
 	switch _, err := os.Stat(filepath.Join(n.etc, "backup.env")); {
 	case err != nil:
-		add(finding{name: "backups", info: true, detail: "none: if this server is lost, its threads are (README: backups)"})
+		// The owner's choice, so no problem: but said as what it would cost.
+		add(finding{name: "backups", info: true, detail: n.unsaved(time.Now())})
 	case !failing("backups"):
 		add(finding{name: "backups", ok: true, detail: "set up: hourly, encrypted; fern backup makes one now"})
 	}
@@ -244,6 +247,97 @@ func ofProblem(p api.Problem) finding {
 	return finding{name: p.Name, detail: detail, fix: p.Fix}
 }
 
+// unsaved says what a server without backups would lose today: how many
+// environments it has, golden builders aside (a golden is built again), and
+// when the newest of them last changed. It reads the pool itself, so it
+// says the same with the daemon down. An environment last changed when its
+// workspace's folder or its folder of snapshots did: T3 has a snapshot
+// taken at every turn.
+func (n node) unsaved(now time.Time) string {
+	const none = "none: if this server is lost, so is every thread made on it (README: Backups)"
+	records, err := filepath.Glob(filepath.Join(n.pool, "envs", "*", "env.json"))
+	if err != nil {
+		return none
+	}
+	count := 0
+	var newest time.Time
+	for _, record := range records {
+		dir := filepath.Dir(record)
+		if strings.HasPrefix(filepath.Base(dir), "golden-") {
+			continue
+		}
+		count++
+		changed := []string{filepath.Join(dir, "snaps")}
+		var rec struct {
+			Workspace string `json:"workspace"`
+		}
+		if data, err := os.ReadFile(record); err == nil && json.Unmarshal(data, &rec) == nil && rec.Workspace != "" {
+			changed = append(changed, rec.Workspace)
+		}
+		for _, path := range changed {
+			if fi, err := os.Stat(path); err == nil && fi.ModTime().After(newest) {
+				newest = fi.ModTime()
+			}
+		}
+	}
+	switch {
+	case count == 0:
+		return none
+	case newest.IsZero():
+		return fmt.Sprintf("none: %d environments are on this server only: if it is lost, so are they (README: Backups)", count)
+	}
+	return fmt.Sprintf("none: %d environments are on this server only, the newest changed %s ago: if it is lost, so are they (README: Backups)",
+		count, roughly(now.Sub(newest)))
+}
+
+// roughly is d for a sentence: minutes under two hours, hours under two
+// days, then days.
+func roughly(d time.Duration) string {
+	switch d = max(d, 0); {
+	case d < 2*time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d days", int(d.Hours()/24))
+	}
+}
+
+// rebootLate is how long a reboot the system asks for may wait before
+// doctor fails: the kernel and the libraries every box runs on stay the old
+// ones until it.
+const rebootLate = 14 * 24 * time.Hour
+
+// checkReboot says whether the system asks for a reboot, as Debian and
+// Ubuntu do with a file after an update that needs one (a kernel, libc),
+// naming the packages in a file beside it. It is information until it has
+// waited rebootLate, then a failure. The daemon doesn't list it: a
+// notification that stands for two weeks would teach its reader to ignore
+// them.
+func (n node) checkReboot(now time.Time) finding {
+	fi, err := os.Stat(n.reboot)
+	if n.reboot == "" || err != nil {
+		return finding{name: "reboot", ok: true, detail: "the system asks for none"}
+	}
+	waited := now.Sub(fi.ModTime())
+	detail := fmt.Sprintf("the system asks for one since %s (%s)", fi.ModTime().Local().Format("2 Jan"), roughly(waited))
+	if data, err := os.ReadFile(n.reboot + ".pkgs"); err == nil {
+		pkgs := strings.Fields(string(data))
+		slices.Sort(pkgs)
+		pkgs = slices.Compact(pkgs)
+		if more := len(pkgs) - 3; more > 0 {
+			detail += fmt.Sprintf(", for %s and %d more", strings.Join(pkgs[:3], ", "), more)
+		} else if len(pkgs) > 0 {
+			detail += ", for " + strings.Join(pkgs, ", ")
+		}
+	}
+	return finding{
+		name: "reboot", info: waited <= rebootLate, detail: detail + ": until then the server runs the kernel and libraries from before their update",
+		fix: "when no turn runs (`fern top` shows the boxes that are up): `systemctl reboot`. Boxes stop with it and wake at their next command, " +
+			"the daemon and T3 start by themselves, and a turn that runs then is cut off",
+	}
+}
+
 // checkPool says whether the pool is mounted, and how much it has free.
 func (n node) checkPool() finding {
 	var fs unix.Statfs_t
@@ -272,69 +366,6 @@ func (n node) checkDisk() (finding, bool) {
 		name: "disk", ok: free >= minFree, detail: fmt.Sprintf("%.1f GB free under the pool", float64(free)/1e9),
 		fix: "free space on the server's disk: the pool is a file on it, and fills it as it grows",
 	}, true
-}
-
-// recordsLeast is the room for btrfs's records below which doctor fails, when
-// the filesystem has nothing unallocated to add to it.
-const recordsLeast = 256 << 20
-
-// checkRecords says whether btrfs has room for its metadata: what is left of
-// what it has set aside, when the device has nothing unallocated to set
-// aside more. statfs, which the daemon's guard and the checks above read,
-// doesn't show it: on 2026-11-13 a pool said 3.4 GiB free with 1 MiB
-// unallocated and its metadata three quarters used, about 2 GiB of writes
-// from failing. false means btrfs didn't say.
-func (n node) checkRecords(ctx context.Context) (finding, bool) {
-	out, err := exec.CommandContext(ctx, n.btrfs, "filesystem", "usage", "-b", n.pool).Output()
-	if err != nil {
-		return finding{}, false
-	}
-	unallocated, size, used, ok := metadataRoom(string(out))
-	if !ok {
-		return finding{}, false
-	}
-	left := size - min(used, size)
-	f := finding{
-		name: "pool records", ok: unallocated >= 1<<30 || left >= recordsLeast,
-		detail: fmt.Sprintf("btrfs has %d MiB left for its records, and %d MiB it could add", left>>20, unallocated>>20),
-		fix:    "the pool can fail writes with free space showing: grow it (`fern pool grow +10G`), or delete threads that are done",
-	}
-	return f, true
-}
-
-// metadataRoom reads from `btrfs filesystem usage -b` what the device has
-// unallocated, and the size and use of the metadata it has set aside.
-func metadataRoom(usage string) (unallocated, size, used uint64, ok bool) {
-	var haveUnallocated, haveMetadata bool
-	for line := range strings.SplitSeq(usage, "\n") {
-		line = strings.TrimSpace(line)
-		if rest, found := strings.CutPrefix(line, "Device unallocated:"); found {
-			unallocated, haveUnallocated = number(rest)
-		}
-		if rest, found := strings.CutPrefix(line, "Metadata,"); found {
-			// Metadata,DUP: Size:1073741824, Used:781533184 (72.79%)
-			if _, after, found := strings.Cut(rest, "Size:"); found {
-				size, haveMetadata = number(after)
-			}
-			if _, after, found := strings.Cut(rest, "Used:"); found {
-				var usedOK bool
-				used, usedOK = number(after)
-				haveMetadata = haveMetadata && usedOK
-			}
-		}
-	}
-	return unallocated, size, used, haveUnallocated && haveMetadata
-}
-
-// number reads the digits s starts with, after spaces.
-func number(s string) (uint64, bool) {
-	s = strings.TrimSpace(s)
-	end := strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' })
-	if end < 0 {
-		end = len(s)
-	}
-	n, err := strconv.ParseUint(s[:end], 10, 64)
-	return n, err == nil
 }
 
 // checkCommits says whether Claude's commit tool can commit: the node needs

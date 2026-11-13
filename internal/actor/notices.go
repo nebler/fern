@@ -29,6 +29,9 @@ const (
 //     wake so often that it isn't woken for now (crashNotice): Claude would
 //     otherwise learn it from its first Bash call, and the person from
 //     nothing.
+//   - The environment's last snapshot failed (Snapshot): T3 went on with
+//     the turn, which has no point to revert to. The record says when; T3's
+//     name for the checkpoint is a digest, which tells a person nothing.
 //   - The golden build of what this workspace was made from failed, so it
 //     started without what the setup script and the services' first start
 //     make.
@@ -41,6 +44,11 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 	}
 	if notice := g.crashNotice(ctx, env); notice != "" {
 		out = append(out, notice)
+	}
+	if keep := g.cfg.SnapshotFailures; keep != nil {
+		if failed, ok, err := keep.SnapshotFailure(ctx, env.ID); err == nil && ok {
+			out = append(out, snapshotNotice(failed, time.Now()))
+		}
 	}
 	// The repository of a worktree is its parent folder (golden).
 	builder := store.BuilderID(filepath.Base(filepath.Dir(env.Workspace)))
@@ -57,6 +65,20 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 		"without what the setup script and the services' first start make. It is tried again when a thread is "+
 		"made, at most every %s. Why it failed: %s",
 		failed.At.UTC().Format("2006-01-02 15:04 UTC"), time.Since(failed.At).Round(time.Minute), buildRetry, clip(failed.Error)))
+}
+
+// snapshotNotice says, at now, which turn has no snapshot and what that
+// means: the one that ended when the snapshot failed. The record is of the
+// last failure only, so it can't say whether the turns before it, back to
+// the last snapshot that worked, failed too.
+func snapshotNotice(failed store.SnapshotFailure, now time.Time) string {
+	when := "at a time the record doesn't say"
+	if !failed.At.IsZero() {
+		when = fmt.Sprintf("at %s, %s ago", failed.At.UTC().Format("2006-01-02 15:04 UTC"), now.Sub(failed.At).Round(time.Minute))
+	}
+	return fmt.Sprintf("Fern could not take its snapshot of the turn that ended %s (checkpoint %s): that turn has no point to revert to, "+
+		"and a revert to it is refused rather than bring back the code without the data. Only the last failure is kept: turns just before "+
+		"it may lack theirs too. The next snapshot that works ends this notice. Why it failed: %s", when, failed.Snapshot, clip(failed.Error))
 }
 
 // clip returns s with its middle left out if it is long: a failure's cause

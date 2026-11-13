@@ -76,14 +76,14 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			// adopt.new, when a power cut undoes the cleanup that came before
 			// the record; the copy is garbage either way. A create or delete
 			// that stopped next to its record left the marker, and a record
-			// being replaced its new copy.
+			// or a failure's file being replaced its new copy.
 			if err := s.deleteSubvolumes(ctx, s.restorePath(id), s.adoptPath(id)); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := os.RemoveAll(s.adoptPath(id)); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
-			for _, p := range []string{s.markerPath(id), s.recordPath(id) + ".new"} {
+			for _, p := range []string{s.markerPath(id), s.recordPath(id) + ".new", s.failurePath(id) + ".new", s.snapshotFailurePath(id) + ".new"} {
 				if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					return lost, fmt.Errorf("reconcile %s: %w", id, err)
 				}

@@ -50,6 +50,13 @@ type Store interface {
 	Space() (store.Space, error)
 }
 
+// SnapshotFailures keeps each environment's last failed snapshot with it,
+// on disk (store.Store).
+type SnapshotFailures interface {
+	SetSnapshotFailure(ctx context.Context, id string, f *store.SnapshotFailure) error
+	SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error)
+}
+
 // Driver runs boxes.
 type Driver interface {
 	Wake(ctx context.Context, box runsc.Box) (addr string, err error)
@@ -104,6 +111,10 @@ type Config struct {
 	// MaxLimits is the most a repository's services.yaml may ask for its
 	// box; the zero value means Limits, so that it can only ask for less.
 	MaxLimits runsc.Limits
+	// SnapshotFailures keeps a turn's snapshot that failed with its
+	// environment, for `fern doctor` and the thread's Claude (Snapshot,
+	// notices): the store. nil: none is kept, and none is told of.
+	SnapshotFailures SnapshotFailures
 	// SetupTimeout is how long a repository's setup script may run in a
 	// golden build; 0 means DefaultSetupTimeout.
 	SetupTimeout time.Duration

@@ -17,9 +17,10 @@ import (
 )
 
 type fakeStore struct {
-	envs   []string
-	failed map[string]store.BuildFailure
-	space  store.Space
+	envs      []string
+	failed    map[string]store.BuildFailure
+	snapshots map[string]store.SnapshotFailure // the environments whose last snapshot failed
+	space     store.Space
 }
 
 func (f fakeStore) List(context.Context) ([]store.Env, error) {
@@ -32,6 +33,11 @@ func (f fakeStore) List(context.Context) ([]store.Env, error) {
 
 func (f fakeStore) BuildFailure(_ context.Context, id string) (store.BuildFailure, bool, error) {
 	failure, ok := f.failed[id]
+	return failure, ok, nil
+}
+
+func (f fakeStore) SnapshotFailure(_ context.Context, id string) (store.SnapshotFailure, bool, error) {
+	failure, ok := f.snapshots[id]
 	return failure, ok, nil
 }
 
@@ -88,6 +94,23 @@ func TestProblems(t *testing.T) {
 				"golden build: golden-app-12345678",
 			},
 			fix: "`fern logs t3-1` shows what the box last printed and what the daemon said of it; `fern wake t3-1.agent` tries again now",
+		},
+		{
+			name: "a thread whose last snapshot failed, before a failed build",
+			store: fakeStore{
+				envs:   []string{"golden-app-12345678", "t3-1", "t3-2"},
+				failed: map[string]store.BuildFailure{"golden-app-12345678": {Error: "x"}},
+				snapshots: map[string]store.SnapshotFailure{"t3-2": {
+					Snapshot: "t3-0123", At: time.Date(2026, 11, 13, 14, 2, 0, 0, time.UTC), Error: "snapshot t3-2/t3-0123: btrfs: input/output error\nmore",
+				}},
+				space: roomy,
+			},
+			want: []string{
+				"snapshot: t3-2: the snapshot of a turn wasn't taken (t3-0123), so a revert to that turn is refused: snapshot t3-2/t3-0123: btrfs: input/output error",
+				"golden build: golden-app-12345678",
+			},
+			fix: "the next turn's snapshot is tried as usual, and one that works clears this; `fern snapshot t3-2 probe` tries one now " +
+				"(`fern rmsnap t3-2 probe` removes it again); `fern logs t3-2` has what the daemon said",
 		},
 		{
 			name:  "backups that fail",

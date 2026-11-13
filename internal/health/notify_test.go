@@ -58,6 +58,12 @@ func (n *node) BuildFailure(ctx context.Context, id string) (store.BuildFailure,
 	return n.store.BuildFailure(ctx, id)
 }
 
+func (n *node) SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.store.SnapshotFailure(ctx, id)
+}
+
 func (n *node) Space() (store.Space, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

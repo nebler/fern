@@ -20,6 +20,7 @@ import (
 type Store interface {
 	List(ctx context.Context) ([]store.Env, error)
 	BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error)
+	SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error)
 	Space() (store.Space, error)
 }
 
@@ -38,6 +39,9 @@ type Checker struct {
 	// BackupEvery is how often the daemon backs up; 0 if no backups are set
 	// up, which is no problem.
 	BackupEvery time.Duration
+	// Records reads btrfs's room for its own records, which the pool's free
+	// space doesn't show. May be nil: it isn't looked at.
+	Records *Records
 }
 
 // lateBackups is how many backups may be missed before it is a problem:
@@ -45,9 +49,10 @@ type Checker struct {
 const lateBackups = 3
 
 // Problems returns what is wrong now, the most pressing first: a pool that
-// takes no more snapshots, backups that fail or have stopped, boxes that
-// aren't woken because they keep crashing, and golden builds that failed.
-// No problems is an empty list.
+// takes no more snapshots, one with no room left for btrfs's records,
+// backups that fail or have stopped, boxes that aren't woken because they
+// keep crashing, environments whose last snapshot failed, and golden builds
+// that failed. No problems is an empty list.
 func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	out := []api.Problem{} // an empty list on the wire, not null
 	sp, err := c.Store.Space()
@@ -59,6 +64,11 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 			Name: "disk", Detail: "no new snapshots or threads: " + full.Error(),
 			Fix: "`fern df` shows what uses the disk, `fern gc` frees what nothing needs; delete threads that are done",
 		})
+	}
+	if c.Records != nil {
+		if p, ok := c.Records.problem(ctx, sp.Under != nil); ok {
+			out = append(out, p)
+		}
 	}
 	if c.BackupEvery > 0 {
 		if p, ok := c.backups(); ok {
@@ -79,6 +89,15 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 		return nil, err
 	}
 	for _, env := range envs {
+		failed, ok, err := c.Store.SnapshotFailure(ctx, env.ID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, snapshot(env.ID, failed))
+		}
+	}
+	for _, env := range envs {
 		if _, source := store.BuilderOf(env.ID); !store.IsBuilder(env.ID) || source {
 			continue
 		}
@@ -96,6 +115,19 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 		})
 	}
 	return out, nil
+}
+
+// snapshot is the problem of environment env whose last snapshot failed:
+// T3 went on with the turn, which has no point to revert to. It lasts until
+// a snapshot of env works. A snapshot the pool was too full for is not
+// among them (actor.Group.Snapshot): that is the problem "disk".
+func snapshot(env string, failed store.SnapshotFailure) api.Problem {
+	return api.Problem{
+		Name: "snapshot", About: env, At: failed.At,
+		Detail: fmt.Sprintf("%s: the snapshot of a turn wasn't taken (%s), so a revert to that turn is refused: %s", env, failed.Snapshot, firstLine(failed.Error)),
+		Fix: "the next turn's snapshot is tried as usual, and one that works clears this; `fern snapshot " + env + " probe` tries one now (`fern rmsnap " +
+			env + " probe` removes it again); `fern logs " + env + "` has what the daemon said",
+	}
 }
 
 // crashing is the problem of a box that isn't woken for now: which, how

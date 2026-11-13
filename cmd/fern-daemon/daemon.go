@@ -264,6 +264,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if previewLis != nil {
 		cfg.Woken = woken
 	}
+	// A turn's snapshot that fails is kept with its environment, for fern
+	// doctor and the thread's Claude.
+	cfg.SnapshotFailures = st
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, cfg.Agents, tr, log)
 	// What Claude in an agent box gets in place of its own shell.
@@ -306,7 +309,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// fern doctor: what is wrong now that would otherwise be a line in this
 	// daemon's log, or the error of a box's next command. The same list is a
 	// metric, with the pool's room.
-	checker := health.Checker{Store: st, Pool: pool, Boxes: envs}
+	// btrfs's room for its own records is read by a program, at most every
+	// ten minutes, by these looks only: never on a wake's or a snapshot's way.
+	checker := health.Checker{Store: st, Pool: pool, Boxes: envs, Records: &health.Records{Btrfs: "btrfs", Pool: pool}}
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}

@@ -93,7 +93,7 @@ type Send struct {
 
 // Envs makes the snapshots backups send, through the environments' actors.
 type Envs interface {
-	Snapshot(ctx context.Context, id, snapID string, replace bool) error
+	BackupSnapshot(ctx context.Context, id, snapID string) error
 	DeleteSnapshot(ctx context.Context, id, snapID string) error
 }
 
@@ -250,7 +250,7 @@ func (b *Backer) env(ctx context.Context, env store.Env, eb EnvBackup) (EnvBacku
 	}
 
 	name := snapPrefix + strconv.FormatInt(time.Now().UnixNano(), 10)
-	if err := b.envs.Snapshot(ctx, env.ID, name, false); err != nil {
+	if err := b.envs.BackupSnapshot(ctx, env.ID, name); err != nil {
 		return eb, err
 	}
 	key := b.prefix + "envs/" + env.ID + "/" + name
