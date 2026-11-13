@@ -62,6 +62,20 @@ http.server.HTTPServer((\"127.0.0.1\", 8099), H).serve_forever()  # fern-notify-
   restart_daemon
   sleep 7
   check "the daemon sends a sign of life every 2 s" yes "$([ "$(in_daemon "grep -c '' $got 2>/dev/null" || echo 0)" -ge 3 ] && echo yes || echo no)"
+  # A T3 that is down: no sign of life, so the service alerts; and once it
+  # has been down for 30 s (a restart is shorter), a problem.
+  if t3_installed; then
+    on_node systemctl stop fern-t3 </dev/null
+    sleep 3
+    in_daemon "rm -f $got"
+    sleep 5
+    check "no sign of life while T3 is down" 0 "$(in_daemon "grep -c beat $got 2>/dev/null" || echo 0)"
+    fern doctor >/dev/null 2>&1 || true
+    sleep 31
+    check "fern doctor says T3 doesn't answer, once it has been down for 30 s" 1 "$(fern doctor 2>&1 | grep -c "T3 doesn't answer" || true)"
+    on_node systemctl start fern-t3 </dev/null
+    wait_t3
+  fi
   in_daemon "echo FERN_NOTIFY_URL=http://127.0.0.1:8099/fern > /etc/fern/notify.env && chmod 600 /etc/fern/notify.env && rm -f $got"
   on_node systemctl start fern-failed@fern-daemon.service.service </dev/null || true
   check "a unit that failed for good is told to the URL" 1 "$(in_daemon "grep -c 'fern-daemon.service failed' $got" || true)"

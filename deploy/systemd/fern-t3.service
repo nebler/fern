@@ -11,6 +11,10 @@ Description=T3 Code's server, on Fern
 After=fern-daemon.service
 Wants=fern-daemon.service
 RequiresMountsFor=/var/lib/fern
+# Not on a pool a restore into hasn't finished (fern-daemon restore keeps
+# this file there until it has): T3 would write into its half-restored
+# data. The daemon refuses to start on one too.
+ConditionPathExists=!/var/lib/fern/restoring.json
 # A failure systemd gives up on reaches the owner (fern-failed@.service).
 OnFailure=fern-failed@%n.service
 

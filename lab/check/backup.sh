@@ -40,7 +40,21 @@ backup() {
   check "… the workspace file for file" "$(treehash /var/lib/fern/envs/$ENV/snaps/$snap)" "$(treehash $scratch/envs/$ENV/live)"
   check "… and its record and T3's data with it" "yes yes" \
     "$(in_daemon "for p in envs/$ENV/env.json userdata; do test -e $scratch/\$p && echo yes || echo no; done" | xargs)"
+  check "a restore run again into the pool it finished is refused" 1 "$(in_daemon "fern-daemon restore $node $scratch >/dev/null 2>&1; echo \$?")"
   in_daemon "umount $scratch; rm -rf $scratch $scratch.img; rm -f /etc/fern/backup.env; podman rm -f fern-s3 >/dev/null"
+  # A restore that hasn't finished keeps its marker in the pool, and then
+  # neither the daemon nor T3 starts on it.
+  in_daemon "printf '{\"node\":\"x\",\"state\":\"y\"}' > /var/lib/fern/restoring.json"
+  on_node systemctl restart fern-daemon </dev/null >/dev/null 2>&1 || true
+  sleep 2
+  check "the daemon doesn't start on a half-restored pool" no "$(succeeds on_node systemctl is-active -q fern-daemon </dev/null)"
+  if t3_installed; then
+    on_node systemctl restart fern-t3 </dev/null >/dev/null 2>&1 || true
+    check "nor does T3" no "$(succeeds on_node systemctl is-active -q fern-t3 </dev/null)"
+  fi
+  in_daemon "rm /var/lib/fern/restoring.json"
+  restart_daemon
+  if t3_installed; then on_node systemctl restart fern-t3 </dev/null; wait_t3; fi
   set_daemon_args $args
   fern rm $ENV
   # The node's other threads were backed up too: each keeps its last

@@ -164,11 +164,16 @@ func TestProblems(t *testing.T) {
 					}
 					w.WriteHeader(tt.t3)
 				}))
-				c.T3 = &health.T3{URL: srv.URL}
+				c.T3 = &health.T3{URL: srv.URL, Grace: time.Nanosecond}
 				if tt.t3 < 0 {
 					srv.Close() // nothing listens
 				} else {
 					defer srv.Close()
+				}
+				// A T3 is a problem once it has failed for its grace, which
+				// the first look starts.
+				if _, err := c.Problems(t.Context()); err != nil {
+					t.Fatal(err)
 				}
 			}
 			got, err := c.Problems(t.Context())
@@ -199,5 +204,22 @@ func TestProblems(t *testing.T) {
 				t.Errorf("the fix of %s = %q, want %q", got[0].Name, got[0].Fix, tt.fix)
 			}
 		})
+	}
+}
+
+// A T3 that fails to answer once, as one does while an update restarts it,
+// is no problem yet: it is one only after failing for its grace.
+func TestT3RestartIsNoProblem(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close() // nothing listens
+	c := health.Checker{Store: fakeStore{}, Pool: t.TempDir(), T3: &health.T3{URL: srv.URL}}
+	for range 2 {
+		got, err := c.Problems(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("Problems() within T3's grace = %+v, want none", got)
+		}
 	}
 }

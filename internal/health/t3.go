@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebler/fern/internal/api"
@@ -17,16 +18,27 @@ import (
 // milliseconds when it runs.
 const t3Timeout = 5 * time.Second
 
+// t3Down is how long T3 must have failed to answer before it is a problem:
+// an update or a crash restarts it in seconds, and a look that met such a
+// restart would tell the person of a fault that was already gone.
+const t3Down = 30 * time.Second
+
 // T3 is T3's server on the node. The daemon can be fine while T3 hangs or
 // is down, and every thread with it: a Heartbeat sends no beat then, and it
 // is a problem.
 type T3 struct {
 	URL string // T3's server, such as http://127.0.0.1:30773
+	// Grace is how long it must fail to answer before it is a problem; 0
+	// means t3Down.
+	Grace time.Duration
+
+	mu        sync.Mutex
+	downSince time.Time // when it first failed to answer, since it last did; zero while it answers
 }
 
 // answer GETs T3's /.well-known/t3/environment, which it answers while it
 // runs, and returns why it didn't answer, or nil.
-func (t T3) answer(ctx context.Context) error {
+func (t *T3) answer(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, t3Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(t.URL, "/")+"/.well-known/t3/environment", nil)
@@ -50,10 +62,25 @@ func (t T3) answer(ctx context.Context) error {
 	return nil
 }
 
-// problem returns the problem of a T3 that doesn't answer, if it doesn't.
-func (t T3) problem(ctx context.Context) (api.Problem, bool) {
+// problem returns the problem of a T3 that doesn't answer, if it hasn't
+// for t3Down: one that is only restarting is none.
+func (t *T3) problem(ctx context.Context) (api.Problem, bool) {
 	err := t.answer(ctx)
-	if err == nil {
+	t.mu.Lock()
+	now := time.Now()
+	switch {
+	case err == nil:
+		t.downSince = time.Time{}
+	case t.downSince.IsZero():
+		t.downSince = now
+	}
+	since := t.downSince
+	t.mu.Unlock()
+	grace := t.Grace
+	if grace == 0 {
+		grace = t3Down
+	}
+	if err == nil || now.Sub(since) < grace {
 		return api.Problem{}, false
 	}
 	return api.Problem{
