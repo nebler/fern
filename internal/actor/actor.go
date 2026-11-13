@@ -139,13 +139,15 @@ type Group struct {
 	builder *builder
 	// reporter works out what a box with Claude is told (boxOf).
 	reporter *reporter
+	// snapshotter takes, deletes and prunes snapshots.
+	snapshotter *snapshotter
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
-	wakes, stops, restores, snapshots, queue *prometheus.HistogramVec
-	idleSleeps                               prometheus.Counter
-	boxFailures                              prometheus.Counter     // wakes that failed, and boxes that died under a command
-	prewakeResults                           *prometheus.CounterVec // pre-wakes, by what came of them
+	wakes, stops, restores, queue *prometheus.HistogramVec
+	idleSleeps                    prometheus.Counter
+	boxFailures                   prometheus.Counter     // wakes that failed, and boxes that died under a command
+	prewakeResults                *prometheus.CounterVec // pre-wakes, by what came of them
 
 	find     chan findRequest // to Run, for an environment's actor
 	prewakes chan string      // to Run's prewakers, environments to wake ahead
@@ -169,13 +171,12 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 	traced := tracedStore{st: st, tr: tr}
 	g := &Group{
 		store: traced, driver: drv, cfg: cfg, tracer: tr, log: log,
-		touches:   &http.Client{Timeout: touchTimeout},
-		boxes:     &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
-		wakes:     histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
-		stops:     histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
-		restores:  histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
-		snapshots: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
-		queue:     histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
+		touches:  &http.Client{Timeout: touchTimeout},
+		boxes:    &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
+		wakes:    histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
+		stops:    histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
+		restores: histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
+		queue:    histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
 		idleSleeps: metrics.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
@@ -199,6 +200,10 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 		took:  histogram("fern_golden_build_seconds", "Time to build a golden snapshot.", boxBuckets, "result"),
 		queue: make(chan string, buildQueue),
 		do:    g.do, exec: g.Exec, delete: g.Delete,
+	}
+	g.snapshotter = &snapshotter{
+		store: traced, failures: cfg.SnapshotFailures, log: log, do: g.do,
+		took: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
 	}
 	g.reporter = &reporter{store: traced, failures: cfg.SnapshotFailures, image: cfg.Image, crashing: g.crashing}
 	return g
