@@ -1051,25 +1051,28 @@ func TestAgentStart(t *testing.T) {
 	}
 }
 
-// OpenCode's server runs in the workspace, which the other box writes, next
-// to Claude's login: whatever the client asked for, it is started so that it
-// reads no settings there, loads no plugin, and runs no formatter, language
-// server or snapshot. Fern's policies come last, where they decide.
+// OpenCode's server works in the workspace, which the other box writes, next
+// to Claude's login: whatever the client asked for, it is started outside it,
+// so that Bun finds no module there, and so that it reads no settings there,
+// loads no plugin, and runs no formatter, language server or snapshot.
+// Fern's policies come last, where they decide.
 func TestOpenCodeTakesNothingFromTheWorkspace(t *testing.T) {
-	// This opencode prints the two variables that keep it from the
-	// workspace's settings, then its settings.
+	// This opencode prints the folder it started in and the two variables
+	// that keep it from the workspace's settings, then its settings.
 	bin := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s\\n' \"$OPENCODE_CONFIG_PROJECT_DISABLE\" \"$OPENCODE_DISABLE_PROJECT_CONFIG\"\n" +
+	script := "#!/bin/sh\npwd -P\nprintf '%s\\n' \"$OPENCODE_CONFIG_PROJECT_DISABLE\" \"$OPENCODE_DISABLE_PROJECT_CONFIG\"\n" +
 		"printf '%s' \"$OPENCODE_CONFIG_CONTENT\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "opencode"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	type started struct {
+		Dir                       string
 		NoProject                 []string
 		Formatter, LSP, Snapshots any
 		Policies                  []any // the last two
 	}
 	want := started{
+		Dir:       "/",
 		NoProject: []string{"1", "1"},
 		Formatter: false, LSP: false, Snapshots: false,
 		Policies: []any{
@@ -1079,9 +1082,11 @@ func TestOpenCodeTakesNothingFromTheWorkspace(t *testing.T) {
 	}
 	tests := []struct {
 		name    string
+		dir     string
 		environ []string
 	}{
 		{name: "a client that asks for nothing"},
+		{name: "a client that starts it in the workspace", dir: t.TempDir()},
 		{
 			name: "a client that turns each on",
 			environ: []string{
@@ -1098,19 +1103,19 @@ func TestOpenCodeTakesNothingFromTheWorkspace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout bytes.Buffer
-			req := boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "serve"}, Environ: tt.environ}
+			req := boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "serve"}, Dir: tt.dir, Environ: tt.environ}
 			if _, err := c.ExecAgent(t.Context(), "demo", req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
 				t.Fatalf("ExecAgent() error: %v", err)
 			}
-			lines := strings.SplitN(stdout.String(), "\n", 3)
-			if len(lines) != 3 {
-				t.Fatalf("opencode printed %q, want two variables and its settings", stdout.String())
+			lines := strings.SplitN(stdout.String(), "\n", 4)
+			if len(lines) != 4 {
+				t.Fatalf("opencode printed %q, want its folder, two variables and its settings", stdout.String())
 			}
 			var cfg map[string]any
-			if err := json.Unmarshal([]byte(lines[2]), &cfg); err != nil {
-				t.Fatalf("settings %q: %v", lines[2], err)
+			if err := json.Unmarshal([]byte(lines[3]), &cfg); err != nil {
+				t.Fatalf("settings %q: %v", lines[3], err)
 			}
-			got := started{NoProject: lines[:2], Formatter: cfg["formatter"], LSP: cfg["lsp"], Snapshots: cfg["snapshots"]}
+			got := started{Dir: lines[0], NoProject: lines[1:3], Formatter: cfg["formatter"], LSP: cfg["lsp"], Snapshots: cfg["snapshots"]}
 			if policies, _ := cfg["policies"].([]any); len(policies) >= 2 {
 				got.Policies = policies[len(policies)-2:]
 			}

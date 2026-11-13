@@ -171,15 +171,31 @@ const openCodeConfig = "OPENCODE_CONFIG_CONTENT"
 // set here.
 var openCodeNoProject = []string{"OPENCODE_CONFIG_PROJECT_DISABLE", "OPENCODE_DISABLE_PROJECT_CONFIG"}
 
+// openCodeDir is where OpenCode's server starts: the box's root, which is
+// read-only, so that nothing in it was written by a box.
+//
+// OpenCode is one program built by Bun, and Bun looks for every module that
+// is not built into it (a provider's package, say) from the folder the
+// program started in: its node_modules, and the tsconfig.json and
+// package.json there, which can map any name to any file (OpenCode 2.2.6's
+// build turns on reading both). Started in the workspace, a module the other
+// box put there would load next to Claude's login. The folder OpenCode works
+// in is not where it starts: T3 names it in each request (its location).
+const openCodeDir = "/"
+
 // openCode changes the request of OpenCode's server, which T3 calls over
 // HTTP. The server listens on the box's address, which is at addr, as T3
-// can't reach the box's loopback. Its settings get the MCP server and lose
-// the shell tool. Any other opencode command is left as it is.
+// can't reach the box's loopback, and starts in openCodeDir. Its settings
+// get the MCP server and lose the shell tool. Any other opencode command is
+// left as it is.
 //
-// The server runs in the workspace, which the other box writes, next to
+// The server works in the workspace, which the other box writes, next to
 // Claude's login: it must run and load nothing from there. What OpenCode
 // 2.2.6 (the image's) would, and what stops each, read in its source and
 // tried against a workspace with one of each planted (architecture §13):
+//   - modules not built into it, with the workspace's node_modules,
+//     tsconfig.json and package.json: looked for from openCodeDir instead
+//     (read in OpenCode's and Bun's source, not yet tried in a box);
 //   - the workspace's own settings (opencode.json, .opencode/), whose MCP
 //     servers, plugins, commands and formatters are programs: not read
 //     (openCodeNoProject). Nothing in the settings does that: a policy in the
@@ -206,6 +222,7 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	}
 	req.Argv = slices.DeleteFunc(slices.Clone(req.Argv), func(arg string) bool { return strings.HasPrefix(arg, "--hostname=") })
 	req.Argv = append(req.Argv, "--hostname="+host)
+	req.Dir = openCodeDir
 
 	cfg := map[string]any{}
 	req.Environ = slices.DeleteFunc(slices.Clone(req.Environ), func(v string) bool {
