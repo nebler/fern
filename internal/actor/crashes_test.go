@@ -213,7 +213,7 @@ func TestCrashNoticeAtClaudesWake(t *testing.T) {
 				if err := g.Wake(ctx, store.AgentBox("one")); err != nil {
 					t.Fatal(err)
 				}
-				got := drv.Woken(store.AgentBox("one")).Notices
+				got := noticesOf(t, drv.Woken(store.AgentBox("one")))
 				if len(tc.want) == 0 {
 					if len(got) != 0 {
 						t.Errorf("notices = %q, want none", got)
