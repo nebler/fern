@@ -1641,7 +1641,7 @@ t3() {
   check "T3's git ran none of what the box's repository names, through seven commands" no "$(succeeds in_t3 "test -e $W/filter-ran")"
   check "and still does its work in the worktree" "again" "$(in_t3 "cd $W && git log -1 --format=%s")"
   check "git in the box's folder itself is refused, with the reason" "128 fern-git: not opening the repository" \
-    "$(in_t3 "cd $W/nested && git status >/dev/null 2>&1; echo \$?") $(in_t3 "cd $W/nested && git status 2>&1" | cut -c1-38)"
+    "$(in_t3 "cd $W/nested && git status >/dev/null 2>&1; echo \$?") $(in_t3 "cd $W/nested && git status 2>&1" | cut -c1-36)"
   in_t3 "cd $W && rm -rf nested .gitmodules filter-ran && git add --all && git -c user.name=t -c user.email=t@fern commit -qm tidy" >/dev/null 2>&1 || true
 
   # A terminal in T3 (fern-terminals.patch, images/fern-shell): a shell in
