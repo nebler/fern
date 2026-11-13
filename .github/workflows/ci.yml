@@ -86,8 +86,8 @@ jobs:
       - run: lab/go.sh run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
   images:
     # The daemon's binaries and the box image build, and have no known
-    # vulnerability with a fix. T3's image (fern-t3) builds T3 from source
-    # and is left to the lab.
+    # vulnerability with a fix. T3's image is the job t3, which isn't
+    # scanned: its packages are T3's.
     name: image ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
@@ -117,3 +117,70 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+  t3:
+    # T3's image (fern-t3): Fern's patches apply to T3's pinned commit, T3's
+    # tests of them pass (the stage t3-build) and the server bundles, with
+    # the wrappers and fern-git beside it. Then the image is tried without a
+    # daemon. amd64 only: the release builds arm64 too. T3's install and
+    # bundle take several minutes, about 15 cold; with the cache and no
+    # change to T3's stages, a few.
+    name: image fern-t3
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/Dockerfile
+          target: fern-t3
+          tags: fern-t3:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=fern-t3
+          cache-to: type=gha,mode=max,scope=fern-t3
+      # fern worktree, as fern-shell and fern-opencode ask it (the ID is
+      # TestEnvID's); fern-shell outside the pool; and the image's git is
+      # fern-git, which in a fake pool won't open a repository a box made.
+      - name: try the image
+        run: |
+          docker run --rm -i --entrypoint /bin/sh fern-t3:ci -eu <<'SH'
+          got=$(fern worktree /var/lib/fern/worktrees/fern/t3-83c08bfd/cmd)
+          test "$got" = "t3-fcdf1356e08e5762 /var/lib/fern/worktrees/fern/t3-83c08bfd"
+
+          cd /tmp
+          code=0
+          out=$(/usr/local/bin/fern-shell) || code=$?
+          test "$code" = 1
+          case $out in "No terminal here:"*) ;; *) echo "fern-shell said: $out"; exit 1 ;; esac
+
+          git --version
+          test "$(readlink /usr/local/bin/git)" = /usr/local/libexec/fern-git-core/git
+          export FERN_POOL=/tmp/pool
+          real=/usr/lib/git-core/git
+          mkdir -p "$FERN_POOL/repos/app/src" "$FERN_POOL/worktrees/app"
+          cd "$FERN_POOL/repos/app"
+          git init -q
+          echo hi > src/README
+          git add src
+          git -c user.email=ci@fern -c user.name=ci commit -qm init
+          git worktree add -q "$FERN_POOL/worktrees/app/one"
+          wt=$FERN_POOL/worktrees/app/one
+          # A repository the box made in its worktree, with the real git
+          # (fern-git would give the worktree's own instead): not opened.
+          "$real" init -q "$wt/src/nested"
+          cd "$wt/src/nested"
+          test "$(git rev-parse --absolute-git-dir)" = "$FERN_POOL/repos/app/.git/worktrees/one"
+          cd "$wt"
+          if git --git-dir=src/nested/.git status 2>/tmp/err; then exit 1; fi
+          grep -q "fern-git: --git-dir isn't taken" /tmp/err
+          # A worktree folder whose .git is a repository the box made.
+          "$real" init -q "$FERN_POOL/worktrees/app/planted"
+          cd "$FERN_POOL/worktrees/app/planted"
+          if git status 2>/tmp/err; then exit 1; fi
+          grep -q "fern-git: not opening a repository" /tmp/err
+          echo "fern-t3: fern worktree, fern-shell and fern-git as expected"
+          SH
