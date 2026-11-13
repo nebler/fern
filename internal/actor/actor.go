@@ -135,16 +135,17 @@ type Group struct {
 	// gets to the next wake without waiting a second on that stale address.
 	boxes *http.Client
 
+	// builder makes the golden builds.
+	builder *builder
+
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
-	wakes, stops, restores, snapshots, queue, goldenBuilds *prometheus.HistogramVec
-	idleSleeps                                             prometheus.Counter
-	boxFailures                                            prometheus.Counter     // wakes that failed, and boxes that died under a command
-	goldens                                                *prometheus.CounterVec // new worktrees, by golden hit, miss or none
-	prewakeResults                                         *prometheus.CounterVec // pre-wakes, by what came of them
+	wakes, stops, restores, snapshots, queue *prometheus.HistogramVec
+	idleSleeps                               prometheus.Counter
+	boxFailures                              prometheus.Counter     // wakes that failed, and boxes that died under a command
+	prewakeResults                           *prometheus.CounterVec // pre-wakes, by what came of them
 
 	find     chan findRequest // to Run, for an environment's actor
-	builds   chan string      // to Run's builder, the environments whose golden source to build
 	prewakes chan string      // to Run's prewakers, environments to wake ahead
 	stopped  chan struct{}    // closed when Run returns
 	// crashed asks Run what is known of boxes' crashes (crashing).
@@ -163,19 +164,16 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 	histogram := func(name, help string, buckets []float64, label string) *prometheus.HistogramVec {
 		return metrics.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
 	}
-	return &Group{
-		store: tracedStore{st: st, tr: tr}, driver: drv, cfg: cfg, tracer: tr, log: log,
-		touches:      &http.Client{Timeout: touchTimeout},
-		boxes:        &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
-		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
-		stops:        histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
-		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
-		snapshots:    histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
-		goldenBuilds: histogram("fern_golden_build_seconds", "Time to build a golden snapshot.", boxBuckets, "result"),
-		goldens: metrics.NewCounterVec(prometheus.CounterOpts{
-			Name: "fern_golden_total", Help: "New worktree environments, by whether a golden snapshot was there (hit), is being built (miss) or has no setup contract (none).",
-		}, []string{"result"}),
-		queue: histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
+	traced := tracedStore{st: st, tr: tr}
+	g := &Group{
+		store: traced, driver: drv, cfg: cfg, tracer: tr, log: log,
+		touches:   &http.Client{Timeout: touchTimeout},
+		boxes:     &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
+		wakes:     histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
+		stops:     histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
+		restores:  histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
+		snapshots: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
+		queue:     histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
 		idleSleeps: metrics.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
@@ -187,10 +185,20 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
 				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
 		}, []string{"result"}),
-		find: make(chan findRequest), builds: make(chan string, buildQueue), prewakes: make(chan string, prewakeQueue),
+		find: make(chan findRequest), prewakes: make(chan string, prewakeQueue),
 		crashed: make(chan crashRequest),
 		stopped: make(chan struct{}),
 	}
+	g.builder = &builder{
+		store: traced, image: cfg.Image, setupTimeout: cfg.SetupTimeout, runIn: cfg.RunSetup, log: log,
+		goldens: metrics.NewCounterVec(prometheus.CounterOpts{
+			Name: "fern_golden_total", Help: "New worktree environments, by whether a golden snapshot was there (hit), is being built (miss) or has no setup contract (none).",
+		}, []string{"result"}),
+		took:  histogram("fern_golden_build_seconds", "Time to build a golden snapshot.", boxBuckets, "result"),
+		queue: make(chan string, buildQueue),
+		do:    g.do, exec: g.Exec, delete: g.Delete,
+	}
+	return g
 }
 
 // observe adds the time since start to h, labelled with whether *err is

@@ -19,7 +19,7 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 	return g.do(ctx, "create", id, func(ctx context.Context, _ *actor) error {
 		build := false
 		if _, err := g.store.Get(ctx, id); errors.Is(err, store.ErrNotFound) && opts.Workspace != "" && opts.Seed == nil {
-			opts.From, build = g.golden(ctx, id, opts.Workspace)
+			opts.From, build = g.builder.golden(ctx, id, opts.Workspace)
 		}
 		_, err := g.store.Create(ctx, id, opts)
 		if err != nil && opts.From != nil {
@@ -33,14 +33,9 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 		if err != nil {
 			return err
 		}
-		if !build {
-			return nil
+		if build {
+			g.builder.keep(ctx, id)
 		}
-		if err := g.store.Snapshot(ctx, id, goldenSource); err != nil {
-			g.log.WarnContext(ctx, "keeping a golden source failed", slog.String("env", id), slog.Any("error", err))
-			return nil
-		}
-		g.queueBuild(ctx, id)
 		return nil
 	})
 }

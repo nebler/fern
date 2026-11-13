@@ -19,6 +19,11 @@ type message struct {
 	reply chan error // buffered, so the actor never waits for the caller
 }
 
+// doFunc is Group.do, as the Group's parts (builder, snapshotter, prewaker)
+// hold it: they change environments through the actors, and need nothing
+// else of the Group for that.
+type doFunc func(ctx context.Context, change, id string, fn func(ctx context.Context, a *actor) error) error
+
 // do runs fn, the change named change, on environment id's actor and
 // returns its error. Waiting for the actor to take fn can be cancelled; once
 // it has, fn runs to the end, and do waits for it, so that fn never uses what

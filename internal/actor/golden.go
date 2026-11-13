@@ -9,6 +9,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
@@ -35,37 +37,86 @@ const buildRetry = 15 * time.Minute
 // key failed less than buildRetry ago.
 var errBuildWaits = errors.New("the last build of this key failed; not built again yet")
 
+// goldenStore is the disk as a golden build uses it: the builder's and the
+// sources' environments, their snapshots, the goldens' sources and pruning,
+// and the record of a failed build.
+type goldenStore interface {
+	Environments
+	Snapshots
+	GoldenSources
+	BuildFailures
+	List(ctx context.Context) ([]store.Env, error)
+	PruneGoldens(ctx context.Context, id string) error
+}
+
+// builder makes the golden builds, one at a time, from the goroutine Run
+// starts for them (buildGoldens), and decides whether a new environment
+// starts from a golden (golden). It is a part of the Group with what it
+// uses alone: the disk through goldenStore, and the actors through the
+// three calls below, so that nothing of a build reaches the rest of the
+// Group's state or the store's other jobs.
+type builder struct {
+	store goldenStore
+	image string // the box image's ID, part of every golden key
+	// setupTimeout and runIn are Config's SetupTimeout and RunSetup.
+	setupTimeout time.Duration
+	runIn        func(ctx context.Context, addr, token string, argv []string, out io.Writer) (int, error)
+	log          *slog.Logger
+	goldens      *prometheus.CounterVec   // new worktrees, by golden hit, miss or none
+	took         *prometheus.HistogramVec // builds' times, by result
+	queue        chan string              // the environments whose golden source to build
+
+	// A build changes its builder through the builder's actor (Group.do),
+	// runs the setup script as a command of the builder's box (Group.Exec),
+	// and deletes a prebuild's source as any environment (Group.Delete),
+	// whose box and actor go with it.
+	do     doFunc
+	exec   func(ctx context.Context, id string, cancel context.CancelFunc) (*Exec, error)
+	delete func(ctx context.Context, id string) error
+}
+
 // golden returns the golden snapshot for new environment id at workspace, a
 // worktree T3 made, or nil and whether id's first workspace is to be built
 // into one: a miss doesn't make the thread wait, the next one gets it. A
 // repository without a setup contract has neither.
-func (g *Group) golden(ctx context.Context, id, workspace string) (*store.SnapshotRef, bool) {
+func (b *builder) golden(ctx context.Context, id, workspace string) (*store.SnapshotRef, bool) {
 	repo := worktree.Repo(workspace)
-	key, err := setup.Key(workspace, g.cfg.Image)
+	key, err := setup.Key(workspace, b.image)
 	if errors.Is(err, setup.ErrNoContract) {
-		g.goldens.WithLabelValues("none").Inc()
+		b.goldens.WithLabelValues("none").Inc()
 		return nil, false
 	}
 	if err != nil {
-		g.log.WarnContext(ctx, "golden key failed", slog.String("env", id), slog.Any("error", err))
-		g.goldens.WithLabelValues("none").Inc()
+		b.log.WarnContext(ctx, "golden key failed", slog.String("env", id), slog.Any("error", err))
+		b.goldens.WithLabelValues("none").Inc()
 		return nil, false
 	}
 	builder := store.BuilderID(repo)
-	if g.hasSnapshot(ctx, builder, key) {
-		g.goldens.WithLabelValues("hit").Inc()
+	if b.hasSnapshot(ctx, builder, key) {
+		b.goldens.WithLabelValues("hit").Inc()
 		return &store.SnapshotRef{Env: builder, Snapshot: key}, false
 	}
-	g.goldens.WithLabelValues("miss").Inc()
+	b.goldens.WithLabelValues("miss").Inc()
 	return nil, true
+}
+
+// keep keeps new environment id's first workspace as a golden source and
+// queues its build, from id's actor (Create). A source it can't keep only
+// costs the next thread its golden.
+func (b *builder) keep(ctx context.Context, id string) {
+	if err := b.store.Snapshot(ctx, id, goldenSource); err != nil {
+		b.log.WarnContext(ctx, "keeping a golden source failed", slog.String("env", id), slog.Any("error", err))
+		return
+	}
+	b.queueBuild(ctx, id)
 }
 
 // hasSnapshot reports whether environment id has snapshot snapID, such as a
 // builder its golden snapshot; one it can't learn counts as missing.
-func (g *Group) hasSnapshot(ctx context.Context, id, snapID string) bool {
-	ok, err := g.store.HasSnapshot(ctx, store.SnapshotRef{Env: id, Snapshot: snapID})
+func (b *builder) hasSnapshot(ctx context.Context, id, snapID string) bool {
+	ok, err := b.store.HasSnapshot(ctx, store.SnapshotRef{Env: id, Snapshot: snapID})
 	if err != nil {
-		g.log.WarnContext(ctx, "looking for a golden snapshot failed", slog.String("env", id), slog.Any("error", err))
+		b.log.WarnContext(ctx, "looking for a golden snapshot failed", slog.String("env", id), slog.Any("error", err))
 	}
 	return ok
 }
@@ -77,52 +128,56 @@ func (g *Group) hasSnapshot(ctx context.Context, id, snapID string) bool {
 // runs after Prebuild returns, in the order builds are queued. A prebuild of
 // a repo whose last one is still waiting for its build does nothing.
 func (g *Group) Prebuild(ctx context.Context, repo string, seed io.Reader) error {
+	return g.builder.prebuild(ctx, repo, seed)
+}
+
+func (b *builder) prebuild(ctx context.Context, repo string, seed io.Reader) error {
 	id := store.SourceID(repo)
-	return g.do(ctx, "golden_prebuild", id, func(ctx context.Context, _ *actor) error {
-		if g.hasSnapshot(ctx, id, goldenSource) {
+	return b.do(ctx, "golden_prebuild", id, func(ctx context.Context, _ *actor) error {
+		if b.hasSnapshot(ctx, id, goldenSource) {
 			return nil // the source of a build that is queued
 		}
 		// What a prebuild that failed left, if anything.
-		if err := g.store.Delete(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := b.store.Delete(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		env, err := g.store.Create(ctx, id, store.CreateOptions{Seed: seed})
+		env, err := b.store.Create(ctx, id, store.CreateOptions{Seed: seed})
 		var key string
 		if err == nil {
-			key, err = setup.Key(env.Workspace, g.cfg.Image)
+			key, err = setup.Key(env.Workspace, b.image)
 		}
-		if errors.Is(err, setup.ErrNoContract) || err == nil && g.hasSnapshot(ctx, store.BuilderID(repo), key) {
-			return g.store.Delete(ctx, id)
+		if errors.Is(err, setup.ErrNoContract) || err == nil && b.hasSnapshot(ctx, store.BuilderID(repo), key) {
+			return b.store.Delete(ctx, id)
 		}
 		if err == nil {
 			// The snapshot marks the build as under way: a daemon that stops
 			// before the build finds it at its next start (buildGoldens).
-			err = g.store.Snapshot(ctx, id, goldenSource)
+			err = b.store.Snapshot(ctx, id, goldenSource)
 		}
 		if err != nil {
-			if delErr := g.store.Delete(ctx, id); delErr != nil {
-				g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", id), slog.Any("error", delErr))
+			if delErr := b.store.Delete(ctx, id); delErr != nil {
+				b.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", id), slog.Any("error", delErr))
 			}
 			return err
 		}
-		g.queueBuild(ctx, id)
+		b.queueBuild(ctx, id)
 		return nil
 	})
 }
 
 // queueBuild hands the build of environment src's golden source to the
 // builder, or drops it and the source if the queue is full.
-func (g *Group) queueBuild(ctx context.Context, src string) {
+func (b *builder) queueBuild(ctx context.Context, src string) {
 	select {
-	case g.builds <- src:
+	case b.queue <- src:
 	default:
-		g.log.WarnContext(ctx, "golden build queue full; dropped", slog.String("env", src))
-		err := g.store.DeleteSnapshot(ctx, src, goldenSource)
+		b.log.WarnContext(ctx, "golden build queue full; dropped", slog.String("env", src))
+		err := b.store.DeleteSnapshot(ctx, src, goldenSource)
 		if _, ok := store.BuilderOf(src); ok && err == nil {
-			err = g.store.Delete(ctx, src) // a prebuild's source holds nothing else
+			err = b.store.Delete(ctx, src) // a prebuild's source holds nothing else
 		}
 		if err != nil {
-			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
+			b.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
 		}
 	}
 }
@@ -130,50 +185,53 @@ func (g *Group) queueBuild(ctx context.Context, src string) {
 // buildGoldens makes the golden builds one at a time, until ctx is done:
 // first the ones the last daemon left, whose sources are still there, then
 // the queued ones.
-func (g *Group) buildGoldens(ctx context.Context) {
-	srcs, err := g.store.Sources(ctx, goldenSource)
+func (b *builder) buildGoldens(ctx context.Context) {
+	srcs, err := b.store.Sources(ctx, goldenSource)
 	if err != nil {
-		g.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
+		b.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
 	}
-	g.clearSources(ctx, srcs)
+	b.clearSources(ctx, srcs)
 	// Straight from the store, not through the queue: it holds only 16, and
 	// one dropped would lose its source.
 	for _, src := range srcs {
 		if ctx.Err() != nil {
 			return
 		}
-		g.build(ctx, src.Env)
+		b.build(ctx, src.Env)
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case src := <-g.builds:
-			g.build(ctx, src)
+		case src := <-b.queue:
+			b.build(ctx, src)
 		}
 	}
 }
 
 // build makes the golden build of environment src's golden source, then
 // deletes the source.
-func (g *Group) build(ctx context.Context, src string) {
+func (b *builder) build(ctx context.Context, src string) {
 	start := time.Now()
-	err := g.buildGolden(ctx, src)
+	err := b.buildGolden(ctx, src)
 	switch {
 	case errors.Is(err, errBuildWaits):
-		g.log.InfoContext(ctx, "golden build skipped", slog.String("source", src), slog.Any("why", err))
+		b.log.InfoContext(ctx, "golden build skipped", slog.String("source", src), slog.Any("why", err))
 	default:
-		observe(g.goldenBuilds, start, &err)
+		observe(b.took, start, &err)
 		if err != nil {
-			g.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
+			b.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
 		}
 	}
-	if err := g.DeleteSnapshot(ctx, src, goldenSource); err != nil && !errors.Is(err, store.ErrNotFound) {
-		g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
+	err = b.do(ctx, "delete_snapshot", src, func(ctx context.Context, _ *actor) error {
+		return b.store.DeleteSnapshot(ctx, src, goldenSource)
+	})
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		b.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
 	}
 	if _, ok := store.BuilderOf(src); ok {
-		if err := g.Delete(ctx, src); err != nil && !errors.Is(err, store.ErrNotFound) {
-			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
+		if err := b.delete(ctx, src); err != nil && !errors.Is(err, store.ErrNotFound) {
+			b.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
 		}
 	}
 }
@@ -181,18 +239,18 @@ func (g *Group) build(ctx context.Context, src string) {
 // clearSources deletes the source environments of prebuilds (Prebuild) that
 // stopped before their source snapshot, which marks a build under way: they
 // aren't among srcs.
-func (g *Group) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
-	envs, err := g.store.List(ctx)
+func (b *builder) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
+	envs, err := b.store.List(ctx)
 	if err != nil {
-		g.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
+		b.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
 		return
 	}
 	for _, env := range envs {
 		if _, ok := store.BuilderOf(env.ID); !ok || slices.ContainsFunc(srcs, func(r store.SnapshotRef) bool { return r.Env == env.ID }) {
 			continue
 		}
-		if err := g.Delete(ctx, env.ID); err != nil {
-			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", env.ID), slog.Any("error", err))
+		if err := b.delete(ctx, env.ID); err != nil {
+			b.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", env.ID), slog.Any("error", err))
 		}
 	}
 }
@@ -208,8 +266,8 @@ func (g *Group) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
 // It is three changes of the builder, not one: the script runs between them
 // as a command of the box, for up to an hour, and a change holds the
 // actor's mailbox and has ten minutes.
-func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
-	srcEnv, err := g.store.Get(ctx, src)
+func (b *builder) buildGolden(ctx context.Context, src string) (err error) {
+	srcEnv, err := b.store.Get(ctx, src)
 	if err != nil {
 		return err
 	}
@@ -236,38 +294,38 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 		switch {
 		case waits, ctx.Err() != nil:
 		case err == nil:
-			rec = g.store.SetBuildFailure(ctx, id, nil)
+			rec = b.store.SetBuildFailure(ctx, id, nil)
 		case key != "":
-			rec = g.store.SetBuildFailure(ctx, id, &store.BuildFailure{Key: key, At: time.Now(), Error: err.Error()})
+			rec = b.store.SetBuildFailure(ctx, id, &store.BuildFailure{Key: key, At: time.Now(), Error: err.Error()})
 		}
 		if rec != nil && !errors.Is(rec, store.ErrNotFound) {
-			g.log.WarnContext(ctx, "recording a golden build's result failed", slog.String("env", id), slog.Any("error", rec))
+			b.log.WarnContext(ctx, "recording a golden build's result failed", slog.String("env", id), slog.Any("error", rec))
 		}
 	}()
-	err = g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
-		if _, err := g.store.Create(ctx, id, store.CreateOptions{}); err != nil {
+	err = b.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
+		if _, err := b.store.Create(ctx, id, store.CreateOptions{}); err != nil {
 			return err
 		}
 		a.setup = false
 		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
-		if err := g.store.BuildSource(ctx, id, store.SnapshotRef{Env: src, Snapshot: goldenSource}); err != nil {
+		if err := b.store.BuildSource(ctx, id, store.SnapshotRef{Env: src, Snapshot: goldenSource}); err != nil {
 			return err
 		}
-		env, err := g.store.Get(ctx, id)
+		env, err := b.store.Get(ctx, id)
 		if err != nil {
 			return err
 		}
-		if key, err = setup.Key(env.Workspace, g.cfg.Image); err != nil {
+		if key, err = setup.Key(env.Workspace, b.image); err != nil {
 			return err
 		}
-		if g.hasSnapshot(ctx, id, key) {
+		if b.hasSnapshot(ctx, id, key) {
 			key = "" // an earlier build made it
 			return nil
 		}
 		failed := false
-		if last, failed, err = g.store.BuildFailure(ctx, id); err != nil {
+		if last, failed, err = b.store.BuildFailure(ctx, id); err != nil {
 			return err
 		}
 		if failed && last.Key == key && time.Since(last.At) < buildRetry {
@@ -292,8 +350,8 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 		return fmt.Errorf("%s: %w (%s ago)", id, errBuildWaits, time.Since(last.At).Round(time.Second))
 	}
 	if script != "" {
-		err := g.runSetup(ctx, id, script)
-		stopErr := g.do(ctx, "golden_setup_end", id, func(ctx context.Context, a *actor) error {
+		err := b.runSetup(ctx, id, script)
+		stopErr := b.do(ctx, "golden_setup_end", id, func(ctx context.Context, a *actor) error {
 			a.setup = false
 			return a.stopBox(ctx)
 		})
@@ -304,7 +362,7 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 			return stopErr
 		}
 	}
-	return g.do(ctx, "golden_finish", id, func(ctx context.Context, a *actor) error {
+	return b.do(ctx, "golden_finish", id, func(ctx context.Context, a *actor) error {
 		err := a.wake(ctx)
 		if stopErr := a.stopBox(ctx); err == nil {
 			err = stopErr
@@ -312,15 +370,15 @@ func (g *Group) buildGolden(ctx context.Context, src string) (err error) {
 		if err != nil {
 			return err
 		}
-		if err := g.store.StripSource(ctx, id); err != nil {
+		if err := b.store.StripSource(ctx, id); err != nil {
 			return err
 		}
-		if err := g.store.Snapshot(ctx, id, key); err != nil {
+		if err := b.store.Snapshot(ctx, id, key); err != nil {
 			return err
 		}
-		g.log.InfoContext(ctx, "golden built", slog.String("repo", repo), slog.String("key", key))
-		if err := g.store.PruneGoldens(ctx, id); err != nil {
-			g.log.WarnContext(ctx, "pruning old goldens failed", slog.String("env", id), slog.Any("error", err))
+		b.log.InfoContext(ctx, "golden built", slog.String("repo", repo), slog.String("key", key))
+		if err := b.store.PruneGoldens(ctx, id); err != nil {
+			b.log.WarnContext(ctx, "pruning old goldens failed", slog.String("env", id), slog.Any("error", err))
 		}
 		return nil
 	})
@@ -336,19 +394,19 @@ const setupOutput = 4 << 10
 // program if it may, with /bin/sh if not, in the workspace, with the
 // repository's tools on its PATH. A script that fails, or runs past the
 // limit, fails the build with what it printed.
-func (g *Group) runSetup(ctx context.Context, id, script string) error {
-	limit := g.cfg.SetupTimeout
+func (b *builder) runSetup(ctx context.Context, id, script string) error {
+	limit := b.setupTimeout
 	if limit <= 0 {
 		limit = DefaultSetupTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	ex, err := g.Exec(ctx, id, cancel)
+	ex, err := b.exec(ctx, id, cancel)
 	if err != nil {
 		return err
 	}
 	defer ex.Close()
-	run := g.cfg.RunSetup
+	run := b.runIn
 	if run == nil {
 		run = runInBox
 	}
@@ -364,7 +422,7 @@ func (g *Group) runSetup(ctx context.Context, id, script string) error {
 	case code != 0:
 		return fmt.Errorf("%s exited with code %d after %s; it printed: %s", script, code, time.Since(start).Round(time.Second), out)
 	}
-	g.log.InfoContext(ctx, "setup script ran", slog.String("env", id), slog.String("script", script), slog.Duration("took", time.Since(start)))
+	b.log.InfoContext(ctx, "setup script ran", slog.String("env", id), slog.String("script", script), slog.Duration("took", time.Since(start)))
 	return nil
 }
 

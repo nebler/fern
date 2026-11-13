@@ -71,7 +71,7 @@ func (g *Group) Run(ctx context.Context) error {
 		return fmt.Errorf("box states: %w", err)
 	}
 	wg.Go(func() { g.sweep(ctx) })
-	wg.Go(func() { g.buildGoldens(ctx) })
+	wg.Go(func() { g.builder.buildGoldens(ctx) })
 	for range prewakers {
 		wg.Go(func() { g.prewakeBoxes(ctx) })
 	}
