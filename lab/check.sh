@@ -1626,6 +1626,24 @@ t3() {
     in_t3 "cd $W && rm -rf mise.toml .fern/tools"
     fern sleep t3c >/dev/null
   fi
+  # T3's own git, in a worktree where the box made a repository in a folder
+  # and armed it: a filter in that folder's config, and a .gitmodules that
+  # asks git to look into it. Staged as a submodule, as T3's own `git add`
+  # stages it, git status, diff, add, commit -a, stash and fetch each start
+  # a git in that folder, which would run the filter in T3's service
+  # (found 2026-11-13). T3's git is fern-git, which opens no repository in
+  # a thread's own folder.
+  in_t3 "cd $W && fern exec -i --here -- sh -s make" <lab/nested-repo.sh
+  in_t3 "cd $W && git add --all 2>/dev/null; git -c user.name=t -c user.email=t@fern commit -qm 'with a folder that has a repository'"
+  in_t3 "cd $W && fern exec -i --here -- sh -s arm $W/filter-ran && echo more >> a.txt" <lab/nested-repo.sh
+  check "the index holds the box's folder as a submodule, as T3's git add stages it" 1 "$(in_t3 "cd $W && git ls-files --stage | grep -c ^160000" || true)"
+  in_t3 "cd $W && { git status --porcelain; git diff HEAD --stat; git add --all; git stash; git stash pop; git fetch --recurse-submodules=yes $R; git -c user.name=t -c user.email=t@fern commit -qam again; } >/dev/null 2>&1" || true
+  check "T3's git ran none of what the box's repository names, through seven commands" no "$(succeeds in_t3 "test -e $W/filter-ran")"
+  check "and still does its work in the worktree" "again" "$(in_t3 "cd $W && git log -1 --format=%s")"
+  check "git in the box's folder itself is refused, with the reason" "128 fern-git: not opening the repository" \
+    "$(in_t3 "cd $W/nested && git status >/dev/null 2>&1; echo \$?") $(in_t3 "cd $W/nested && git status 2>&1" | cut -c1-38)"
+  in_t3 "cd $W && rm -rf nested .gitmodules filter-ran && git add --all && git -c user.name=t -c user.email=t@fern commit -qm tidy" >/dev/null 2>&1 || true
+
   # A terminal in T3 (fern-terminals.patch, images/fern-shell): a shell in
   # the thread's box, never one in T3's service, which has every worktree
   # and the server's logins. The pane's own calls, from inside the node: a

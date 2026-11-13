@@ -225,12 +225,23 @@ COPY images/fern-shell /usr/local/bin/fern-shell
 # the repository from Fern's GitHub App, if there is one.
 COPY images/fern-gh /usr/local/bin/gh
 COPY --from=gh /gh /usr/local/libexec/gh
+# T3's git, and every git that git starts, is fern-git: the real one, but
+# never for a repository whose git folder a thread's box can write (a folder
+# of a worktree with a .git of its own). git finds its programs in
+# GIT_EXEC_PATH, which fern-t3.service sets to this folder: git's own
+# programs, with fern-git as the git among them.
+COPY images/fern-git /usr/local/libexec/fern-git-core/git
+RUN test -x /usr/lib/git-core/git \
+ && for f in /usr/lib/git-core/*; do \
+      [ "$(basename "$f")" = git ] || ln -s "$f" /usr/local/libexec/fern-git-core/; \
+    done \
+ && ln -s /usr/local/libexec/fern-git-core/git /usr/local/bin/git
 COPY images/t3-settings.js /opt/fern/t3-settings.js
 # Where fern-t3.service binds the pool and the daemon's socket.
 RUN mkdir -p /var/lib/fern /run/fern
 # node's image has uid 1000 as "node"; Claude refuses full access as root.
 USER 1000:1000
-ENV DISABLE_AUTOUPDATER=1
+ENV DISABLE_AUTOUPDATER=1 GIT_EXEC_PATH=/usr/local/libexec/fern-git-core
 ENTRYPOINT ["node", "/opt/t3/apps/server/dist/bin.mjs"]
 CMD ["serve"]
 

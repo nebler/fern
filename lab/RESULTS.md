@@ -1970,7 +1970,22 @@ commits since `origin/main`), found two faults, both fixed that day:
   box**, where the login is: every box had that folder first on its PATH. In
   the lab now, the PATH of Claude's box has no folder of the pool, and the
   box with the services still has its tools.
-- **Open:** T3's own `git status` and `git diff` run the same way once a
-  worktree's index holds such a folder as a submodule (a repository with
-  submodules; a commit from T3's app). Architecture §13 has what would close
-  it.
+- **T3's own git ran the same way** once a worktree's index held such a
+  folder as a submodule (a repository with submodules; a commit from T3's
+  app). In a container with git 2.47 on a pool-shaped tree, of nine commands
+  as T3 runs them, seven ran the box's program (status, diff against HEAD,
+  add --all, commit -a, fetch with submodules, stash, and git in the folder
+  itself). Tried and no use: git as another user than the folder's owner (it
+  ran all the same: git names a submodule's repository explicitly, and
+  checks ownership only for one it finds). Built: `images/fern-git`, T3's
+  git and the git that git starts, which opens no repository whose git
+  folder is in a thread's own folder. Through it none of the nine ran the
+  box's program, a commit whose hook calls git worked, and the folder itself
+  answered "fern-git: not opening the repository" with exit 128.
+  `lab/check.sh t3` does it from a box, as T3.
+- **The daemon's keeper removed a deploy's own images.** The first deploy of
+  this round to the VPS built the daemon's and the box's images, then T3's,
+  which took the server's disk under its low mark (8 GiB free of 75); the
+  keeper, a minute later, removed "50 of Podman's images, which no container
+  used", the two fresh ones among them, and the deploy stopped with nothing
+  changed. It now leaves images of the last hour alone.
