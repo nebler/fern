@@ -141,17 +141,17 @@ type Group struct {
 	reporter *reporter
 	// snapshotter takes, deletes and prunes snapshots.
 	snapshotter *snapshotter
+	// prewaker wakes boxes ahead of their next command.
+	prewaker *prewaker
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
 	wakes, stops, restores, queue *prometheus.HistogramVec
 	idleSleeps                    prometheus.Counter
-	boxFailures                   prometheus.Counter     // wakes that failed, and boxes that died under a command
-	prewakeResults                *prometheus.CounterVec // pre-wakes, by what came of them
+	boxFailures                   prometheus.Counter // wakes that failed, and boxes that died under a command
 
-	find     chan findRequest // to Run, for an environment's actor
-	prewakes chan string      // to Run's prewakers, environments to wake ahead
-	stopped  chan struct{}    // closed when Run returns
+	find    chan findRequest // to Run, for an environment's actor
+	stopped chan struct{}    // closed when Run returns
 	// crashed asks Run what is known of boxes' crashes (crashing).
 	crashed chan crashRequest
 }
@@ -183,12 +183,7 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 		boxFailures: metrics.NewCounter(prometheus.CounterOpts{
 			Name: "fern_box_failures_total", Help: "Wakes that failed, and boxes that stopped answering under a command, as one does that ran out of memory.",
 		}),
-		prewakeResults: metrics.NewCounterVec(prometheus.CounterOpts{
-			Name: "fern_prewakes_total",
-			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
-				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
-		}, []string{"result"}),
-		find: make(chan findRequest), prewakes: make(chan string, prewakeQueue),
+		find:    make(chan findRequest),
 		crashed: make(chan crashRequest),
 		stopped: make(chan struct{}),
 	}
@@ -204,6 +199,14 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 	g.snapshotter = &snapshotter{
 		store: traced, failures: cfg.SnapshotFailures, log: log, do: g.do,
 		took: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
+	}
+	g.prewaker = &prewaker{
+		idle: cfg.Idle, queue: make(chan string, prewakeQueue), log: log, do: g.do,
+		results: metrics.NewCounterVec(prometheus.CounterOpts{
+			Name: "fern_prewakes_total",
+			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
+				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
+		}, []string{"result"}),
 	}
 	g.reporter = &reporter{store: traced, failures: cfg.SnapshotFailures, image: cfg.Image, crashing: g.crashing}
 	return g
