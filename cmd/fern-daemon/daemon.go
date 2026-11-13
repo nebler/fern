@@ -161,6 +161,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "the resolvers boxes use")
 	boxLimits := limitFlags(flags)
+	boxesMemory := flags.Int64("boxes-memory", 0, "the most memory all boxes together may use, in MiB (0: the machine's less 1536 for the node itself, and at least half of it)")
 	// On every address, as T3's port: the node's firewall keeps it private.
 	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
@@ -177,6 +178,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	limits, most, err := boxLimits()
 	if err != nil {
 		return fmt.Errorf("the box limits: %w", err)
+	}
+	if *boxesMemory < 0 {
+		return fmt.Errorf("--boxes-memory is %d MiB", *boxesMemory)
 	}
 	if *notifyURL != "" {
 		if err := health.CheckURL(*notifyURL); err != nil {
@@ -229,13 +233,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		}
 	}
 	var mcpLis net.Listener
-	agentMCP := ""
 	if cfg.Agents {
 		// On every address: the boxes' firewall lets only agent boxes in.
 		if mcpLis, err = new(net.ListenConfig).Listen(ctx, "tcp", ":"+strconv.Itoa(mcpPort)); err != nil {
 			return err
 		}
-		agentMCP = "http://" + runsc.DaemonHost + ":" + strconv.Itoa(mcpPort)
 	}
 
 	tp, err := tracerProvider(ctx, *traceEndpoint, node)
@@ -256,7 +258,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), MCPPort: mcpPort,
+		DNS: strings.Split(*boxDNS, ","), MCPPort: mcpPort, Memory: *boxesMemory << 20,
 	}, tr, reg)
 	// What boxes get is the actors' to decide (actor's boxOf).
 	cfg.Login, cfg.Skills = fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), fileSkills(skillsFile, defaultSkills)
@@ -280,7 +282,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, cfg.Agents, tr, log)
 	// What Claude in an agent box gets in place of its own shell.
-	toolSrv := tools.New(st, drv, envs, agentMCP, log)
+	toolSrv := tools.New(st, drv, envs, log)
 	apiSrv.StartAgent = toolSrv.StartAgent
 	toolSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
 	toolSrv.T3 = *t3
@@ -318,10 +320,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	// fern doctor: what is wrong now that would otherwise be a line in this
 	// daemon's log, or the error of a box's next command. The same list is a
-	// metric, with the pool's room.
+	// metric, with the pool's room. Kills in a box count from here on.
 	// btrfs's room for its own records is read by a program, at most every
 	// ten minutes, by these looks only: never on a wake's or a snapshot's way.
-	checker := health.Checker{Store: st, Pool: pool, Boxes: envs, Records: &health.Records{Btrfs: "btrfs", Pool: pool}}
+	checker := health.Checker{Store: st, Pool: pool, Boxes: envs, Records: &health.Records{Btrfs: "btrfs", Pool: pool},
+		Memory: health.NewMemory(runsc.Cgroup)}
 	if backer != nil {
 		checker.BackupEvery = *backupEvery
 	}
@@ -414,7 +417,7 @@ func registerGauges(ctx context.Context, reg prometheus.Registerer, checker heal
 			return v
 		})
 	}
-	gauge("fern_problems", "What is wrong on the node now (fern doctor lists them): failed golden builds, failing backups, a full pool, boxes that keep crashing.", func() (float64, error) {
+	gauge("fern_problems", "What is wrong on the node now (fern doctor lists them): failed golden builds, failing backups, a full pool, boxes that keep crashing, boxes' memory nearly used up or a box killed for it.", func() (float64, error) {
 		p, err := checker.Problems(ctx)
 		return float64(len(p)), err
 	})

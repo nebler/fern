@@ -56,11 +56,6 @@ type demoBox struct {
 	log  *slog.Logger
 }
 
-func newDemoBox(t *testing.T) demoBox {
-	t.Helper()
-	return newDemoBoxWith(t, false)
-}
-
 // agentUp starts environment id's agent box in drv, as a thread's Claude
 // has: its token is the one the MCP endpoint takes.
 func agentUp(t testing.TB, drv *runsc.Fake, id string) {
@@ -70,16 +65,11 @@ func agentUp(t testing.TB, drv *runsc.Fake, id string) {
 	}
 }
 
-// newDemoBoxWith is newDemoBox whose box, with relay, says it has the MCP
-// relay that adds the box's token, as fern-init in an agent box does.
-func newDemoBoxWith(t *testing.T, relay bool) demoBox {
+func newDemoBox(t *testing.T) demoBox {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
 	dir := t.TempDir()
-	if relay {
-		mux.Handle("GET "+mcprelay.Path, mcprelay.Check(boxToken))
-	}
 	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, dir, nil, log))
 	jobs := background.NewJobs(boxToken, dir, nil, log)
 	jobs.Register(mux)
@@ -106,7 +96,7 @@ func newDemoBoxWith(t *testing.T, relay bool) demoBox {
 // and returns the endpoint's URL and the server.
 func (b demoBox) serve(t *testing.T) (string, *tools.Server) {
 	t.Helper()
-	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+	api := tools.New(b.st, b.drv, b.envs, b.log)
 	t.Cleanup(api.Close)
 	srv := httptest.NewServer(api.MCPHandler())
 	t.Cleanup(srv.Close)
@@ -193,7 +183,7 @@ func (d boxTokens) Token(id string) (string, error) {
 func TestMCPTakesTheAgentBoxTokenAlone(t *testing.T) {
 	b := newDemoBox(t)
 	drv := boxTokens{b.drv, map[string]string{"demo": boxToken, "demo.agent": "the-agent-box"}}
-	api := tools.New(b.st, drv, b.envs, "http://fern-daemon:7071", b.log)
+	api := tools.New(b.st, drv, b.envs, b.log)
 	t.Cleanup(api.Close)
 	srv := httptest.NewServer(api.MCPHandler())
 	t.Cleanup(srv.Close)
@@ -602,7 +592,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "runs")
 
 	stopping := make(chan struct{})
-	first := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+	first := tools.New(b.st, b.drv, b.envs, b.log)
 	first.Stopping = stopping
 	t.Cleanup(first.Close)
 	swap := &swapHandler{}
@@ -639,7 +629,7 @@ func TestBashSurvivesDaemonRestart(t *testing.T) {
 	// The first daemon stops, and its connections break.
 	close(stopping)
 	daemon.CloseClientConnections()
-	second := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+	second := tools.New(b.st, b.drv, b.envs, b.log)
 	t.Cleanup(second.Close)
 	swap.set(second.MCPHandler())
 	if err := os.WriteFile(marker+".go", nil, 0o644); err != nil {
@@ -763,7 +753,7 @@ func TestAgentStartCloudflare(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+			api := tools.New(b.st, b.drv, b.envs, b.log)
 			t.Cleanup(api.Close)
 			api.Cloudflare = func(context.Context) (string, error) { return tt.token, nil }
 			c := b.agents(t, api)
@@ -802,7 +792,7 @@ func TestT3MCP(t *testing.T) {
 	defer t3.Close()
 
 	b := newDemoBox(t)
-	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+	api := tools.New(b.st, b.drv, b.envs, b.log)
 	t.Cleanup(api.Close)
 	api.T3 = t3.URL
 	daemon := httptest.NewServer(api.MCPHandler())
@@ -895,7 +885,7 @@ func TestCloudflareConnect(t *testing.T) {
 				t.Fatal(err)
 			}
 			agentUp(t, b.drv, "cf")
-			api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+			api := tools.New(b.st, b.drv, b.envs, b.log)
 			t.Cleanup(api.Close)
 			api.Cloudflare = func(context.Context) (string, error) { return "cf-1", nil }
 			secrets := &fakeSecrets{set: make(map[string]string)}
@@ -972,9 +962,9 @@ func TestCloudflareConnectAbsent(t *testing.T) {
 
 // An agent started in an agent box gets Fern's MCP server in place of its
 // own shell: Claude in its arguments, OpenCode's server in its settings,
-// with the box's address to listen on. Other commands are left alone. The
-// table's box is one started before the relay: its agent is still given the
-// token, as the only way it has.
+// with the box's address to listen on, at the relay in the agent box, which
+// adds the box's token: the agent is given none. Other commands are left
+// alone.
 func TestAgentStart(t *testing.T) {
 	// Each agent here prints its arguments, then OpenCode's settings.
 	bin := t.TempDir()
@@ -984,13 +974,11 @@ func TestAgentStart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const mcpURL = "http://fern-daemon:7071/mcp/demo"
-	fern := map[string]any{
-		"type": "remote", "url": mcpURL, "headers": map[string]any{"Authorization": "Bearer " + boxToken},
-		"oauth": false, "codemode": false,
-	}
+	const mcpURL = "http://127.0.0.1:7072/mcp/demo"
+	fern := map[string]any{"type": "remote", "url": mcpURL, "oauth": false, "codemode": false}
 	noShell := map[string]any{"action": "tool.use", "resource": "shell:*", "effect": "deny"}
-	claudeMCP := `{"mcpServers":{"fern":{"headers":{"Authorization":"Bearer ` + boxToken + `"},"type":"http","url":"` + mcpURL + `"}}}`
+	noPlugins := map[string]any{"action": "plugin.use", "resource": "*", "effect": "deny"}
+	claudeMCP := `{"mcpServers":{"fern":{"type":"http","url":"` + mcpURL + `"}}}`
 
 	tests := []struct {
 		name     string
@@ -1008,9 +996,10 @@ func TestAgentStart(t *testing.T) {
 			req:      boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "serve", "--hostname=10.0.0.1", "--port=4096"}},
 			wantArgs: []string{"serve", "--port=4096", "--hostname=127.0.0.1"},
 			wantCfg: map[string]any{
-				"mcp":      map[string]any{"servers": map[string]any{"fern": fern}},
-				"plugins":  []any{"-opencode.tool.shell"},
-				"policies": []any{noShell},
+				"mcp":       map[string]any{"servers": map[string]any{"fern": fern}},
+				"plugins":   []any{"-opencode.tool.shell"},
+				"policies":  []any{noShell, noPlugins},
+				"formatter": false, "lsp": false, "snapshots": false,
 			},
 		},
 		{
@@ -1021,10 +1010,11 @@ func TestAgentStart(t *testing.T) {
 			},
 			wantArgs: []string{"serve", "--hostname=127.0.0.1"},
 			wantCfg: map[string]any{
-				"model":    "m",
-				"mcp":      map[string]any{"servers": map[string]any{"mine": map[string]any{"type": "local"}, "fern": fern}},
-				"plugins":  []any{"opencode.tool.shell", "-opencode.tool.shell"},
-				"policies": []any{noShell, map[string]any{"action": "a"}},
+				"model":     "m",
+				"mcp":       map[string]any{"servers": map[string]any{"mine": map[string]any{"type": "local"}, "fern": fern}},
+				"plugins":   []any{"opencode.tool.shell", "-opencode.tool.shell"},
+				"policies":  []any{map[string]any{"action": "a"}, noShell, noPlugins},
+				"formatter": false, "lsp": false, "snapshots": false,
 			},
 		},
 		{
@@ -1033,29 +1023,8 @@ func TestAgentStart(t *testing.T) {
 			wantArgs: []string{"models", "--hostname=10.0.0.1"},
 		},
 	}
-	// A box whose fern-init has the relay that adds the token: the agent is
-	// pointed at the relay and given no token at all.
-	const relayURL = "http://127.0.0.1:7072/mcp/demo"
-	withRelay := newDemoBoxWith(t, true)
-	relayAPI := tools.New(withRelay.st, withRelay.drv, withRelay.envs, "http://fern-daemon:7071", withRelay.log)
-	t.Cleanup(relayAPI.Close)
-	relayed := withRelay.agents(t, relayAPI)
-	var stdout bytes.Buffer
-	req := boxexec.Request{Argv: []string{filepath.Join(bin, "claude"), "-p"}}
-	if _, err := relayed.ExecAgent(t.Context(), "demo", req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
-		t.Fatalf("ExecAgent() in a box with the relay: %v", err)
-	}
-	wantArgs := "-p\n--mcp-config\n" + `{"mcpServers":{"fern":{"type":"http","url":"` + relayURL + `"}}}` +
-		"\n--disallowedTools\nBash,BashOutput,KillShell,KillBash,Monitor\n--setting-sources=user\n"
-	if diff := cmp.Diff(wantArgs, stdout.String()); diff != "" {
-		t.Errorf("Claude's arguments in a box with the relay (-want +got):\n%s", diff)
-	}
-	if strings.Contains(stdout.String(), boxToken) {
-		t.Error("the box's token is in Claude's arguments")
-	}
-
 	b := newDemoBox(t)
-	api := tools.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", b.log)
+	api := tools.New(b.st, b.drv, b.envs, b.log)
 	t.Cleanup(api.Close)
 	c := b.agents(t, api)
 	for _, tt := range tests {
@@ -1082,6 +1051,76 @@ func TestAgentStart(t *testing.T) {
 	}
 }
 
+// OpenCode's server runs in the workspace, which the other box writes, next
+// to Claude's login: whatever the client asked for, it is started so that it
+// reads no settings there, loads no plugin, and runs no formatter, language
+// server or snapshot. Fern's policies come last, where they decide.
+func TestOpenCodeTakesNothingFromTheWorkspace(t *testing.T) {
+	// This opencode prints the two variables that keep it from the
+	// workspace's settings, then its settings.
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' \"$OPENCODE_CONFIG_PROJECT_DISABLE\" \"$OPENCODE_DISABLE_PROJECT_CONFIG\"\n" +
+		"printf '%s' \"$OPENCODE_CONFIG_CONTENT\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	type started struct {
+		NoProject                 []string
+		Formatter, LSP, Snapshots any
+		Policies                  []any // the last two
+	}
+	want := started{
+		NoProject: []string{"1", "1"},
+		Formatter: false, LSP: false, Snapshots: false,
+		Policies: []any{
+			map[string]any{"action": "tool.use", "resource": "shell:*", "effect": "deny"},
+			map[string]any{"action": "plugin.use", "resource": "*", "effect": "deny"},
+		},
+	}
+	tests := []struct {
+		name    string
+		environ []string
+	}{
+		{name: "a client that asks for nothing"},
+		{
+			name: "a client that turns each on",
+			environ: []string{
+				"OPENCODE_CONFIG_PROJECT_DISABLE=0", "OPENCODE_DISABLE_PROJECT_CONFIG=",
+				`OPENCODE_CONFIG_CONTENT={"formatter":true,"lsp":{"x":{"command":["x"]}},"snapshots":true,` +
+					`"policies":[{"action":"tool.use","resource":"shell:*","effect":"allow"},{"action":"plugin.use","resource":"*","effect":"allow"}]}`,
+			},
+		},
+	}
+	b := newDemoBox(t)
+	api := tools.New(b.st, b.drv, b.envs, b.log)
+	t.Cleanup(api.Close)
+	c := b.agents(t, api)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			req := boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "serve"}, Environ: tt.environ}
+			if _, err := c.ExecAgent(t.Context(), "demo", req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
+				t.Fatalf("ExecAgent() error: %v", err)
+			}
+			lines := strings.SplitN(stdout.String(), "\n", 3)
+			if len(lines) != 3 {
+				t.Fatalf("opencode printed %q, want two variables and its settings", stdout.String())
+			}
+			var cfg map[string]any
+			if err := json.Unmarshal([]byte(lines[2]), &cfg); err != nil {
+				t.Fatalf("settings %q: %v", lines[2], err)
+			}
+			got := started{NoProject: lines[:2], Formatter: cfg["formatter"], LSP: cfg["lsp"], Snapshots: cfg["snapshots"]}
+			if policies, _ := cfg["policies"].([]any); len(policies) >= 2 {
+				got.Policies = policies[len(policies)-2:]
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("what OpenCode's server is started with (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // BenchmarkMCPCall is the daemon's own share of a tool call, apart from the
 // command: a request that the server answers itself.
 func BenchmarkMCPCall(b *testing.B) {
@@ -1093,7 +1132,7 @@ func BenchmarkMCPCall(b *testing.B) {
 	drv := runsc.NewFake("box")
 	agentUp(b, drv, "demo")
 	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
-	api := tools.New(st, drv, envs, "http://fern-daemon:7071", log)
+	api := tools.New(st, drv, envs, log)
 	defer api.Close()
 	srv := httptest.NewServer(api.MCPHandler())
 	defer srv.Close()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/go-cmp/cmp"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/preview"
@@ -198,12 +199,9 @@ func TestPreviewWebSocket(t *testing.T) {
 // A woken environment's default preview is rendered ahead, as its first
 // browser request would be: one request for /, by the preview's name.
 func TestWarm(t *testing.T) {
-	var mu sync.Mutex
-	var asked []string
+	asked := make(chan string, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		asked = append(asked, r.Host+r.URL.Path)
-		mu.Unlock()
+		asked <- r.Host + r.URL.Path
 	}))
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
@@ -217,21 +215,18 @@ func TestWarm(t *testing.T) {
 	done := make(chan struct{})
 	go func() { p.Warm(ctx, woken); close(done) }()
 	woken <- "demo"
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		mu.Lock()
-		n := len(asked)
-		mu.Unlock()
-		if n > 0 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	var got []string
+	select {
+	case a := <-asked:
+		got = append(got, a)
+	case <-time.After(10 * time.Second):
 	}
 	cancel()
 	<-done
-	mu.Lock()
-	defer mu.Unlock()
-	if len(asked) != 1 || asked[0] != "demo.localhost/" {
-		t.Errorf("the dev server was asked for %q, want [demo.localhost/]", asked)
+	for len(asked) > 0 {
+		got = append(got, <-asked)
+	}
+	if diff := cmp.Diff([]string{"demo.localhost/"}, got); diff != "" {
+		t.Errorf("what the dev server was asked for (-want +got):\n%s", diff)
 	}
 }

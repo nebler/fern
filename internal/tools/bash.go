@@ -412,14 +412,16 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 
 // lostBox is what Claude reads when a command's box went away under it: the
 // box was restored or put to sleep, or it died, most often of the command's
-// own memory use at the box's limit. What the command had printed is kept;
-// the bare cause was a WebSocket error that said nothing of the box.
+// own memory use at the box's limit, or as the box that used the most when
+// the server's boxes together reached theirs. What the command had printed
+// is kept; the bare cause was a WebSocket error that said nothing of the box.
 func lostBox(out string, err error) string {
 	if out == "" {
 		return err.Error()
 	}
 	return out + "\n[the command's box went away before it ended: " + err.Error() + ". " +
-		"A box that runs out of memory is stopped whole, with everything running in it; `free -m` in a new command shows what it has. " +
+		"A box that runs out of memory is stopped whole, with everything running in it, and so is the one that uses the most when " +
+		"this server's boxes together run out of theirs; `free -m` in a new command shows what this box has. " +
 		"The next command starts the box again.]"
 }
 

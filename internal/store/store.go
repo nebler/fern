@@ -239,9 +239,8 @@ func (s *Store) step(name string) error {
 	return s.failAt(name)
 }
 
-// Open opens the pool mounted at root, which must be on btrfs. A pool that an
-// earlier Fern kept an index for gets its records from it (importIndex).
-func Open(ctx context.Context, root string) (*Store, error) {
+// Open opens the pool mounted at root, which must be on btrfs.
+func Open(_ context.Context, root string) (*Store, error) {
 	var fsInfo unix.Statfs_t
 	if err := unix.Statfs(root, &fsInfo); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
@@ -258,9 +257,6 @@ func Open(ctx context.Context, root string) (*Store, error) {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
 	if err := os.Chown(s.worktrees(), BoxUID, BoxGID); err != nil {
-		return nil, fmt.Errorf("open pool: %w", err)
-	}
-	if err := s.importIndex(ctx); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
 	return s, nil

@@ -23,6 +23,9 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get(\"Content-Length\", 0)))
         open(\"$got\", \"ab\").write(body.replace(b\"\\n\", b\" \") + b\"\\n\")
         self.send_response(200); self.end_headers()
+    def do_GET(self):
+        open(\"$got\", \"ab\").write(b\"beat\\n\")
+        self.send_response(200); self.end_headers()
     def log_message(self, *a): pass
 http.server.HTTPServer((\"127.0.0.1\", 8099), H).serve_forever()  # fern-notify-receiver
 ' >/dev/null 2>&1 &" </dev/null
@@ -51,6 +54,18 @@ http.server.HTTPServer((\"127.0.0.1\", 8099), H).serve_forever()  # fern-notify-
     sleep 1
   done
   check "and says when nothing is wrong any more" 1 "$(in_daemon "grep -c 'nothing is wrong any more' $got" || true)"
+  # A sign of life every --heartbeat-every, for a service that alerts when
+  # they stop; and a unit that fails for good says so (OnFailure=).
+  in_daemon "rm -f $got"
+  # shellcheck disable=SC2086
+  set_daemon_args $args --heartbeat-url=http://127.0.0.1:8099/beat --heartbeat-every=2s
+  restart_daemon
+  sleep 7
+  check "the daemon sends a sign of life every 2 s" yes "$([ "$(in_daemon "grep -c '' $got 2>/dev/null" || echo 0)" -ge 3 ] && echo yes || echo no)"
+  in_daemon "echo FERN_NOTIFY_URL=http://127.0.0.1:8099/fern > /etc/fern/notify.env && chmod 600 /etc/fern/notify.env && rm -f $got"
+  on_node systemctl start fern-failed@fern-daemon.service.service </dev/null || true
+  check "a unit that failed for good is told to the URL" 1 "$(in_daemon "grep -c 'fern-daemon.service failed' $got" || true)"
+  in_daemon "rm -f /etc/fern/notify.env"
   # shellcheck disable=SC2086
   set_daemon_args $args
   restart_daemon

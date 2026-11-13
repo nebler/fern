@@ -12,6 +12,15 @@ limits() {
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
   check "the box has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
   check "the box has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
+  # All boxes together: the machine's memory less a reserve for the node,
+  # so that boxes alone can't take the daemon or T3 down with them.
+  local total limit want
+  total=$(on_node awk '/^MemTotal/ { print $2 * 1024 }' /proc/meminfo </dev/null)
+  limit=$(on_node cat /sys/fs/cgroup/fern/memory.max </dev/null)
+  want=$((total - 1610612736 > total / 2 ? total - 1610612736 : total / 2))
+  check "the boxes together have a memory limit" "$want" "$limit"
+  check "… and are slowed a tenth before it" "$((limit - limit / 10))" "$(on_node cat /sys/fs/cgroup/fern/memory.high </dev/null)"
+  check "doctor doesn't list memory" 0 "$(fern doctor 2>/dev/null | grep -c '^FAIL  memory' || true)"
   # A services.yaml fern-init can't read ends it as the box starts. The wake
   # says so from the box's log, and doesn't wait out its two minutes.
   fresh ${ENV}3

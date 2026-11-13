@@ -40,10 +40,7 @@ type Server struct {
 	driver Driver
 	envs   *actor.Group
 	log    *slog.Logger
-	// agentMCP is where agent boxes reach MCPHandler, such as
-	// http://fern-daemon:7071.
-	agentMCP string
-	// boxes asks boxes' fern-init for their jobs and their relay. A box that
+	// boxes asks boxes' fern-init for their jobs. A box that
 	// vanished can leave an address nothing answers; the same short connect
 	// timeout as readiness gets to the next wake without waiting a second on
 	// that stale address.
@@ -91,11 +88,10 @@ func (s *Server) stopping() bool {
 }
 
 // New returns a Server for the environments in st, whose boxes drv runs and
-// whose commands envs counts. agentMCP is where agent boxes reach
-// MCPHandler.
-func New(st Store, drv Driver, envs *actor.Group, agentMCP string, log *slog.Logger) *Server {
+// whose commands envs counts.
+func New(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
 	s := &Server{
-		store: st, driver: drv, envs: envs, log: log, agentMCP: agentMCP,
+		store: st, driver: drv, envs: envs, log: log,
 		boxes:   &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
 		schemas: mcp.NewSchemaCache(),
 	}

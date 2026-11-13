@@ -639,25 +639,31 @@ func TestSessionOutputPastWindow(t *testing.T) {
 	}
 	h := sha256.New()
 	counted := &lockedBuffer{}
-	stop := make(chan struct{})
-	defer close(stop)
-	var total atomic.Int64
+	// Breaks the connection as the output goes by: every 3 MiB, the output's
+	// writer says so, and this breaks it outside the client's read.
+	stop, brk := make(chan struct{}), make(chan struct{}, 1)
+	breaking := make(chan struct{})
+	defer func() { close(stop); <-breaking }()
 	go func() {
-		// Breaks the connection as the output goes by.
-		for last := int64(0); ; time.Sleep(time.Millisecond) {
+		defer close(breaking)
+		for {
 			select {
 			case <-stop:
 				return
-			default:
-			}
-			if n := total.Load(); n-last > 3<<20 {
-				last = n
+			case <-brk:
 				b.Break()
 			}
 		}
 	}()
+	var total, last int64
 	out := writerFunc(func(p []byte) (int, error) {
-		total.Add(int64(len(p)))
+		if total += int64(len(p)); total-last > 3<<20 {
+			last = total
+			select {
+			case brk <- struct{}{}:
+			default:
+			}
+		}
 		return h.Write(p)
 	})
 	const size = 16 << 20
@@ -667,8 +673,8 @@ func TestSessionOutputPastWindow(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("RunSession = %d, %v; stderr %q", code, err, counted.String())
 	}
-	if total.Load() != size {
-		t.Errorf("got %d bytes, want %d", total.Load(), size)
+	if total != size {
+		t.Errorf("got %d bytes, want %d", total, size)
 	}
 	wantSum := sha256.New()
 	// head cuts the numbers at size.

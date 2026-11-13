@@ -128,6 +128,8 @@ install_units() {
   for unit in "${units[@]}"; do
     on_node tee "/etc/systemd/system/$unit.service" <"deploy/systemd/$unit.service" >/dev/null
   done
+  # What the units' OnFailure= starts: a word to the notify URL, if any.
+  on_node tee /etc/systemd/system/fern-failed@.service <deploy/systemd/fern-failed@.service >/dev/null
   # The box user, which runs T3 and owns workspaces: systemd needs it in the
   # node's user database. A node whose uid 1000 is someone already keeps it.
   on_node sh -c 'getent group 1000 >/dev/null || groupadd --gid 1000 fern

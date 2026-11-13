@@ -200,18 +200,20 @@ func TestSupervisorStopKillsGroup(t *testing.T) {
 // service is restarted: here a server that would otherwise run twice.
 func TestSupervisorEndsLeftoversBeforeRestart(t *testing.T) {
 	s, dir := newService(t, service{Run: `sh -c 'echo $$ >> servers; exec sleep 600' & sleep 0.2; exit 1`})
-	// Past the first restart. Nothing reaps the tests' orphans, so the
-	// leftover stays a zombie in the group until its SIGKILL.
-	time.Sleep(killDelay + minBackoff + time.Second)
+	// Until the first restart has started its server, which it does once
+	// the leftover is gone. Nothing reaps the tests' orphans, so the
+	// leftover stays a zombie in the group until its SIGKILL. Real
+	// processes, so no bubble: the wait is for the file.
+	var servers []string
+	for deadline := time.Now().Add(killDelay + minBackoff + 10*time.Second); len(servers) < 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the service ran %d times, want a restart", len(servers))
+		}
+		<-time.After(10 * time.Millisecond)
+		data, _ := os.ReadFile(filepath.Join(dir, "servers"))
+		servers = strings.Fields(string(data))
+	}
 	s.stop(t.Context())
-	data, err := os.ReadFile(filepath.Join(dir, "servers"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	servers := strings.Fields(string(data))
-	if len(servers) < 2 {
-		t.Fatalf("the service ran %d times, want a restart", len(servers))
-	}
 	for i := range servers[:len(servers)-1] {
 		path := filepath.Join(dir, "server"+strconv.Itoa(i))
 		if err := os.WriteFile(path, []byte(servers[i]), 0o644); err != nil {

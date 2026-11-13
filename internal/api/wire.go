@@ -86,7 +86,7 @@ type Freed struct {
 // (GET /problems, fern doctor): a failed golden build, backups that fail, a
 // pool that takes no more snapshots, a box that keeps crashing.
 type Problem struct {
-	Name string `json:"name"` // the part: "golden build", "backups", "disk", "box"
+	Name string `json:"name"` // the part: "golden build", "backups", "disk", "memory", "box"
 	// About is which one, of a part the node can have several of: a builder,
 	// a box. With Name it names the problem for as long as it lasts
 	// (health.Notifier), which its Detail doesn't.

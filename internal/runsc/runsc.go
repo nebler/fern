@@ -99,6 +99,9 @@ type Config struct {
 	Image   string   // the box image's tag, such as fern-box:dev
 	DNS     []string // the resolvers boxes use
 	MCPPort int      // the daemon's port agent boxes may reach, which the firewall opens to them
+	// Memory is the most all boxes together may use, in bytes; 0: the
+	// machine's less what the node itself needs (GroupMemory).
+	Memory int64
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -210,9 +213,9 @@ func New(cfg Config, tr trace.Tracer, reg prometheus.Registerer) *Driver {
 }
 
 // Prepare gets the node ready for boxes: the box image's root, the
-// firewall that keeps boxes to the internet, the cgroup that holds them,
-// and their resolv.conf. It returns the image's ID, which golden keys
-// include.
+// firewall that keeps boxes to the internet, the cgroup that holds them
+// with its limit on their memory together, and their resolv.conf. It
+// returns the image's ID, which golden keys include.
 func (d *Driver) Prepare(ctx context.Context) (string, error) {
 	img, err := image.Open(d.cfg.Images, d.cfg.Image)
 	if err != nil {
@@ -226,7 +229,7 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 	}
 	// The controllers boxes' limits need, from the root down: systemd
 	// doesn't enable cpu at the root unless a unit asks for it.
-	cg := "/sys/fs/cgroup/" + cgroupParent
+	cg := Cgroup
 	if err := os.MkdirAll(cg, 0o755); err != nil {
 		return "", err
 	}
@@ -234,6 +237,19 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 		if err := os.WriteFile(dir+"/cgroup.subtree_control", []byte("+cpu +memory +pids"), 0o644); err != nil {
 			return "", fmt.Errorf("box cgroup: %w", err)
 		}
+	}
+	// The boxes' limit together, written here and at no wake: a box's own
+	// cgroup is made under this one, and the kernel does the rest.
+	limit := d.cfg.Memory
+	if limit == 0 {
+		total, err := machineMemory("/proc/meminfo")
+		if err != nil {
+			return "", fmt.Errorf("the machine's memory, for the boxes' limit: %w", err)
+		}
+		limit = GroupMemory(total)
+	}
+	if err := limitGroup(cg, limit); err != nil {
+		return "", fmt.Errorf("the boxes' memory limit: %w", err)
 	}
 	for _, dir := range []string{d.cfg.Bundles, filepath.Join(d.cfg.Pool, "boxes")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -737,16 +753,7 @@ const tokenFile = "token"
 // one, so a box that isn't running has none: the error is fs.ErrNotExist.
 // It wakes nothing.
 func (d *Driver) Token(id string) (string, error) {
-	b := d.layout(id)
-	data, err := os.ReadFile(filepath.Join(b.dir, tokenFile))
-	if errors.Is(err, fs.ErrNotExist) {
-		// A box started before 2026-11-12 has it in its spec only. This
-		// serves a box, of any kind, that has run without a sleep since
-		// then, and can go once no node runs one: every box has been
-		// started since, as all are after a restart of the node.
-		token, _, err := bundleVars(b)
-		return token, err
-	}
+	data, err := os.ReadFile(filepath.Join(d.layout(id).dir, tokenFile))
 	if err != nil {
 		return "", err
 	}

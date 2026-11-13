@@ -4,9 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -19,7 +17,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite" // a test makes the index an earlier Fern kept
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -836,75 +833,6 @@ func TestBadRecord(t *testing.T) {
 	writeFile(t, record, saved)
 	if _, err := st.Get(ctx, "bad"); err != nil {
 		t.Errorf("Get(bad) with its record back: %v", err)
-	}
-}
-
-// A pool an earlier Fern kept a SQLite index for gets its records from it,
-// once, and its snapshots from the disk.
-func TestImportIndex(t *testing.T) {
-	st, dir := openPool(t)
-	ctx := t.Context()
-	env := create(t, st, "demo", store.CreateOptions{})
-	snapshot(t, st, "demo", "s1")
-	// As that Fern left the pool: the row in the index, no record.
-	if err := os.Remove(filepath.Join(dir, "envs", "demo", store.RecordFile)); err != nil {
-		t.Fatal(err)
-	}
-	state := filepath.Join(dir, "state")
-	if err := os.MkdirAll(state, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "fern.sqlite")+"?_pragma=journal_mode(WAL)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	for _, q := range []string{
-		`CREATE TABLE environments (id TEXT PRIMARY KEY, workspace TEXT NOT NULL UNIQUE, git TEXT NOT NULL, created_at INTEGER NOT NULL, box_token TEXT NOT NULL)`,
-		`CREATE TABLE snapshots (env TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (env, id))`,
-		fmt.Sprintf(`INSERT INTO environments VALUES ('demo', '%s', '/git', %d, 'old-token')`, env.Workspace, created.Unix()),
-		// A row whose folder is gone, and a snapshot row with no snapshot.
-		`INSERT INTO environments VALUES ('ghost', '/nowhere', '', 1, 'x')`,
-		`INSERT INTO snapshots VALUES ('demo', 'stale', 1)`,
-	} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, pass := range []string{"the first start after the upgrade", "the start after that"} {
-		st2, err := store.Open(ctx, dir)
-		if err != nil {
-			t.Fatalf("Open() at %s: %v", pass, err)
-		}
-		store.SetRetention(st2, 50, 0)
-		got, err := st2.Get(ctx, "demo")
-		if err != nil {
-			t.Fatalf("Get(demo) at %s: %v", pass, err)
-		}
-		want := store.Env{ID: "demo", Workspace: env.Workspace, Claude: env.Claude, Git: "/git", Created: created}
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Errorf("Get(demo) at %s (-want +got):\n%s", pass, diff)
-		}
-		if envs, err := st2.List(ctx); err != nil || len(envs) != 1 {
-			t.Errorf("List() at %s = %v, %v, want demo alone", pass, envs, err)
-		}
-		if lost, err := st2.Reconcile(ctx); err != nil || len(lost) != 0 {
-			t.Errorf("Reconcile() at %s = %v, %v, want nothing lost", pass, lost, err)
-		}
-		if got := snapIDs(t, st2); len(got) != 1 || got[0] != "s1" {
-			t.Errorf("Snapshots(demo) at %s = %v, want [s1]: what is on disk", pass, got)
-		}
-	}
-	gone(t, filepath.Join(state, "fern.sqlite"))
-	if _, _, perm := stat(t, state); perm != 0o700 {
-		t.Errorf("state/ mode = %v, want 0700: the kept index holds box tokens", perm)
-	}
-	if _, err := os.Lstat(filepath.Join(state, "fern.sqlite.imported")); err != nil {
-		t.Errorf("the imported index: %v, want it kept aside", err)
 	}
 }
 

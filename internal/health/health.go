@@ -42,6 +42,9 @@ type Checker struct {
 	// Records reads btrfs's room for its own records, which the pool's free
 	// space doesn't show. May be nil: it isn't looked at.
 	Records *Records
+	// Memory knows what the boxes use together. May be nil: it isn't looked
+	// at.
+	Memory *Memory
 }
 
 // lateBackups is how many backups may be missed before it is a problem:
@@ -50,6 +53,7 @@ const lateBackups = 3
 
 // Problems returns what is wrong now, the most pressing first: a pool that
 // takes no more snapshots, one with no room left for btrfs's records,
+// boxes that have nearly used up their memory or were killed for it,
 // backups that fail or have stopped, boxes that aren't woken because they
 // keep crashing, environments whose last snapshot failed, and golden builds
 // that failed. No problems is an empty list.
@@ -69,6 +73,9 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 		if p, ok := c.Records.problem(ctx, sp.Under != nil); ok {
 			out = append(out, p)
 		}
+	}
+	if c.Memory != nil {
+		out = append(out, c.Memory.problems()...)
 	}
 	if c.BackupEvery > 0 {
 		if p, ok := c.backups(); ok {

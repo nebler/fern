@@ -36,12 +36,15 @@ func (s *Server) StartAgent(ctx context.Context, client, box *websocket.Conn, id
 	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 {
 		agent := path.Base(req.Argv[0])
 		if agent != "claude" && agent != "opencode" {
-			// Any other command starts as it is, without a question to the box.
+			// Any other command starts as it is.
 			return box.Write(ctx, typ, data)
 		}
-		url, token := s.mcpURL(ctx, ex)
+		// Through the agent box's own relay (fern-init), which carries a call
+		// across a restart of the daemon and adds the box's token itself.
+		// Until 2026-11-12 a box could be without it, and the daemon asked
+		// each box before it started an agent.
 		mcp := fernMCP{
-			URL: url + "/mcp/" + id, Token: token,
+			URL:        "http://127.0.0.1:" + strconv.Itoa(mcprelay.Port) + "/mcp/" + id,
 			Cloudflare: s.cloudflareToken(ctx, id), AstroDocs: s.isAstro(ctx, id),
 		}
 		if agent == "claude" {
@@ -119,8 +122,9 @@ func (s *Server) isAstro(ctx context.Context, id string) bool {
 // those for the repository: Cloudflare's for one that deploys there,
 // Astro's docs for an Astro site.
 type fernMCP struct {
-	URL   string
-	Token string // the box's, which the server takes as the bearer token
+	// URL is the relay in the agent box, which adds the box's token: the
+	// agent is given none.
+	URL string
 	// Cloudflare is the Cloudflare API token for Cloudflare's MCP server; ""
 	// adds no server.
 	Cloudflare string
@@ -136,9 +140,6 @@ const t3MCPPath = "/mcp"
 // Claude's login.
 func (m fernMCP) claude(req *boxexec.Request) error {
 	fern := map[string]any{"type": "http", "url": m.URL}
-	if m.Token != "" {
-		fern["headers"] = map[string]string{"Authorization": "Bearer " + m.Token}
-	}
 	servers := map[string]any{"fern": fern}
 	if m.Cloudflare != "" {
 		servers["cloudflare"] = map[string]any{
@@ -163,11 +164,38 @@ func (m fernMCP) claude(req *boxexec.Request) error {
 // its settings files.
 const openCodeConfig = "OPENCODE_CONFIG_CONTENT"
 
+// openCodeNoProject are the variables that keep OpenCode from the settings in
+// its working directory (opencode.json, .opencode/): the first is the one it
+// reads, the second the older name it falls back to when the first is unset.
+// Set to anything but 1 or true, the first turns the second off, so both are
+// set here.
+var openCodeNoProject = []string{"OPENCODE_CONFIG_PROJECT_DISABLE", "OPENCODE_DISABLE_PROJECT_CONFIG"}
+
 // openCode changes the request of OpenCode's server, which T3 calls over
 // HTTP. The server listens on the box's address, which is at addr, as T3
 // can't reach the box's loopback. Its settings get the MCP server and lose
-// the shell tool; a rule also refuses the tool, should a later settings file
-// bring it back. Any other opencode command is left as it is.
+// the shell tool. Any other opencode command is left as it is.
+//
+// The server runs in the workspace, which the other box writes, next to
+// Claude's login: it must run and load nothing from there. What OpenCode
+// 2.2.6 (the image's) would, and what stops each, read in its source and
+// tried against a workspace with one of each planted (architecture §13):
+//   - the workspace's own settings (opencode.json, .opencode/), whose MCP
+//     servers, plugins, commands and formatters are programs: not read
+//     (openCodeNoProject). Nothing in the settings does that: a policy in the
+//     workspace's file would outrank one given here;
+//   - plugins, from a folder or from npm: refused by a policy, whoever names
+//     them;
+//   - formatters, which run after every edit, and language servers: off. Both
+//     are off unless a settings file turns them on, and 2.2.6 starts no
+//     language server at all; said here so that neither a file in Claude's
+//     folder nor a later version changes it;
+//   - snapshots, which add the whole workspace to a git repository of
+//     OpenCode's own, and so start a git in every repository a folder there
+//     holds: off. Fern's snapshots are the thread's.
+//
+// Of a document's policies the last that matches decides, so Fern's go after
+// the client's.
 func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	if len(req.Argv) < 2 || req.Argv[1] != "serve" {
 		return nil
@@ -181,11 +209,17 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 
 	cfg := map[string]any{}
 	req.Environ = slices.DeleteFunc(slices.Clone(req.Environ), func(v string) bool {
-		content, ok := strings.CutPrefix(v, openCodeConfig+"=")
-		if ok && json.Unmarshal([]byte(content), &cfg) != nil {
+		name, content, _ := strings.Cut(v, "=")
+		if slices.Contains(openCodeNoProject, name) {
+			return true
+		}
+		if name != openCodeConfig {
+			return false
+		}
+		if json.Unmarshal([]byte(content), &cfg) != nil {
 			cfg = map[string]any{} // not an object: OpenCode would ignore it too
 		}
-		return ok
+		return true
 	})
 	mcp, _ := cfg["mcp"].(map[string]any)
 	if mcp == nil {
@@ -198,9 +232,6 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	// Not in Code Mode, where only scripts could call it, and without OAuth,
 	// which OpenCode would try if the token were refused.
 	fern := map[string]any{"type": "remote", "url": m.URL, "oauth": false, "codemode": false}
-	if m.Token != "" {
-		fern["headers"] = map[string]string{"Authorization": "Bearer " + m.Token}
-	}
 	servers["fern"] = fern
 	if m.Cloudflare != "" {
 		servers["cloudflare"] = map[string]any{
@@ -216,37 +247,20 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	plugins, _ := cfg["plugins"].([]any)
 	cfg["plugins"] = append(plugins, "-opencode.tool.shell")
 	policies, _ := cfg["policies"].([]any)
-	cfg["policies"] = append([]any{map[string]string{"action": "tool.use", "resource": "shell:*", "effect": "deny"}}, policies...)
+	cfg["policies"] = append(policies,
+		map[string]string{"action": "tool.use", "resource": "shell:*", "effect": "deny"},
+		map[string]string{"action": "plugin.use", "resource": "*", "effect": "deny"},
+	)
+	cfg["formatter"] = false
+	cfg["lsp"] = false
+	cfg["snapshots"] = false
 	content, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 	req.Environ = append(req.Environ, openCodeConfig+"="+string(content))
+	for _, name := range openCodeNoProject {
+		req.Environ = append(req.Environ, name+"=1")
+	}
 	return nil
-}
-
-// mcpURL returns where Claude in the agent box of ex reaches Fern's MCP
-// server, and the token it must send, if any: through the box's own relay,
-// which carries a call across a restart of the daemon and adds the box's
-// token itself, so the agent is given none. An agent box still running from
-// before the relay has none, and one from before 2026-11-12 has a relay that
-// adds no token: their agent gets the token in its arguments, as it did.
-//
-// The question to the box (mcprelay.Has) and both of those answers serve
-// only an agent box that has run, without a sleep, since before 2026-11-12:
-// a box outlives the daemon and keeps the fern-init it started with. They
-// can go, with mcprelay.Check, Has and fern-init's route for them, once no
-// node runs such a box: each has slept, or its node has restarted, since
-// the node got a box image from that day or later. Every agent box then has
-// the relay that adds the token, and this is its address and no token.
-func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) (url, token string) {
-	relay, auth := mcprelay.Has(ctx, s.boxes, ex.Addr, ex.Token)
-	if !relay {
-		return s.agentMCP, ex.Token
-	}
-	url = "http://127.0.0.1:" + strconv.Itoa(mcprelay.Port)
-	if auth {
-		return url, ""
-	}
-	return url, ex.Token
 }

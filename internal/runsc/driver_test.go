@@ -365,9 +365,8 @@ func TestAdopt(t *testing.T) {
 	})
 }
 
-// A box's token is what its bundle holds: the file its start wrote, or for a
-// box started before there was one, the variable in its spec. A box that
-// isn't running has none.
+// A box's token is the file its start wrote in its bundle, and only that:
+// not the variable in its spec. A box that isn't running has none.
 func TestToken(t *testing.T) {
 	d := newTestDriver(t)
 	if got, err := d.Token("demo"); !errors.Is(err, fs.ErrNotExist) {
@@ -385,8 +384,8 @@ func TestToken(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(b.dir, "config.json"), config, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := d.Token("demo"); err != nil || got != "from-the-spec" {
-		t.Errorf("Token of a box started before the file = %q, %v; want the spec's", got, err)
+	if got, err := d.Token("demo"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Token of a box whose start wrote no token = %q, %v; want %v", got, err, fs.ErrNotExist)
 	}
 	if err := os.WriteFile(filepath.Join(b.dir, tokenFile), []byte("from-the-file"), 0o600); err != nil {
 		t.Fatal(err)

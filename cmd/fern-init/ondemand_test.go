@@ -24,6 +24,8 @@ func serveEcho(listen string) {
 	if err != nil {
 		os.Exit(2)
 	}
+	// This runs as the service, in a process of its own, not as a test: it
+	// is slow to start as a database is, on the real clock fern-init waits by.
 	time.Sleep(200 * time.Millisecond)
 	if network == "unix" {
 		// As a start script checks whether its database is up: fern-init
@@ -104,6 +106,8 @@ func TestOnDemand(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// That nothing starts can't be waited for: a while on the real
+			// clock, as fern-init's sockets and the service's process are real.
 			time.Sleep(300 * time.Millisecond)
 			if o.isStarted() {
 				t.Fatal("started before a connection")

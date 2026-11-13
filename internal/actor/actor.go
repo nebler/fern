@@ -1,11 +1,14 @@
-// Package actor gives every environment one goroutine, its actor, which makes
-// the environment's changes one at a time, counts the commands running in its
-// box, and puts the box to sleep when it has been idle. It also wakes boxes
-// ahead of their next command (Prewake).
+// Package actor gives every box one goroutine, its actor: an environment's
+// own box, its agent box and a golden builder's each have one. The actor of
+// an environment's box makes the environment's changes one at a time,
+// asking the agent box's actor to stop that box where a change needs it.
+// Each counts the commands running in its box, and puts the box to sleep
+// when it has been idle. It also wakes boxes ahead of their next command
+// (Prewake).
 //
-// An actor lives while its environment's box may be running or a message
-// for it is waiting; an asleep environment has none. Its state is touched
-// only by its own goroutine.
+// An actor lives while its box may be running or a message for it is
+// waiting; an asleep box has none. Its state is touched only by its own
+// goroutine.
 package actor
 
 import (

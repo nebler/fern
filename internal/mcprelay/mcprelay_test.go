@@ -30,6 +30,9 @@ func TestMCPRelayRetriesALongCall(t *testing.T) {
 		auths <- r.Header.Get("Authorization")
 		if calls.Add(1) == 1 {
 			// A tool that runs past the limit, in a daemon that then stops.
+			// The relay's limit is on the real clock, and its calls are real
+			// HTTP, which a bubble's fake clock doesn't wait for: the call
+			// has to take that long.
 			time.Sleep(limit + 500*time.Millisecond)
 			conn, _, err := http.NewResponseController(w).Hijack()
 			if err == nil {

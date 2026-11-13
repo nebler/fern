@@ -6,14 +6,18 @@
 # provider, which runs the `claude` here; OpenCode never reads the login).
 #
 # OpenCode ignores the workspace's own OpenCode settings: the box writes
-# those, and they would run code here, next to Claude's login. The root
-# filesystem is read-only, so it must not update itself.
+# those, and they would run code here, next to Claude's login. Both names of
+# the variable are set: OpenCode 2.2.6 reads OPENCODE_CONFIG_PROJECT_DISABLE
+# first, and an empty one there undoes the older name. For its server the
+# daemon sets them too, with the rest of what keeps the workspace's programs
+# out (internal/tools, openCode). The root filesystem is read-only, so it
+# must not update itself.
 set -eu
 real=/usr/local/libexec/opencode
 [ -n "${CLAUDE_CONFIG_DIR:-}" ] || exec "$real" "$@"
 dir=$CLAUDE_CONFIG_DIR/opencode
 export XDG_DATA_HOME="$dir/data" XDG_CONFIG_HOME="$dir/config" XDG_STATE_HOME="$dir/state" XDG_CACHE_HOME="$dir/cache" \
-	OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1
+	OPENCODE_CONFIG_PROJECT_DISABLE=1 OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1
 if [ ! -e "$dir/claude-agent" ]; then
 	mkdir -p "$dir"
 	# --standalone: with a server of its own, which ends with the command.

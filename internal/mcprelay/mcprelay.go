@@ -1,6 +1,5 @@
 // Package mcprelay is the relay an agent box's fern-init serves between
-// Claude and the daemon's MCP server (Relay), and how the daemon learns that
-// a box has one (Has).
+// Claude and the daemon's MCP server (Relay).
 package mcprelay
 
 import (
@@ -13,24 +12,17 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/nebler/fern/internal/boxexec"
 )
 
 const (
 	// Port is where an agent box's fern-init relays MCP to the daemon, on the
 	// box's loopback.
 	Port = 7072
-	// Path is where fern-init says it has the relay, on boxexec.Port.
-	Path = "/mcp-relay"
 	// BoxTokenHeader carries the box's token to the daemon on a call to T3's
 	// MCP server, beside T3's own Authorization, which T3 needs.
 	BoxTokenHeader = "X-Fern-Box"
 	// CallKeyHeader names one call: the relay sends the same value each time.
 	CallKeyHeader = "X-Fern-Call"
-	// relayAuthHeader, in the answer to Path, says the relay adds the
-	// box's token to every call itself, so Claude need not be given it.
-	relayAuthHeader = "X-Fern-Relay-Auth"
 	// maxMCPCall is the largest call the relay holds to send again.
 	maxMCPCall = 16 << 20
 )
@@ -288,37 +280,4 @@ func (w flushWriter) Write(p []byte) (int, error) {
 	n, err := w.Writer.Write(p)
 	w.f.Flush()
 	return n, err
-}
-
-// Check answers that this box has the relay, and that the relay adds the
-// box's token. Every fern-init since 2026-11-12 says both, so the answer
-// tells the daemon something only of an agent box running since before
-// then: Check, Has and Path can go when tools' mcpURL stops asking, which
-// says when that is.
-func Check(token string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !boxexec.Authorized(w, r, token) {
-			return
-		}
-		w.Header().Set(relayAuthHeader, "1")
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
-
-// Has reports whether the box whose fern-init is at addr has the relay, and
-// whether that relay adds the box's token itself: one in a box started
-// before 2026-11-12 doesn't. It goes with Check.
-func Has(ctx context.Context, hc *http.Client, addr, token string) (relay, auth bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+Path, nil)
-	if err != nil {
-		return false, false
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := hc.Do(req)
-	if err != nil {
-		return false, false
-	}
-	_ = resp.Body.Close()
-	relay = resp.StatusCode == http.StatusNoContent
-	return relay, relay && resp.Header.Get(relayAuthHeader) != ""
 }

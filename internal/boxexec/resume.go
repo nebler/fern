@@ -145,8 +145,9 @@ func (c *sessionClient) sendStdin(ctx context.Context, conn *websocket.Conn, nex
 		c.mu.Lock()
 		// Frames the box has acknowledged are gone from c.in: start at the
 		// first one kept. Raised before the wait, not after: a next below
-		// inBase with nothing kept would skip the wait and index an empty
-		// buffer (a test panicked so, 2026-11-13).
+		// inBase with nothing kept skipped the wait and indexed an empty
+		// buffer (a test panicked so, 2026-11-13, and FuzzRunSessionFrames
+		// found it the same day).
 		for next = max(next, c.inBase); next >= c.inBase+uint64(len(c.in)) && ctx.Err() == nil; next = max(next, c.inBase) {
 			c.changed.Wait()
 		}

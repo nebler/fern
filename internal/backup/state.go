@@ -23,12 +23,6 @@ import (
 // The state archive holds, besides the workspaces: each environment's record,
 // T3's folders and its databases' copies, and each environment's Claude
 // folder.
-// indexName is the SQLite index an archive made before 2026-11-12 holds in
-// the records' place. A restore still unpacks it, and the daemon's store
-// makes the records from it at its next start (store's importIndex). No
-// archive made since has one: this goes, with that import, once no node's
-// latest backup is from before that day, or none of those will be restored.
-const indexName = "fern.sqlite"
 
 // stateDirs are the pool's folders the archive holds whole: T3's data and
 // the projects' repositories, which T3's worktrees point into.
@@ -306,13 +300,6 @@ func extractState(ctx context.Context, cfg *Config, key, pool string) error {
 			return fmt.Errorf("the archive names %q", hdr.Name)
 		}
 		dst := filepath.Join(pool, name)
-		if name == indexName {
-			// It holds every box token: its folder is root's alone.
-			if err := os.MkdirAll(filepath.Join(pool, "state"), 0o700); err != nil {
-				return err
-			}
-			dst = filepath.Join(pool, "state", indexName)
-		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
