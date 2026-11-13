@@ -28,7 +28,12 @@
 # and FERN_BACKUP_ENDPOINT, _REGION, _BUCKET, _ACCESS_KEY and _SECRET_KEY
 # for hourly encrypted backups to an S3 bucket (README); with
 # FERN_RESTORE_FROM=<old server's hostname> it brings that server's
-# threads back onto this one.
+# threads back onto this one. FERN_NOTIFY_URL (such as
+# https://ntfy.sh/<topic>) gets a message when something goes wrong on the
+# server, or the daemon or T3 fails, and FERN_HEARTBEAT_URL (such as
+# https://hc-ping.com/<uuid>) a GET every five minutes while the daemon
+# works, for a watcher that tells you when they stop; "off" turns either
+# off again (docs/operations.md).
 #
 # The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
 # amd64, dedicated to Fern. It gets a firewall that lets in only SSH (T3's
@@ -46,6 +51,8 @@ FERN_CLOUDFLARE_TOKEN_FILE=${FERN_CLOUDFLARE_TOKEN_FILE:-}
 FERN_SKILLS=${FERN_SKILLS-unset}
 FERN_BACKUP_BUCKET=${FERN_BACKUP_BUCKET:-}
 FERN_RESTORE_FROM=${FERN_RESTORE_FROM:-}
+FERN_NOTIFY_URL=${FERN_NOTIFY_URL:-}
+FERN_HEARTBEAT_URL=${FERN_HEARTBEAT_URL:-}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
 REGISTRY=ghcr.io/nebler
 SCRIPT_URL=${FERN_SCRIPT_URL:-https://raw.githubusercontent.com/nebler/fern/main/install.sh}
@@ -181,7 +188,9 @@ fern_from_release() {
       changed=yes
     fi
   done
-  for unit in fern-daemon fern-t3; do
+  for unit in fern-daemon fern-t3 fern-failed@; do
+    # A release from before fern-failed@ has no such file.
+    [ -e "$tmp/share/systemd/$unit.service" ] || continue
     if ! cmp -s "$tmp/share/systemd/$unit.service" "/etc/systemd/system/$unit.service"; then
       install -m 644 "$tmp/share/systemd/$unit.service" "/etc/systemd/system/$unit.service"
       changed=yes
@@ -346,6 +355,8 @@ server() {
   [ "$disk" -ge 10240 ] || warn "the server has $((disk / 1024)) GB of disk free; Fern wants 10 GB or more"
   node
   [ "${1:-}" = --node-only ] && return
+  # Settings given here, on the server itself; from a Mac they came first.
+  [ -z "$FERN_NOTIFY_URL$FERN_HEARTBEAT_URL" ] || alerts_settings | alerts_config
   fern_from_release
   if [ -n "$FERN_RESTORE_FROM" ]; then
     restore "$FERN_RESTORE_FROM"
@@ -378,6 +389,76 @@ backup_config() {
     wait_daemon
     echo "backups are set up: hourly, encrypted, to $(sed -n 's/^FERN_BACKUP_BUCKET=//p' "$f")"
   fi
+}
+
+# alerts_settings prints the notification settings given in the
+# environment, as alerts_config reads them.
+alerts_settings() {
+  [ -z "$FERN_NOTIFY_URL" ] || printf 'FERN_NOTIFY_URL=%s\n' "$FERN_NOTIFY_URL"
+  [ -z "$FERN_HEARTBEAT_URL" ] || printf 'FERN_HEARTBEAT_URL=%s\n' "$FERN_HEARTBEAT_URL"
+}
+
+# alerts_config sets where the server says that something is wrong, from
+# stdin (FERN_NOTIFY_URL= and FERN_HEARTBEAT_URL= lines; a setting that isn't
+# there stays as it is, "off" removes it): the daemon's --notify-url and
+# --heartbeat-url, in FERN_DAEMON_ARGS beside the flags already there, and
+# the notify URL in /etc/fern/notify.env for fern-failed@.service. Both
+# files are root's only: the URL is often all that keeps the messages
+# private. It restarts the daemon if anything changed, and is safe to run
+# again.
+alerts_config() {
+  local line name value before after
+  mkdir -p /etc/fern
+  [ -e /etc/fern/daemon.env ] || echo FERN_DAEMON_ARGS= >/etc/fern/daemon.env
+  before=$(cat /etc/fern/daemon.env /etc/fern/notify.env 2>/dev/null || true)
+  while IFS= read -r line; do
+    name=${line%%=*} value=${line#*=}
+    case $name in FERN_NOTIFY_URL | FERN_HEARTBEAT_URL) ;; *) continue ;; esac
+    [ "$value" = off ] || [[ $value =~ ^https?://[^[:space:]\"\'\\]+$ ]] ||
+      die "$name must be an http or https URL without spaces or quotes, or off"
+    [ "$value" != off ] || value=""
+    if [ "$name" = FERN_NOTIFY_URL ]; then
+      daemon_flag notify-url "$value"
+      if [ -n "$value" ]; then
+        (umask 077 && printf 'FERN_NOTIFY_URL=%s\n' "$value" >/etc/fern/notify.env.new)
+        mv /etc/fern/notify.env.new /etc/fern/notify.env
+      else
+        rm -f /etc/fern/notify.env
+      fi
+      echo "notifications: ${value:+to ${value#*://}}${value:-off}" | sed -E 's#^(notifications: to [^/]*)/.*#\1/…#'
+    else
+      daemon_flag heartbeat-url "$value"
+      echo "heartbeat: ${value:+to ${value#*://}}${value:-off}" | sed -E 's#^(heartbeat: to [^/]*)/.*#\1/…#'
+    fi
+  done
+  after=$(cat /etc/fern/daemon.env /etc/fern/notify.env 2>/dev/null || true)
+  if [ "$before" != "$after" ] && systemctl is-active -q fern-daemon; then
+    # Running commands and turns carry on through the daemon's restart.
+    systemctl restart fern-daemon
+    wait_daemon
+  fi
+}
+
+# daemon_flag sets the daemon's flag --$1 to $2 in FERN_DAEMON_ARGS
+# (/etc/fern/daemon.env), or removes it if $2 is empty, and keeps the other
+# flags and lines as they are. It reads the flag in each form Go's flag
+# package takes: --name=value, -name=value, and the name, then the value.
+daemon_flag() {
+  local flag=$1 value=$2 f=/etc/fern/daemon.env args=() kept=() skip=no word line
+  line=$(sed -n 's/^FERN_DAEMON_ARGS=//p' "$f" | tail -1)
+  line=${line#[\"\']} line=${line%[\"\']}
+  read -ra args <<<"$line"
+  for word in "${args[@]}"; do
+    if [ "$skip" = yes ]; then skip=no && continue; fi
+    case $word in
+      "--$flag" | "-$flag") skip=yes ;;
+      "--$flag="* | "-$flag="*) ;;
+      *) kept+=("$word") ;;
+    esac
+  done
+  [ -z "$value" ] || kept+=("--$flag=$value")
+  (umask 077 && { grep -v '^FERN_DAEMON_ARGS=' "$f" || true; printf 'FERN_DAEMON_ARGS=%s\n' "${kept[*]}"; } >"$f.new")
+  mv "$f.new" "$f"
 }
 
 # restore brings the threads of server node, from the backups the settings
@@ -531,6 +612,10 @@ remote() {
   else
     curl -fsSL "$SCRIPT_URL" | ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh'
   fi
+  if [ -n "$FERN_NOTIFY_URL$FERN_HEARTBEAT_URL" ]; then
+    # The URLs go on stdin, never in a command line.
+    alerts_settings | ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh alerts-config; else sudo -n bash /tmp/fern-install.sh alerts-config; fi"
+  fi
   if [ -n "$FERN_BACKUP_BUCKET" ]; then
     backup_settings "$host" | ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh backup-config; else sudo -n bash /tmp/fern-install.sh backup-config; fi"
   fi
@@ -619,6 +704,7 @@ case "${1:-}" in
   git-author) git_author "${2:-}" "${3:-}" ;;
   skills) skills "${2-}" ;;
   backup-config) backup_config ;;
+  alerts-config) alerts_config ;;
   server) server ;;
   --node-only) server --node-only ;;
   "") server && say "done; T3 listens on 127.0.0.1:$T3_PORT only through an SSH tunnel: from your Mac, run this with root@<this server> for one" ;;

@@ -169,6 +169,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
 	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
 	notifyURL := flags.String("notify-url", "", "POST a short text to this URL when something goes wrong on the node, and when all is well again, such as https://ntfy.sh/TOPIC (\"\": don't)")
+	heartbeatURL := flags.String("heartbeat-url", "", "GET this URL every --heartbeat-every while the daemon runs and its store answers, for a watcher that tells when the GETs stop, such as https://hc-ping.com/UUID (\"\": don't)")
+	heartbeatEvery := flags.Duration("heartbeat-every", 5*time.Minute, "how often to GET --heartbeat-url")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -179,6 +181,14 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if *notifyURL != "" {
 		if err := health.CheckURL(*notifyURL); err != nil {
 			return fmt.Errorf("--notify-url: %w", err)
+		}
+	}
+	if *heartbeatURL != "" {
+		if err := health.CheckURL(*heartbeatURL); err != nil {
+			return fmt.Errorf("--heartbeat-url: %w", err)
+		}
+		if *heartbeatEvery <= 0 {
+			return errors.New("--heartbeat-every: want more than 0")
 		}
 	}
 	node, err := os.Hostname()
@@ -349,6 +359,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if *notifyURL != "" {
 		notifier := health.Notifier{Checker: checker, URL: *notifyURL, Node: node, File: filepath.Join(pool, health.NotifiedFile), Log: log}
 		g.Go(func() error { notifier.Run(ctx, notifyEvery); return nil })
+	}
+	// And a watcher outside the server hears when the daemon, or the server,
+	// has stopped: the beats stop.
+	if *heartbeatURL != "" {
+		heartbeat := health.Heartbeat{Store: st, URL: *heartbeatURL, Log: log}
+		g.Go(func() error { heartbeat.Run(ctx, *heartbeatEvery); return nil })
 	}
 	for _, s := range servers {
 		if s.lis == nil {

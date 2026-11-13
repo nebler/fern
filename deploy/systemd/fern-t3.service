@@ -11,6 +11,8 @@ Description=T3 Code's server, on Fern
 After=fern-daemon.service
 Wants=fern-daemon.service
 RequiresMountsFor=/var/lib/fern
+# A failure systemd gives up on reaches the owner (fern-failed@.service).
+OnFailure=fern-failed@%n.service
 
 [Service]
 User=1000

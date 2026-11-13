@@ -1,0 +1,22 @@
+# Tells the owner that one of Fern's units has failed (architecture §16):
+# fern-daemon.service and fern-t3.service name it in OnFailure=, so systemd
+# starts fern-failed@<unit>.service when that unit enters the failed state:
+# when it fails and isn't restarted, or has failed to start five times in
+# ten seconds (systemd's start limit), as a daemon that can't start does.
+# It POSTs "<unit> failed on <host>" to the daemon's notify URL, which only
+# root can read in /etc/fern/notify.env (install.sh writes it from
+# FERN_NOTIFY_URL); without one it does nothing. The daemon's own notifier
+# can't say this: it is the daemon that has stopped.
+[Unit]
+Description=Tell the owner that %i failed
+
+[Service]
+Type=oneshot
+# systemd reads the file as root; the POST needs no rights.
+EnvironmentFile=-/etc/fern/notify.env
+DynamicUser=yes
+ExecCondition=/usr/bin/test -n "${FERN_NOTIFY_URL}"
+# One argument each, no shell: the message is the unit's name and the
+# host's, the URL the file's.
+ExecStart=/usr/bin/curl -fsS -o /dev/null --max-time 20 --retry 3 -H "Content-Type: text/plain; charset=utf-8" \
+  --data-binary "Fern on %H: %i failed. journalctl -u %i says why; fern doctor says what to do" "${FERN_NOTIFY_URL}"
