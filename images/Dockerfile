@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd cmd
 COPY internal internal
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/fern ./cmd/fern-daemon ./cmd/fern-init
+    CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/fern ./cmd/fern-daemon ./cmd/fern-init ./cmd/fern-git
 
 # Claude Code's native binary, pinned and checked against its release manifest.
 FROM debian:trixie-slim AS claude
@@ -144,6 +144,15 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
 COPY --from=go /out/fern-init /usr/local/bin/fern-init
+# The same guard for the git Claude Code runs in its own box (cmd/fern-git):
+# fern-init puts this folder first on that box's PATH and names it as
+# GIT_EXEC_PATH. The box that runs the services keeps plain git: what its
+# git runs stays in it.
+COPY --from=go /out/fern-git /usr/local/libexec/fern-git-core/git
+RUN test -x /usr/lib/git-core/git \
+ && for f in /usr/lib/git-core/*; do \
+      [ "$(basename "$f")" = git ] || ln -s "$f" /usr/local/libexec/fern-git-core/; \
+    done
 COPY --from=claude /claude /usr/local/bin/claude
 # box-opencode gives OpenCode its folders and Claude's login, in an agent box.
 COPY images/box-opencode /usr/local/bin/opencode
@@ -225,12 +234,12 @@ COPY images/fern-shell /usr/local/bin/fern-shell
 # the repository from Fern's GitHub App, if there is one.
 COPY images/fern-gh /usr/local/bin/gh
 COPY --from=gh /gh /usr/local/libexec/gh
-# T3's git, and every git that git starts, is fern-git: the real one, but
-# never for a repository whose git folder a thread's box can write (a folder
-# of a worktree with a .git of its own). git finds its programs in
+# T3's git, and every git that git starts, is fern-git (cmd/fern-git): the
+# real one, but never for a repository a thread's box could have written (a
+# folder of a worktree with a .git of its own). git finds its programs in
 # GIT_EXEC_PATH, which fern-t3.service sets to this folder: git's own
 # programs, with fern-git as the git among them.
-COPY images/fern-git /usr/local/libexec/fern-git-core/git
+COPY --from=go /out/fern-git /usr/local/libexec/fern-git-core/git
 RUN test -x /usr/lib/git-core/git \
  && for f in /usr/lib/git-core/*; do \
       [ "$(basename "$f")" = git ] || ln -s "$f" /usr/local/libexec/fern-git-core/; \

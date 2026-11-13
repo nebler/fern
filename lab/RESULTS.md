@@ -2009,3 +2009,21 @@ ones among them: the commit tool around a box's nested repository, T3's git
 through `fern-git`, the PATH of Claude's box, a terminal in the thread's box.
 Not done there: the reboot it has pending, the perf gate, and a thread on
 this build, all waiting for its thread to be idle.
+
+**A second security review, 2026-11-13** (the changes since the first),
+found two more, both fixed that day:
+- **The shell guard for T3's git could be passed.** It worked out the git
+  folder by reading the folder's `.git` itself. With `.git` a file ending in
+  CR LF (`gitdir: g\r\n`), of two lines, or with a NUL, git opened the box's
+  folder and the script resolved a path that didn't exist and let git run:
+  the reviewer's filter ran in `git status` and `git diff` as T3. With a
+  well-formed `.git` flipped between the repository's own git folder and the
+  box's, it ran in 7 of 60 runs of `git status`. The guard is now a Go
+  program, `cmd/fern-git`, which reads nothing the box writes: git's own git
+  for a folder's repository is refused by the variable its parent sets, and
+  every other git in a worktree is handed the worktree's own repository.
+  Its tests, with real git (2.50 on the Mac, 2.47 in the container): plain
+  git runs the box's program in most of nine commands; through `fern-git`
+  none does, for each of five ways to dress the folder's `.git`.
+- **Claude Code's own `git status`, in Claude's box, had no guard**, with the
+  login in its environment. Claude's box now has `fern-git` as its git too.

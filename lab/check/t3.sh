@@ -116,8 +116,8 @@ t3() {
   # asks git to look into it. Staged as a submodule, as T3's own `git add`
   # stages it, git status, diff, add, commit -a, stash and fetch each start
   # a git in that folder, which would run the filter in T3's service
-  # (found 2026-11-13). T3's git is fern-git, which opens no repository in
-  # a thread's own folder.
+  # (found 2026-11-13). T3's git is fern-git (cmd/fern-git), which opens
+  # the worktree's own repository there and no other.
   in_t3 "cd $W && fern exec -i --here -- sh -s make" <lab/nested-repo.sh
   in_t3 "cd $W && git add --all 2>/dev/null; git -c user.name=t -c user.email=t@fern commit -qm 'with a folder that has a repository'"
   in_t3 "cd $W && fern exec -i --here -- sh -s arm $W/filter-ran && echo more >> a.txt" <lab/nested-repo.sh
@@ -125,8 +125,24 @@ t3() {
   in_t3 "cd $W && { git status --porcelain; git diff HEAD --stat; git add --all; git stash; git stash pop; git fetch --recurse-submodules=yes $R; git -c user.name=t -c user.email=t@fern commit -qam again; } >/dev/null 2>&1" || true
   check "T3's git ran none of what the box's repository names, through seven commands" no "$(succeeds in_t3 "test -e $W/filter-ran")"
   check "and still does its work in the worktree" "again" "$(in_t3 "cd $W && git log -1 --format=%s")"
-  check "git in the box's folder itself is refused, with the reason" "128 fern-git: not opening the repository" \
-    "$(in_t3 "cd $W/nested && git status >/dev/null 2>&1; echo \$?") $(in_t3 "cd $W/nested && git status 2>&1" | cut -c1-36)"
+  # In the box's folder itself, T3's git is given the worktree's own
+  # repository, and a call that names another is refused with the reason.
+  check "git in the box's folder works on the worktree's repository, not the box's" "$W" "$(in_t3 "cd $W/nested && git rev-parse --show-toplevel")"
+  check "a git told to open the box's repository is refused, with the reason" "128 fern-git: --git-dir isn't taken in a thread's folder" \
+    "$(in_t3 "cd $W && git --git-dir nested/.git log -1 >/dev/null 2>&1; echo \$?") $(in_t3 "cd $W && git --git-dir nested/.git log -1 2>&1" | cut -c1-52)"
+  # The first guard, a shell script, read the folder's .git as git does,
+  # almost: a .git file that ends in CR LF named a folder to git and none
+  # to the script, which then let git run (found by a review the same day).
+  in_t3 "cd $W && fern exec --here -- sh -c 'cd nested && mv .git g && printf \"gitdir: g\\r\\n\" > .git && echo again > f'"
+  in_t3 "cd $W && { git status --porcelain; git diff HEAD --stat; git add --all; } >/dev/null 2>&1" || true
+  check "nor with the folder's .git a file that ends in CR LF" no "$(succeeds in_t3 "test -e $W/filter-ran")"
+  # Claude Code runs git status in its own box, in the same worktree, with
+  # Claude's login beside it: the same guard is its git there.
+  if [ "${AGENTS:-0}" = 1 ]; then
+    in_t3 "cd $W && fern exec --here --agent -- sh -c 'git status --short; git diff HEAD --stat' >/dev/null 2>&1" || true
+    check "the git of Claude's box runs none of it either" "no $W" \
+      "$(succeeds in_t3 "test -e $W/filter-ran") $(in_t3 "cd $W && fern exec --here --agent -- git rev-parse --show-toplevel")"
+  fi
   in_t3 "cd $W && rm -rf nested .gitmodules filter-ran && git add --all && git -c user.name=t -c user.email=t@fern commit -qm tidy" >/dev/null 2>&1 || true
 
   # A terminal in T3 (fern-terminals.patch, images/fern-shell): a shell in

@@ -52,8 +52,8 @@ EnvironmentFile=-/etc/fern/claude.env
 # from the daemon's GitHub App (fern git-credential), if there is one.
 Environment=GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=credential.https://github.com.helper "GIT_CONFIG_VALUE_0=!/usr/local/bin/fern git-credential" GIT_CONFIG_KEY_1=credential.https://github.com.useHttpPath GIT_CONFIG_VALUE_1=true GIT_CONFIG_KEY_2=safe.bareRepository GIT_CONFIG_VALUE_2=explicit
 # Every git T3 starts, and every git that git starts, is fern-git
-# (images/fern-git): it opens no repository whose git folder is in a
-# thread's own folder, where the thread's box could have written its config.
+# (cmd/fern-git): in a thread's folder it opens the worktree's own
+# repository and no other, so never one whose config the thread's box wrote.
 # Nor does git take a folder there for a bare repository (the setting above).
 Environment=GIT_EXEC_PATH=/usr/local/libexec/fern-git-core
 # T3's folders in the pool, owned by its user (on the node: + runs it

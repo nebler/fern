@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -61,6 +62,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 	env := os.Environ()
 	if os.Getenv("FERN_SERVICES") != "off" {
 		env = toolsEnv(dir, env)
+	} else {
+		env = guardGit(env)
 	}
 
 	services, guessed, err := loadServices(dir)
@@ -242,4 +245,35 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("serve exec: %w", err)
 	}
 	return nil
+}
+
+// gitGuard is where the image keeps git's own programs with fern-git as the
+// git among them (cmd/fern-git, images/Dockerfile).
+const gitGuard = "/usr/local/libexec/fern-git-core"
+
+// guardGit returns env with fern-git as git, for Claude's box: first on the
+// PATH, and as the git that git starts (GIT_EXEC_PATH). Claude Code runs git
+// status in its folder by itself, and the folder is the workspace, which the
+// other box writes: a repository made in a folder there has a config of that
+// box's own, and once the index holds the folder as a submodule, git starts
+// a git in it that runs what the config names, here, where Claude's login is
+// (found 2026-11-13). fern-git opens the worktree's own repository and no
+// other. Nor does git take a folder for a bare repository unless told.
+func guardGit(env []string) []string {
+	out := make([]string, 0, len(env)+6)
+	path := "/usr/local/bin:/usr/bin:/bin"
+	for _, v := range env {
+		switch {
+		case strings.HasPrefix(v, "PATH="):
+			path = strings.TrimPrefix(v, "PATH=")
+		case strings.HasPrefix(v, "GIT_EXEC_PATH="), strings.HasPrefix(v, "GIT_CONFIG_"):
+		default:
+			out = append(out, v)
+		}
+	}
+	return append(out,
+		"PATH="+gitGuard+":"+path,
+		"GIT_EXEC_PATH="+gitGuard,
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.bareRepository", "GIT_CONFIG_VALUE_0=explicit",
+	)
 }
