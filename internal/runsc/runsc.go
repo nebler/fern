@@ -83,6 +83,11 @@ type Box struct {
 	Vars []string
 	// Limits are what it may use. A box with none isn't started.
 	Limits Limits
+	// Unfit is why the box can't be started, such as a services.yaml whose
+	// limits can't be read; nil if it can. A box that runs already is kept
+	// all the same: a daemon that restarts adopts its boxes, whatever their
+	// repositories have become since they started.
+	Unfit error
 }
 
 // Config is where a Driver keeps its boxes.
@@ -501,6 +506,9 @@ func (d *Driver) allocate(b layout) (int, error) {
 func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	_, sp := d.tracer.Start(ctx, "start")
 	defer func() { span.End(sp, err) }()
+	if box.Unfit != nil {
+		return box.Unfit
+	}
 	if err := box.Limits.Check(); err != nil {
 		return fmt.Errorf("its limits: %w", err)
 	}

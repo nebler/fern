@@ -570,11 +570,7 @@ func (a *actor) wake(ctx context.Context) error {
 // startBox has the driver wake a's box, of env, with what boxOf decides it
 // runs and gets, and returns its exec address.
 func (a *actor) startBox(ctx context.Context, env store.Env) (string, error) {
-	box, err := a.g.boxOf(ctx, a.id, env, a.setup)
-	if err != nil {
-		return "", fmt.Errorf("wake %s: %w", a.id, err)
-	}
-	return a.g.driver.Wake(ctx, box)
+	return a.g.driver.Wake(ctx, a.g.boxOf(ctx, a.id, env, a.setup))
 }
 
 // stopBox stops the box, then cancels the commands still counted as running

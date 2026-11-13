@@ -45,6 +45,11 @@ func (f *Fake) Wake(_ context.Context, box Box) (string, error) {
 		return "", err
 	}
 	if !f.up[box.ID] {
+		// As the driver: a box that can't be started isn't, and one that
+		// runs is kept.
+		if box.Unfit != nil {
+			return "", fmt.Errorf("wake %s: %w", box.ID, box.Unfit)
+		}
 		f.wakes++
 	}
 	f.boxes[box.ID], f.up[box.ID] = box, true

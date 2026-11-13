@@ -27,7 +27,9 @@ import (
 // and the notices, read now: a new login or pack needs no restart. A box
 // that runs a repository's services or setup script gets the limits the
 // repository asks for, up to the node's most; an agent box the defaults.
-func (g *Group) boxOf(ctx context.Context, id string, env store.Env, forSetup bool) (runsc.Box, error) {
+// What can't be read makes the box unfit to start (runsc.Box.Unfit), not
+// the wake fail here: the driver keeps a box that runs already.
+func (g *Group) boxOf(ctx context.Context, id string, env store.Env, forSetup bool) runsc.Box {
 	box := runsc.Box{ID: id, Kind: runsc.Services, Env: env}
 	switch {
 	case store.IsBuilder(id):
@@ -55,7 +57,8 @@ func (g *Group) boxOf(ctx context.Context, id string, env store.Env, forSetup bo
 	if box.Env.Claude != "" {
 		claude, err := g.claudeVars(ctx, env)
 		if err != nil {
-			return runsc.Box{}, err
+			box.Unfit = err
+			return box
 		}
 		vars = append(vars, "CLAUDE_CONFIG_DIR="+box.Env.Claude)
 		vars = append(vars, claude...)
@@ -80,15 +83,16 @@ func (g *Group) boxOf(ctx context.Context, id string, env store.Env, forSetup bo
 			}
 		}
 	} else {
-		if err != nil {
-			return runsc.Box{}, err
+		if err == nil {
+			box.Limits, err = g.cfg.limitsOf(asked)
 		}
-		if box.Limits, err = g.cfg.limitsOf(asked); err != nil {
-			return runsc.Box{}, err
+		if err != nil {
+			box.Unfit = err
+			return box
 		}
 	}
 	box.Vars = vars
-	return box, nil
+	return box
 }
 
 // claudeVars returns what a box with Claude's folder learns at its start

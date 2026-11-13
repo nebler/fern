@@ -197,7 +197,7 @@ node_used() {
     END { printf "%.3f\n", (total - available) / 1024 }' /proc/meminfo </dev/null
 }
 # golden_id prints the ID of the environment that builds repo $1's golden
-# snapshots (setup.ID), for a name of lowercase letters, digits and dashes.
+# snapshots (store.BuilderID), for a name of lowercase letters, digits and dashes.
 golden_id() { echo "golden-$1-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; }
 # in_daemon runs a shell command on the node, where the daemon runs and
 # sees the pool.

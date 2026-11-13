@@ -326,3 +326,49 @@ func TestNoticesAtClaudesWake(t *testing.T) {
 		})
 	}
 }
+
+// A box whose services.yaml can't be read isn't started, with the file's
+// fault as the reason. One that runs already is kept: a daemon that
+// restarts (an upgrade) adopts its boxes with their commands, whatever
+// their repositories have become since.
+func TestBrokenServicesFile(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		name := "a box that isn't running"
+		if running {
+			name = "a box an earlier daemon left running"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				worktree := filepath.Join(t.TempDir(), "worktrees", "sample", "one")
+				if err := os.MkdirAll(worktree, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				g := actor.New(st, drv, actor.Config{Idle: idle, Image: "box"}, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan struct{})
+				go func() { _ = g.Run(ctx); close(done) }()
+				defer func() { cancel(); <-done }()
+				if err := g.Create(t.Context(), "one", store.CreateOptions{Workspace: worktree}); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Wait()
+				if running {
+					if _, err := drv.Wake(t.Context(), runsc.Box{ID: "one"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(worktree, "services.yaml"), []byte("limits: [not, a, map]\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				err := g.Wake(t.Context(), "one")
+				switch {
+				case running && err != nil:
+					t.Errorf("Wake() of a running box whose services.yaml broke error: %v, want it kept", err)
+				case !running && (err == nil || !strings.Contains(err.Error(), "services.yaml")):
+					t.Errorf("Wake() with a broken services.yaml error = %v, want the file's fault", err)
+				}
+			})
+		})
+	}
+}
