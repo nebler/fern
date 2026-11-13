@@ -2027,3 +2027,47 @@ found two more, both fixed that day:
   none does, for each of five ways to dress the folder's `.git`.
 - **Claude Code's own `git status`, in Claude's box, had no guard**, with the
   login in its environment. Claude's box now has `fern-git` as its git too.
+
+## The full perf gate after the deploy, VPS, 2026-11-13
+
+After the deploy at 15:01 UTC (54b7309b) and a reboot onto kernel
+7.0.0-43, `lab/perf.sh` on the VPS, against `lab/perf/vps.tsv` (recorded
+2026-11-11): FAIL, 12 metrics worse.
+
+Three come from the server's own idle settings, which the gate reads: since
+2026-11-12 it keeps Claude 5 minutes between messages (a drop-in,
+`FERN_HIBERNATE=5m`, chosen for faster replies).
+
+| | baseline | 2026-11-13 |
+|---|---:|---:|
+| `turn.awake_after_s` | 30 | 300 |
+| `turn.cpu_ms` | 7,269 | 14,258 |
+| `turn.box_mib_minutes` | 65 | 644 |
+
+Two were reclaimable slab, from threads that had read big trees (T3's: 171.5
+of its 176.1 MiB):
+
+| | baseline | 2026-11-13 | without reclaimable slab |
+|---|---:|---:|---:|
+| `hardware.platform.t3_kernel_mib` | 4.4 | 176.1 | 4.6 |
+| `hardware.platform.daemon_kernel_mib` | 1.1 | 30.4 | 1.0 |
+
+The metric now leaves it out (91216e88).
+
+Seven are not explained yet:
+- T3's idle CPU per minute (`hardware.empty_idle` and `postgres_idle`):
+  about 120 ms in the baseline, up to 1,754. That section alone read 215 to
+  280, and 182 on a quiet server. T3 started one program in 2.5 minutes, so
+  it is not processes it spawns.
+- The node's idle CPU in the same two sections: +49 to +53%.
+- `stream.stdout_200mb_ms`: 2,544 → 3,246 (+28%).
+- `t3.adopt_ms`: 60 → 113.
+- `scale.n20.contended_exec_ms.p95`: 188 → 222.
+
+Better in the same run: a wake 25 to 36% faster (`turn.wake_ms` 226.5 →
+149.9, `golden.first_wake_ms` 228.7 → 147.0), the daemon's CPU per wake
+about halved, T3's memory 269 → 171 MiB, the node's memory used 873 → 671
+MiB.
+
+The baseline was not replaced. An A/B run on the VPS (`lab/ab.sh`) is to
+settle the seven.
