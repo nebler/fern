@@ -23,12 +23,13 @@ type fakeStore struct {
 	failed    map[string]store.BuildFailure
 	snapshots map[string]store.SnapshotFailure // the environments whose last snapshot failed
 	space     store.Space
+	quotas    map[string]store.Quota // the environments with a quota group
 }
 
 func (f fakeStore) List(context.Context) ([]store.Env, error) {
 	var out []store.Env
 	for _, id := range f.envs {
-		out = append(out, store.Env{ID: id})
+		out = append(out, store.Env{ID: id, Group: f.quotas[id].Group})
 	}
 	return out, nil
 }
@@ -44,6 +45,10 @@ func (f fakeStore) SnapshotFailure(_ context.Context, id string) (store.Snapshot
 }
 
 func (f fakeStore) Space() (store.Space, error) { return f.space, nil }
+
+func (f fakeStore) Quota(_ context.Context, env store.Env) (store.Quota, error) {
+	return f.quotas[env.ID], nil
+}
 
 // fakeBoxes are the boxes that aren't woken for now.
 type fakeBoxes []actor.Crashing
@@ -123,6 +128,25 @@ func TestProblems(t *testing.T) {
 			},
 			fix: "the next turn's snapshot is tried as usual, and one that works clears this; `fern snapshot t3-2 probe` tries one now " +
 				"(`fern rmsnap t3-2 probe` removes it again); `fern logs t3-2` has what the daemon said",
+		},
+		{
+			name: "threads at and near their disk limits, and one well under",
+			store: fakeStore{
+				envs: []string{"t3-1", "t3-2", "t3-3", "t3-4"},
+				quotas: map[string]store.Quota{
+					"t3-1": {Group: 1, Used: 10 << 30, Limit: 10 << 30},
+					"t3-2": {Group: 2, Used: 9 << 30, Limit: 10 << 30},
+					"t3-3": {Group: 3, Used: 1 << 30, Limit: 10 << 30},
+					"t3-4": {Group: 4, Used: 50 << 30},
+				},
+				space: roomy,
+			},
+			want: []string{
+				`disk limit: t3-1 has reached its disk limit, 10.0 GiB of 10.0 GiB: writes in its box fail with "Disk quota exceeded"; its snapshots and reverts still work`,
+				`disk limit: t3-2 has used 9.0 GiB of its disk limit of 10.0 GiB`,
+			},
+			fix: "`fern limit t3-1 SIZE` raises it, such as to 20G. Deleting files frees only what no snapshot holds, and a thread keeps its last 50 turns' snapshots: " +
+				"`fern snapshots t3-1` lists them, and `fern rmsnap t3-1 SNAP…` frees what only those hold",
 		},
 		{
 			name:  "backups that fail",

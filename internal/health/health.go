@@ -22,6 +22,7 @@ type Store interface {
 	BuildFailure(ctx context.Context, id string) (store.BuildFailure, bool, error)
 	SnapshotFailure(ctx context.Context, id string) (store.SnapshotFailure, bool, error)
 	Space() (store.Space, error)
+	Quota(ctx context.Context, env store.Env) (store.Quota, error)
 }
 
 // Boxes says which boxes aren't woken for now because they keep dying or
@@ -48,6 +49,10 @@ type Checker struct {
 	// T3 is T3's server, asked whether it answers. May be nil: there is no
 	// T3.
 	T3 *T3
+	// LimitsOff is why the daemon was given --env-disk-limit and the pool
+	// has no limits (store.EnableLimits' error); "" if it has them, or wasn't
+	// asked to.
+	LimitsOff string
 }
 
 // lateBackups is how many backups may be missed before it is a problem:
@@ -58,8 +63,9 @@ const lateBackups = 3
 // doesn't answer, a pool that takes no more snapshots, one with no room left for btrfs's records,
 // boxes that have nearly used up their memory or were killed for it,
 // backups that fail or have stopped, boxes that aren't woken because they
-// keep crashing, environments whose last snapshot failed, and golden builds
-// that failed. No problems is an empty list.
+// keep crashing, environments at 90% of their disk limit or more, limits
+// asked for and off, environments whose last snapshot failed, and golden
+// builds that failed. No problems is an empty list.
 func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	out := []api.Problem{} // an empty list on the wire, not null
 	if c.T3 != nil {
@@ -103,6 +109,25 @@ func (c Checker) Problems(ctx context.Context) ([]api.Problem, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Two small sysfs files each, for the environments with a quota group.
+	for _, env := range envs {
+		if env.Group == 0 {
+			continue
+		}
+		q, err := c.Store.Quota(ctx, env)
+		if err != nil {
+			return nil, err
+		}
+		if q.Near() {
+			out = append(out, limit(env.ID, q))
+		}
+	}
+	if c.LimitsOff != "" {
+		out = append(out, api.Problem{
+			Name: "disk limit", Detail: "the daemon was started with --env-disk-limit and the pool has no limits: " + firstLine(c.LimitsOff),
+			Fix: "Linux 6.7 or later has btrfs simple quotas; `journalctl -u fern-daemon | grep limit` has what the daemon said. Without the flag (FERN_DAEMON_ARGS in /etc/fern/daemon.env) threads have no limit",
+		})
+	}
 	for _, env := range envs {
 		failed, ok, err := c.Store.SnapshotFailure(ctx, env.ID)
 		if err != nil {
@@ -142,6 +167,21 @@ func snapshot(env string, failed store.SnapshotFailure) api.Problem {
 		Detail: fmt.Sprintf("%s: the snapshot of a turn wasn't taken (%s), so a revert to that turn is refused: %s", env, failed.Snapshot, firstLine(failed.Error)),
 		Fix: "the next turn's snapshot is tried as usual, and one that works clears this; `fern snapshot " + env + " probe` tries one now (`fern rmsnap " +
 			env + " probe` removes it again); `fern logs " + env + "` has what the daemon said",
+	}
+}
+
+// limit is the problem of environment env, which has used 90% of its disk
+// limit or more. Deleting files frees only what no snapshot holds, so only
+// a person can free it: with a higher limit, or fewer snapshots.
+func limit(env string, q store.Quota) api.Problem {
+	detail := fmt.Sprintf("%s has used %s of its disk limit of %s: writes in its box fail with \"Disk quota exceeded\" when it reaches it", env, gib(int64(q.Used)), gib(int64(q.Limit)))
+	if q.Full() {
+		detail = fmt.Sprintf("%s has reached its disk limit, %s of %s: writes in its box fail with \"Disk quota exceeded\"; its snapshots and reverts still work", env, gib(int64(q.Used)), gib(int64(q.Limit)))
+	}
+	return api.Problem{
+		Name: "disk limit", About: env, Detail: detail,
+		Fix: "`fern limit " + env + " SIZE` raises it, such as to 20G. Deleting files frees only what no snapshot holds, and a thread keeps its last 50 turns' snapshots: " +
+			"`fern snapshots " + env + "` lists them, and `fern rmsnap " + env + " SNAP…` frees what only those hold",
 	}
 }
 

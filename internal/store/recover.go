@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -21,7 +22,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	env, err := s.Get(ctx, id)
 	switch {
 	case err == nil:
-		if err := s.writeMarker(id, env.Workspace); err != nil {
+		if err := s.writeMarker(id, env.Workspace, env.Group); err != nil {
 			return fmt.Errorf("delete %s: %w", id, err)
 		}
 		if err := s.step("delete: marked"); err != nil {
@@ -47,6 +48,12 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // old pre-restore snapshots, and returns the environment directories it
 // keeps and can't use: they hold data and have neither a record nor a
 // marker, or their record can't be read.
+//
+// With quota groups, it puts each environment's workspace and newest
+// snapshot into its group again, the only subvolumes a crash can leave
+// outside it; with limits on (EnableLimits), it brings in the environments
+// made without a group; and it destroys the groups nothing names
+// (ClearGroups).
 func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 	dirs, err := os.ReadDir(filepath.Join(s.root, "envs"))
 	if err != nil {
@@ -92,7 +99,7 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			// that stopped in between left none, and the next build makes it
 			// afresh. Only that leaves an environment with a record without one.
 			if _, err := os.Lstat(env.Workspace); errors.Is(err, fs.ErrNotExist) && env.Workspace == s.livePath(id) {
-				if err := s.makeWorkspace(ctx, id, env.Workspace, ""); err != nil {
+				if err := s.makeWorkspace(ctx, id, env.Workspace, "", env.Group); err != nil {
 					return lost, fmt.Errorf("reconcile %s: %w", id, err)
 				}
 			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -101,9 +108,34 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			if err := s.prunePreRestores(ctx, id, ""); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
+			if err := s.reconcileGroup(ctx, env); err != nil {
+				return lost, fmt.Errorf("reconcile %s: %w", id, err)
+			}
 		}
 	}
+	if _, err := s.ClearGroups(ctx); err != nil {
+		return lost, fmt.Errorf("reconcile: %w", err)
+	}
 	return lost, nil
+}
+
+// reconcileGroup puts env's workspace and newest snapshot into its quota
+// group again, or brings env in if it has none and limits are on.
+func (s *Store) reconcileGroup(ctx context.Context, env Env) error {
+	if env.Group == 0 {
+		if s.limit == 0 {
+			return nil
+		}
+		return s.bringIn(ctx, env)
+	}
+	if err := s.joinWorkspace(ctx, env.ID, env.Workspace, env.Group); err != nil {
+		return err
+	}
+	snaps, err := s.Snapshots(ctx, env.ID)
+	if err != nil || len(snaps) == 0 {
+		return err
+	}
+	return s.join(ctx, env.ID, s.snapPath(env.ID, snaps[len(snaps)-1].ID), env.Group)
 }
 
 // clearLeftovers removes what a create or delete of environment id, which has
@@ -118,7 +150,7 @@ func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 	} else if err != nil {
 		return err
 	}
-	workspace, err := os.ReadFile(s.markerPath(id))
+	workspace, group, err := s.readMarker(id)
 	if errors.Is(err, fs.ErrNotExist) {
 		kept, err := holdsData(dir)
 		if err != nil {
@@ -130,7 +162,15 @@ func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 	} else if err != nil {
 		return err
 	}
-	return s.removeDisk(ctx, id, strings.TrimSpace(string(workspace)))
+	if err := s.removeDisk(ctx, id, workspace); err != nil {
+		return err
+	}
+	if group == 0 {
+		return nil
+	}
+	// Mostly refused at once: btrfs's cleaner hasn't dropped the deleted
+	// subvolumes yet. ClearGroups destroys it later.
+	return s.destroyGroup(group)
 }
 
 // holdsData reports whether an environment directory has a live/, a
@@ -177,10 +217,32 @@ func (s *Store) removeDisk(ctx context.Context, id, workspace string) error {
 // writeMarker records that a create or delete of environment id has begun,
 // so that what it leaves is garbage. A delete names its workspace, which goes
 // with it; a create names none: the next Create resumes a workspace at a
-// caller's path.
-func (s *Store) writeMarker(id, workspace string) error {
+// caller's path. Both name the environment's quota group, if it has one,
+// which goes too: the workspace on the first line, the group on the second.
+func (s *Store) writeMarker(id, workspace string, group uint64) error {
 	if err := os.MkdirAll(s.envDir(id), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(s.markerPath(id), []byte(workspace), 0o644)
+	data := workspace
+	if group != 0 {
+		data += "\n" + strconv.FormatUint(group, 10) + "\n"
+	}
+	return os.WriteFile(s.markerPath(id), []byte(data), 0o644)
+}
+
+// readMarker returns the workspace and quota group environment id's marker
+// names, or an error that is fs.ErrNotExist if it has none. A marker of a
+// Fern before quota groups is the workspace alone.
+func (s *Store) readMarker(id string) (workspace string, group uint64, err error) {
+	data, err := os.ReadFile(s.markerPath(id))
+	if err != nil {
+		return "", 0, err
+	}
+	first, rest, _ := strings.Cut(string(data), "\n")
+	if rest = strings.TrimSpace(rest); rest != "" {
+		// One a power cut cut short names no group: its environment had
+		// none yet, or ClearGroups finds it.
+		group, _ = strconv.ParseUint(rest, 10, 64)
+	}
+	return strings.TrimSpace(first), group, nil
 }

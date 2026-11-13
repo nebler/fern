@@ -80,6 +80,9 @@ type Env struct {
 	// change the repository's config or hooks.
 	Git     string
 	Created time.Time
+	// Group is the environment's quota group, 1/Group, which holds its
+	// subvolumes and its disk limit (quota.go); 0 if it has none.
+	Group uint64
 }
 
 // Snapshot is a read-only copy of an environment's workspace at one moment.
@@ -229,6 +232,17 @@ type Store struct {
 	// under is a folder on the disk the pool's file is on, "" for a pool on
 	// a partition of its own (space.go).
 	under string
+	// limit is the disk limit of a new environment, in bytes; 0 while
+	// limits are off and new environments get no quota group (quota.go).
+	// EnableLimits sets it before the Store is used.
+	limit uint64
+	// qgroups is where sysfs shows the pool's quota groups; "" if it can't
+	// be found.
+	qgroups string
+	// groupMu guards lastGroup, the largest quota group made or seen, and
+	// makes picking a new group one step with making it.
+	groupMu   sync.Mutex
+	lastGroup uint64
 }
 
 // step returns failAt's error for the named step, if failAt is set.
@@ -249,6 +263,8 @@ func Open(_ context.Context, root string) (*Store, error) {
 		return nil, fmt.Errorf("open pool: %s is not on btrfs", root)
 	}
 	s := &Store{root: root, claims: make(map[string]string), keepTurns: keepTurns, minFreeBytes: minFreeBytes, under: diskUnder(root)}
+	// Only limits read it: a pool without them works without it.
+	s.qgroups, _ = qgroupsDir(root)
 	if err := os.MkdirAll(filepath.Join(root, "envs"), 0o755); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}
@@ -323,7 +339,7 @@ func (s *Store) FindByPath(ctx context.Context, path string) (Env, error) {
 func (s *Store) env(id string, rec record) Env {
 	return Env{
 		ID: id, Workspace: rec.Workspace, Claude: s.claudePath(id), Git: rec.Git,
-		Created: rec.Created.UTC(),
+		Created: rec.Created.UTC(), Group: rec.Group,
 	}
 }
 

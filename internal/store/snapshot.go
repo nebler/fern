@@ -39,8 +39,8 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	_, err := os.Lstat(path)
 	if err == nil {
 		// A retry, or a snapshot taken just before a crash: btrfs snapshots
-		// are atomic, so it is complete.
-		return nil
+		// are atomic, so it is complete. It may not have joined its group.
+		return s.join(ctx, env.ID, path, env.Group)
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -52,6 +52,9 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	// write made before. The subvolume is the whole snapshot: there is
 	// nothing to record beside it.
 	if err := snapshotSubvolume(ctx, env.Workspace, path, true); err != nil {
+		return err
+	}
+	if err := s.join(ctx, env.ID, path, env.Group); err != nil {
 		return err
 	}
 	return s.step("snapshot: taken")
@@ -155,6 +158,10 @@ func (s *Store) restore(ctx context.Context, env Env, snapID string) error {
 		return err
 	}
 	if err := snapshotSubvolume(ctx, s.snapPath(env.ID, snapID), next, false); err != nil {
+		return err
+	}
+	// Before the swap: the workspace is never outside its group.
+	if err := s.join(ctx, env.ID, next, env.Group); err != nil {
 		return err
 	}
 	if err := s.step("restore: copied"); err != nil {

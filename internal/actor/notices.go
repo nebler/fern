@@ -25,6 +25,8 @@ const (
 //
 //   - New snapshots are refused, because the pool or the disk under it is
 //     full: the thread's turns leave nothing to revert to.
+//   - The environment has used 90% of its disk limit or more (limitNotice):
+//     its writes fail at the limit, and only the person can make room.
 //   - The environment's own box, where Claude's Bash runs, died or failed to
 //     wake so often that it isn't woken for now (crashNotice): Claude would
 //     otherwise learn it from its first Bash call, and the person from
@@ -40,6 +42,13 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 	if sp, err := g.store.Space(); err == nil {
 		if full := sp.Full(); full != nil {
 			out = append(out, "Fern takes no new snapshots, so a revert can't bring back what this turn changes: "+full.Error()+".")
+		}
+	}
+	// Only an environment with a quota group has a limit: without limits,
+	// nothing is read.
+	if env.Group != 0 {
+		if q, err := g.store.Quota(ctx, env); err == nil && q.Near() {
+			out = append(out, limitNotice(env.ID, q))
 		}
 	}
 	if notice := g.crashNotice(ctx, env); notice != "" {
@@ -65,6 +74,21 @@ func (g *Group) notices(ctx context.Context, env store.Env) []string {
 		"without what the setup script and the services' first start make. It is tried again when a thread is "+
 		"made, at most every %s. Why it failed: %s",
 		failed.At.UTC().Format("2006-01-02 15:04 UTC"), time.Since(failed.At).Round(time.Minute), buildRetry, clip(failed.Error)))
+}
+
+// limitNotice says how much of its disk limit environment env has used, and
+// what frees room: deleting files frees only what no snapshot holds, and
+// the snapshots of the last turns hold what they wrote, so it is the
+// person's call.
+func limitNotice(env string, q store.Quota) string {
+	gib := func(b uint64) string { return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30)) }
+	state := fmt.Sprintf("This thread has used %s of its disk limit of %s on Fern's server; at the limit, writing files, git and builds fail with \"Disk quota exceeded\".", gib(q.Used), gib(q.Limit))
+	if q.Full() {
+		state = fmt.Sprintf("This thread has reached its disk limit on Fern's server, %s of %s: writing files, git and builds fail with \"Disk quota exceeded\". "+
+			"Snapshots and reverts still work.", gib(q.Used), gib(q.Limit))
+	}
+	return state + " Deleting files frees little: the snapshots Fern keeps of the last 50 turns still hold what those turns wrote. " +
+		"Ask the person to raise the limit (`fern limit " + env + " 20G` on the server) or to delete old snapshots (`fern rmsnap`)."
 }
 
 // snapshotNotice says, at now, which turn has no snapshot and what that

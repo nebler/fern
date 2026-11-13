@@ -121,6 +121,8 @@ func (f *fakeStore) BuildFailure(context.Context, string) (store.BuildFailure, b
 
 func (f *fakeStore) Space() (store.Space, error) { return store.Space{}, nil }
 
+func (f *fakeStore) Quota(context.Context, store.Env) (store.Quota, error) { return store.Quota{}, nil }
+
 // serveSocket serves h on a unix socket and returns a client of it.
 func serveSocket(t testing.TB, h http.Handler) *api.Client {
 	t.Helper()

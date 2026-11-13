@@ -26,6 +26,17 @@ import (
 // provides both.
 func openPool(t *testing.T) (*store.Store, string) {
 	t.Helper()
+	return openPoolWith(t, 0)
+}
+
+// testLimit is the disk limit of the environments of a pool with limits.
+const testLimit = 64 << 20
+
+// openPoolWith opens a pool for the test, with a disk limit of limit bytes
+// per environment, or none for 0. Quotas are the filesystem's: once one
+// test turns them on, they are on for the tests after it.
+func openPoolWith(t *testing.T, limit uint64) (*store.Store, string) {
+	t.Helper()
 	root := os.Getenv("FERN_TEST_BTRFS")
 	if root == "" {
 		t.Skip("FERN_TEST_BTRFS is not set; run lab/test-store.sh for the btrfs store tests")
@@ -45,6 +56,11 @@ func openPool(t *testing.T) (*store.Store, string) {
 	}
 	// The test pool is smaller than the free space a real one keeps.
 	store.SetRetention(st, 50, 0)
+	if limit > 0 {
+		if err := st.EnableLimits(t.Context(), limit); err != nil {
+			t.Fatalf("EnableLimits() error: %v", err)
+		}
+	}
 	t.Cleanup(func() {
 		// Subvolumes and read-only snapshots can't be removed with RemoveAll.
 		ctx := context.WithoutCancel(t.Context())

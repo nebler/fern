@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/store"
 )
 
 // diskUsage prints what uses the node's disk: fern df. A pool that is a
@@ -36,8 +38,13 @@ func diskUsage(ctx context.Context, _ command, cl *api.Client, std stdio) (int, 
 	tw = tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "WHAT\tSIZE\tONLY ITS\t")
 	var unused uint64
+	limited := false
 	for _, p := range d.Parts {
 		note := p.Note
+		if p.Limit > 0 {
+			limited = true
+			note = strings.TrimSuffix(fmt.Sprintf("wrote %s of its limit of %s%s; %s", size(p.Written), size(p.Limit), full(p.Written, p.Limit), note), "; ")
+		}
 		if p.Unused {
 			unused += p.Exclusive
 			note = "fern gc removes it: " + note
@@ -49,6 +56,39 @@ func diskUsage(ctx context.Context, _ command, cl *api.Client, std stdio) (int, 
 	}
 	_, err = fmt.Fprintf(std.out, "\nSIZE counts blocks shared with others (a workspace with its snapshots, a thread with its golden); ONLY ITS is the least that removing it frees.\n"+
 		"fern gc would free at least %s.\n", size(unused))
+	if err == nil && limited {
+		_, err = fmt.Fprintln(std.out, "What a thread wrote and still holds, its snapshots included, counts against its disk limit; at the limit, writes in its box fail. `fern limit ENV SIZE` changes it.")
+	}
+	return 0, err
+}
+
+// full marks an environment at its disk limit, as the store tells it
+// (store.Quota.Full).
+func full(written, limit uint64) string {
+	if (store.Quota{Used: written, Limit: limit}).Full() {
+		return ", AT THE LIMIT: writes in its box fail"
+	}
+	return ""
+}
+
+// setLimit sets an environment's disk limit: fern limit <env> <size>, or
+// none.
+func setLimit(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	var bytes uint64
+	if c.args[1] != "none" {
+		var err error
+		if bytes, err = store.ParseSize(c.args[1]); err != nil || bytes == 0 {
+			return 2, fmt.Errorf("size %q: want a size such as 20G, or none", c.args[1])
+		}
+	}
+	if err := cl.SetLimit(ctx, c.args[0], bytes); err != nil {
+		return 0, err
+	}
+	if bytes == 0 {
+		_, err := fmt.Fprintf(std.out, "%s has no disk limit now\n", c.args[0])
+		return 0, err
+	}
+	_, err := fmt.Fprintf(std.out, "%s's disk limit is %s now\n", c.args[0], size(bytes))
 	return 0, err
 }
 

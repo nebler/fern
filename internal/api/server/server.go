@@ -45,6 +45,11 @@ type Keeper interface {
 	Free(ctx context.Context) (api.Freed, error)
 }
 
+// Limiter changes an environment's disk limit (store.Store).
+type Limiter interface {
+	SetLimit(ctx context.Context, id string, bytes uint64) error
+}
+
 // Checker says what is wrong on the node now (health.Checker).
 type Checker interface {
 	Problems(ctx context.Context) ([]api.Problem, error)
@@ -86,6 +91,10 @@ type Server struct {
 	// Health answers GET /problems (fern doctor): what is wrong now that
 	// would otherwise be a line in the daemon's log. May be nil: no route.
 	Health Checker
+	// Limits answers PUT /envs/{id}/limit (fern limit), which sets an
+	// environment's disk limit. It is the kernel's to keep, one ioctl, so
+	// it doesn't go through the environment's actor. May be nil: no route.
+	Limits Limiter
 	// GitHubToken serves POST /github/token (github.Handler): T3's git and gh
 	// get their tokens on the API's socket, which boxes can't reach. May be
 	// nil: no route.
@@ -137,6 +146,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.Health != nil {
 		mux.HandleFunc("GET /problems", s.handle(s.problems))
+	}
+	if s.Limits != nil {
+		mux.HandleFunc("PUT /envs/{id}/limit", s.handle(s.limit))
 	}
 	if s.GitHubToken != nil {
 		mux.Handle("POST /github/token", s.GitHubToken)
@@ -363,6 +375,15 @@ func (s *Server) gc(r *http.Request) (any, error) {
 	return freed, ofNode(err)
 }
 
+// limit sets an environment's disk limit.
+func (s *Server) limit(r *http.Request) (any, error) {
+	var req api.LimitRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, s.Limits.SetLimit(r.Context(), r.PathValue("id"), req.Bytes)
+}
+
 // problems says what is wrong on the node now.
 func (s *Server) problems(r *http.Request) (any, error) {
 	problems, err := s.Health.Problems(r.Context())
@@ -431,7 +452,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath), errors.Is(err, errBadBody):
 		status = http.StatusBadRequest
-	case errors.Is(err, actor.ErrTooManyForks), errors.Is(err, backup.ErrBusy):
+	case errors.Is(err, actor.ErrTooManyForks), errors.Is(err, backup.ErrBusy), errors.Is(err, store.ErrNoLimit):
 		status = http.StatusConflict
 	case errors.Is(err, actor.ErrStopped), errors.Is(err, actor.ErrCrashing):
 		status = http.StatusServiceUnavailable

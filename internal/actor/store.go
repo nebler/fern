@@ -73,6 +73,8 @@ type BuildFailures interface {
 // Disk tells how full the pool is, for a thread's notices.
 type Disk interface {
 	Space() (store.Space, error)
+	// Quota is env's disk limit and use, if limits are on (store.Quota).
+	Quota(ctx context.Context, env store.Env) (store.Quota, error)
 }
 
 // SnapshotFailures keeps each environment's last failed snapshot with it,

@@ -134,3 +134,10 @@ func (t tracedStore) BuildFailure(ctx context.Context, id string) (store.BuildFa
 }
 
 func (t tracedStore) Space() (store.Space, error) { return t.st.Space() }
+
+// An environment's quota is two sysfs files, read at its wake only when
+// it has a quota group.
+
+func (t tracedStore) Quota(ctx context.Context, env store.Env) (store.Quota, error) {
+	return t.st.Quota(ctx, env)
+}

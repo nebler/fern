@@ -66,7 +66,14 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err := s.clearLeftovers(ctx, id); err != nil {
 		return Env{}, err
 	}
-	if err := s.writeMarker(id, ""); err != nil {
+	// With limits on, the marker names the environment's quota group from
+	// before the group exists, so whatever a crash leaves is garbage.
+	var group uint64
+	if s.limit > 0 {
+		if group, err = s.newGroup(ctx, id, true); err != nil {
+			return Env{}, err
+		}
+	} else if err := s.writeMarker(id, "", 0); err != nil {
 		return Env{}, err
 	}
 	if err := s.step("create: marked"); err != nil {
@@ -89,9 +96,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 		}
 	}
 	if opts.Fork != nil {
-		err = s.forkWorkspace(ctx, *opts.Fork, workspace)
+		err = s.forkWorkspace(ctx, id, *opts.Fork, workspace, group)
 	} else {
-		err = s.makeWorkspace(ctx, id, workspace, from)
+		err = s.makeWorkspace(ctx, id, workspace, from, group)
 	}
 	if err != nil {
 		return Env{}, err
@@ -114,7 +121,7 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err != nil {
 		return Env{}, err
 	}
-	rec := record{Workspace: workspace, Git: git, Created: now()}
+	rec := record{Workspace: workspace, Git: git, Created: now(), Group: group}
 	if err := s.writeRecord(id, rec); err != nil {
 		return Env{}, err
 	}
@@ -133,8 +140,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 // flushes the source's writes first, as a snapshot does, so a database in
 // it is as a crash would leave it, which it recovers from as from a revert.
 // Its git file still names the source's worktree, whose git folder the box
-// gets read-only.
-func (s *Store) forkWorkspace(ctx context.Context, src SnapshotRef, workspace string) error {
+// gets read-only. It joins quota group group, the fork's: it starts holding
+// the source's blocks, which stay charged to the source.
+func (s *Store) forkWorkspace(ctx context.Context, id string, src SnapshotRef, workspace string, group uint64) error {
 	var from string
 	if src.Snapshot == "" {
 		env, err := s.Get(ctx, src.Env)
@@ -149,6 +157,9 @@ func (s *Store) forkWorkspace(ctx context.Context, src SnapshotRef, workspace st
 		}
 	}
 	if err := snapshotSubvolume(ctx, from, workspace, false); err != nil {
+		return err
+	}
+	if err := s.join(ctx, id, workspace, group); err != nil {
 		return err
 	}
 	return os.Chown(workspace, BoxUID, BoxGID)
@@ -175,13 +186,13 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 		return Env{}, err
 	}
 	if git != env.Git {
-		rec := record{Workspace: env.Workspace, Git: git, Created: env.Created}
+		rec := record{Workspace: env.Workspace, Git: git, Created: env.Created, Group: env.Group}
 		if err := s.writeRecord(env.ID, rec); err != nil {
 			return Env{}, err
 		}
 		env.Git = git
 	}
-	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, ""); err != nil {
+	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, "", env.Group); err != nil {
 		return Env{}, err
 	}
 	return env, nil
@@ -232,8 +243,8 @@ func (s *Store) release(workspace string) {
 
 // makeWorkspace makes workspace a subvolume owned by the box user, keeping
 // what is already there; a plain directory there is adopted onto snapshot
-// from, if it isn't empty.
-func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) error {
+// from, if it isn't empty. The subvolume joins quota group group.
+func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string, group uint64) error {
 	fi, err := os.Lstat(workspace)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -251,6 +262,9 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 		if err := createSubvolume(ctx, workspace); err != nil {
 			return err
 		}
+		if err := s.join(ctx, id, workspace, group); err != nil {
+			return err
+		}
 		return os.Chown(workspace, BoxUID, BoxGID)
 	case err != nil:
 		return err
@@ -258,10 +272,10 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 		return fmt.Errorf("%s is not a directory: %w", workspace, ErrInvalidPath)
 	case isSubvolume(fi):
 		// A create that stopped after making it, or one that had already
-		// adopted it.
-		return nil
+		// adopted it; it may have stopped before the join.
+		return s.join(ctx, id, workspace, group)
 	default:
-		return s.adopt(ctx, id, workspace, from)
+		return s.adopt(ctx, id, workspace, from, group)
 	}
 }
 
@@ -270,8 +284,9 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 // swapped in with one atomic rename. With from, the subvolume starts as a
 // writable copy of that golden snapshot, so it holds its build output under
 // path's files. Writes to path during the copy are lost, so adopt before an
-// agent starts working in it.
-func (s *Store) adopt(ctx context.Context, id, path, from string) error {
+// agent starts working in it. The subvolume joins quota group group; the
+// checkout's blocks, reflinked, stay charged to whoever wrote them (T3).
+func (s *Store) adopt(ctx context.Context, id, path, from string, group uint64) error {
 	next := s.adoptPath(id)
 	// What an adopt that stopped before its swap left is garbage; after it,
 	// the old plain directory.
@@ -286,6 +301,9 @@ func (s *Store) adopt(ctx context.Context, id, path, from string) error {
 			return err
 		}
 	} else if err := createSubvolume(ctx, next); err != nil {
+		return err
+	}
+	if err := s.join(ctx, id, next, group); err != nil {
 		return err
 	}
 	if from != "" {

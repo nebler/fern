@@ -23,39 +23,60 @@ type crashCase struct {
 	// check checks the pool after the stopped change and a Reconcile, as
 	// after a restart. It also checks the change can be made again.
 	check func(t *testing.T, st *store.Store, dir string)
+	// limited: the change has steps only with disk limits on.
+	limited bool
 }
+
+// crashModes are the two ways a pool runs: without disk limits, and with
+// them, where every change also makes, joins or destroys quota groups.
+var crashModes = []struct {
+	name  string
+	limit uint64
+}{{"off", 0}, {"limits", testLimit}}
 
 // TestCrash stops every change with more than one step at each of its
 // steps, then runs Reconcile, as a restarted daemon does: the environment is
 // as before the change or as after it, nothing the change was to keep is
 // lost, and the change can be made again.
 func TestCrash(t *testing.T) {
-	for _, tc := range crashCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			steps := crashSteps(t, tc)
-			if len(steps) == 0 {
-				t.Fatal("the change has no steps to stop at")
+	for _, mode := range crashModes {
+		for _, tc := range crashCases() {
+			if tc.limited && mode.limit == 0 {
+				continue
 			}
-			for _, step := range steps {
-				t.Run(strings.ReplaceAll(step, " ", "_"), func(t *testing.T) {
-					st, dir := openPool(t)
-					tc.setup(t, st, dir)
-					store.SetFailAt(st, func(s string) error {
-						if s == step {
-							return errCrash
-						}
-						return nil
-					})
-					if err := tc.change(t, st, dir); !errors.Is(err, errCrash) {
-						t.Fatalf("change stopped at %q: error = %v, want %v", step, err, errCrash)
-					}
-					store.SetFailAt(st, nil)
-					lost, err := st.Reconcile(t.Context())
-					if err != nil || len(lost) != 0 {
-						t.Fatalf("Reconcile() = %v, %v, want nothing lost", lost, err)
-					}
-					tc.check(t, st, dir)
-				})
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) { crash(t, tc, mode.limit) })
+		}
+	}
+}
+
+// crash is TestCrash of one change, with disk limits of limit bytes.
+func crash(t *testing.T, tc crashCase, limit uint64) {
+	t.Helper()
+	steps := crashSteps(t, tc, limit)
+	if len(steps) == 0 {
+		t.Fatal("the change has no steps to stop at")
+	}
+	for _, step := range steps {
+		t.Run(strings.ReplaceAll(step, " ", "_"), func(t *testing.T) {
+			st, dir := openPoolWith(t, limit)
+			tc.setup(t, st, dir)
+			store.SetFailAt(st, func(s string) error {
+				if s == step {
+					return errCrash
+				}
+				return nil
+			})
+			if err := tc.change(t, st, dir); !errors.Is(err, errCrash) {
+				t.Fatalf("change stopped at %q: error = %v, want %v", step, err, errCrash)
+			}
+			store.SetFailAt(st, nil)
+			lost, err := st.Reconcile(t.Context())
+			if err != nil || len(lost) != 0 {
+				t.Fatalf("Reconcile() = %v, %v, want nothing lost", lost, err)
+			}
+			tc.check(t, st, dir)
+			if limit > 0 {
+				checkGroups(t, st)
 			}
 		})
 	}
@@ -66,39 +87,52 @@ func TestCrash(t *testing.T) {
 // between: a request that failed half-way and is sent again. Every step is
 // safe to repeat, so it succeeds.
 func TestRepeat(t *testing.T) {
-	for _, tc := range crashCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, step := range crashSteps(t, tc) {
-				t.Run(strings.ReplaceAll(step, " ", "_"), func(t *testing.T) {
-					st, dir := openPool(t)
-					tc.setup(t, st, dir)
-					store.SetFailAt(st, func(s string) error {
-						if s == step {
-							return errCrash
-						}
-						return nil
-					})
-					if err := tc.change(t, st, dir); !errors.Is(err, errCrash) {
-						t.Fatalf("change stopped at %q: error = %v, want %v", step, err, errCrash)
-					}
-					store.SetFailAt(st, nil)
-					if err := tc.change(t, st, dir); err != nil {
-						t.Fatalf("the change made again after it stopped at %q: %v", step, err)
-					}
-					// And it left nothing a restart would trip over.
-					if lost, err := st.Reconcile(t.Context()); err != nil || len(lost) != 0 {
-						t.Errorf("Reconcile() after it = %v, %v, want nothing lost", lost, err)
-					}
-				})
+	for _, mode := range crashModes {
+		for _, tc := range crashCases() {
+			if tc.limited && mode.limit == 0 {
+				continue
+			}
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) { repeat(t, tc, mode.limit) })
+		}
+	}
+}
+
+// repeat is TestRepeat of one change, with disk limits of limit bytes.
+func repeat(t *testing.T, tc crashCase, limit uint64) {
+	t.Helper()
+	for _, step := range crashSteps(t, tc, limit) {
+		t.Run(strings.ReplaceAll(step, " ", "_"), func(t *testing.T) {
+			st, dir := openPoolWith(t, limit)
+			tc.setup(t, st, dir)
+			store.SetFailAt(st, func(s string) error {
+				if s == step {
+					return errCrash
+				}
+				return nil
+			})
+			if err := tc.change(t, st, dir); !errors.Is(err, errCrash) {
+				t.Fatalf("change stopped at %q: error = %v, want %v", step, err, errCrash)
+			}
+			store.SetFailAt(st, nil)
+			if err := tc.change(t, st, dir); err != nil {
+				t.Fatalf("the change made again after it stopped at %q: %v", step, err)
+			}
+			// And it left nothing a restart would trip over.
+			if lost, err := st.Reconcile(t.Context()); err != nil || len(lost) != 0 {
+				t.Errorf("Reconcile() after it = %v, %v, want nothing lost", lost, err)
+			}
+			if limit > 0 {
+				checkGroups(t, st)
 			}
 		})
 	}
 }
 
-// crashSteps returns the steps tc's change takes, in order.
-func crashSteps(t *testing.T, tc crashCase) []string {
+// crashSteps returns the steps tc's change takes, in order, with disk
+// limits of limit bytes.
+func crashSteps(t *testing.T, tc crashCase, limit uint64) []string {
 	t.Helper()
-	st, dir := openPool(t)
+	st, dir := openPoolWith(t, limit)
 	tc.setup(t, st, dir)
 	var steps []string
 	store.SetFailAt(st, func(s string) error { steps = append(steps, s); return nil })
@@ -369,6 +403,31 @@ func crashCases() []crashCase {
 					t.Fatalf("Delete(demo) again: %v", err)
 				}
 				gone(t, filepath.Join(dir, "envs", "demo"))
+			},
+		},
+		{
+			// An environment made while limits were off is brought in at the
+			// first start with them: its group made, recorded, joined.
+			name:    "bring in",
+			limited: true,
+			setup: func(t *testing.T, st *store.Store, dir string) {
+				store.SetEnvLimit(st, 0)
+				create(t, st, "demo", store.CreateOptions{})
+				writeFile(t, filepath.Join(live(dir), "f"), "v1")
+				snapshot(t, st, "demo", "s1")
+				store.SetEnvLimit(st, testLimit)
+			},
+			change: func(t *testing.T, st *store.Store, _ string) error {
+				_, err := st.Reconcile(t.Context())
+				return err
+			},
+			check: func(t *testing.T, st *store.Store, dir string) {
+				if got := readFile(t, filepath.Join(live(dir), "f")); got != "v1" {
+					t.Errorf("f = %q after the crash, want %q", got, "v1")
+				}
+				if got := snapIDs(t, st); len(got) != 1 || got[0] != "s1" {
+					t.Errorf("Snapshots(demo) = %q, want [s1]", got)
+				}
 			},
 		},
 		{

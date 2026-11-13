@@ -81,6 +81,7 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 			Least: 5 << 29,
 			Parts: []api.DiskPart{
 				{Kind: "environment", Name: "demo", Total: 10 << 30, Exclusive: 3 << 30, Note: "worktrees/app/demo"},
+				{Kind: "environment", Name: "full", Total: 12 << 30, Exclusive: 2 << 30, Note: "worktrees/app/full", Written: 10 << 30, Limit: 10 << 30},
 				{Kind: "podman", Name: "Podman's images", Total: 31 << 30, Exclusive: 31 << 30, Unused: true, Note: "what image builds left"},
 			},
 		})
@@ -188,6 +189,13 @@ func TestRun(t *testing.T) {
 			stdout: "podman Podman's images  31.0 GiB  31.0 GiB  fern gc removes it: what image builds left",
 		},
 		{name: "df, the sum", args: []string{"df"}, requests: []string{"GET /disk"}, stdout: "fern gc would free at least 31.0 GiB."},
+		{
+			name: "df, a thread at its limit", args: []string{"df"}, requests: []string{"GET /disk"},
+			stdout: "wrote 10.0 GiB of its limit of 10.0 GiB, AT THE LIMIT: writes in its box fail; worktrees/app/full",
+		},
+		{name: "limit", args: []string{"limit", "demo", "20G"}, requests: []string{`PUT /envs/demo/limit {"bytes":21474836480}`}, stdout: "demo's disk limit is 20.0 GiB now"},
+		{name: "limit none", args: []string{"limit", "demo", "none"}, requests: []string{`PUT /envs/demo/limit {"bytes":0}`}, stdout: "demo has no disk limit now"},
+		{name: "limit, not a size", args: []string{"limit", "demo", "big"}, code: 2, stderr: `size "big": want a size such as 20G, or none`},
 		{
 			name: "gc", args: []string{"gc"}, code: 1, requests: []string{"POST /gc"},
 			stdout: "removed 95 of Podman's images, which no container used\nthe server's disk has 32.0 GiB free of 75.0 GiB\nthe pool has 27.0 GiB free of 50.0 GiB",

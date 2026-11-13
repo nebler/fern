@@ -127,6 +127,13 @@ func (c *Client) GC(ctx context.Context) (Freed, error) {
 	return f, c.do(ctx, http.MethodPost, "/gc", nil, "", &f)
 }
 
+// SetLimit makes environment id's disk limit bytes, 0 for none. An *Error
+// with status 409 means it has no quota group: the daemon runs without
+// --env-disk-limit, or hasn't brought it in.
+func (c *Client) SetLimit(ctx context.Context, id string, bytes uint64) error {
+	return c.doJSON(ctx, http.MethodPut, envPath(id)+"/limit", LimitRequest{Bytes: bytes})
+}
+
 // Problems returns what is wrong on the node now that the daemon knows of.
 func (c *Client) Problems(ctx context.Context) ([]Problem, error) {
 	var p []Problem

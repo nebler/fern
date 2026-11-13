@@ -63,6 +63,9 @@ func (s *Store) BuildSource(ctx context.Context, id string, src SnapshotRef) err
 	if err := snapshotSubvolume(ctx, from, env.Workspace, false); err != nil {
 		return err
 	}
+	if err := s.join(ctx, id, env.Workspace, env.Group); err != nil {
+		return err
+	}
 	return s.step("build source: made")
 }
 

@@ -25,8 +25,9 @@ const gib = 1 << 30
 
 // fakePool is a pool with the room and environments a test gives it.
 type fakePool struct {
-	space atomic.Pointer[store.Space]
-	envs  []store.Env
+	space   atomic.Pointer[store.Space]
+	envs    []store.Env
+	cleared int // what ClearGroups destroys
 }
 
 func (p *fakePool) Space() (store.Space, error) { return *p.space.Load(), nil }
@@ -39,6 +40,12 @@ func (p *fakePool) Usage(_ context.Context, id string) (store.Usage, error) {
 	}
 	return store.Usage{Total: 3 * gib, Exclusive: gib}, nil
 }
+
+func (p *fakePool) Quota(context.Context, store.Env) (store.Quota, error) {
+	return store.Quota{Group: 3, Used: 2 * gib, Limit: 10 * gib}, nil
+}
+
+func (p *fakePool) ClearGroups(context.Context) (int, error) { return p.cleared, nil }
 
 // fakeEnvs counts the times retention was applied.
 type fakeEnvs struct{ pruned atomic.Int32 }
@@ -120,7 +127,7 @@ func TestUsage(t *testing.T) {
 	pool := &fakePool{envs: []store.Env{
 		{ID: "golden-app-1a2b3c4d", Workspace: "/var/lib/fern/envs/golden-app-1a2b3c4d/live"},
 		{ID: "gone"},
-		{ID: "t3-8f2c", Workspace: filepath.Join(cfg.Root, "worktrees/app/t3-8f2c")},
+		{ID: "t3-8f2c", Workspace: filepath.Join(cfg.Root, "worktrees/app/t3-8f2c"), Group: 3},
 	}}
 	pool.space.Store(roomy())
 	got, err := disk.New(pool, &fakeEnvs{}, cfg, slog.New(slog.DiscardHandler)).Usage(t.Context())
@@ -133,7 +140,7 @@ func TestUsage(t *testing.T) {
 		Least: 5 * gib / 2,
 		Parts: []api.DiskPart{
 			{Kind: "golden", Name: "golden-app-1a2b3c4d", Total: 3 * gib, Exclusive: gib},
-			{Kind: "environment", Name: "t3-8f2c", Total: 3 * gib, Exclusive: gib, Note: "worktrees/app/t3-8f2c"},
+			{Kind: "environment", Name: "t3-8f2c", Total: 3 * gib, Exclusive: gib, Note: "worktrees/app/t3-8f2c", Written: 2 * gib, Limit: 10 * gib},
 			{Kind: "image", Name: "fern-box:dev", Total: 2 * gib, Exclusive: 2 * gib},
 			{Kind: "image", Name: inUse[:12], Total: 2 * gib, Exclusive: 2 * gib, Note: "a tag pointed to it before; a box still runs from it"},
 			{Kind: "image", Name: unused[:12], Total: 2 * gib, Exclusive: 2 * gib, Unused: true, Note: "a tag pointed to it before; nothing runs from it"},
@@ -155,6 +162,7 @@ func TestFree(t *testing.T) {
 	tests := []struct {
 		name        string
 		podman      error
+		cleared     int // quota groups of deleted environments destroyed
 		wantRemoved []string
 		wantFailed  []string
 	}{
@@ -163,6 +171,15 @@ func TestFree(t *testing.T) {
 			wantRemoved: []string{
 				"image cccccccccccc, which a tag pointed to before",
 				"2 of Podman's images, which no container used",
+			},
+		},
+		{
+			name:    "a node with deleted environments' quota groups",
+			cleared: 2,
+			wantRemoved: []string{
+				"image cccccccccccc, which a tag pointed to before",
+				"2 of Podman's images, which no container used",
+				"2 quota groups of deleted environments",
 			},
 		},
 		{
@@ -180,7 +197,7 @@ func TestFree(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, calls := node(t, tt.podman)
-			pool, envs := &fakePool{}, &fakeEnvs{}
+			pool, envs := &fakePool{cleared: tt.cleared}, &fakeEnvs{}
 			pool.space.Store(roomy())
 			got, err := disk.New(pool, envs, cfg, slog.New(slog.DiscardHandler)).Free(t.Context())
 			if err != nil {

@@ -9,6 +9,10 @@
 #                snapshot) and rm (nothing left); a seeded create; a real clone
 #   space        fern df names the pool, the disk under it and what uses
 #                them; fern gc removes an image nothing runs from
+#   quota        --env-disk-limit: a write past a thread's limit fails in its
+#                box, fern doctor, fern df and its Claude say so, and fern
+#                limit raising it lets the write through (restarts the
+#                daemon; skipped on a VPS whose pool has no quotas on)
 #   stream       fern exec keeps a stream intact: bytes, stderr, exit codes,
 #                stdin, signals, cancellation
 #   idle_exec    a command that prints nothing for 3 minutes still answers
@@ -103,11 +107,11 @@ done
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk space stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode commit devserver turn hardware stability notify)
+  all=(slice box disk space quota stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next cloudflare backup github claude opencode commit devserver turn hardware stability notify)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon upgrade sizes node many scale sleeping turn hardware stability github devserver backup notify "
+  alone=" idle daemon upgrade quota sizes node many scale sleeping turn hardware stability github devserver backup notify "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

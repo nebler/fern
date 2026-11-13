@@ -17,7 +17,8 @@ const RecordFile = "env.json"
 const recordVersion = 1
 
 // record is what an environment's directory can't say by itself: where its
-// workspace is, which git folder its box gets and when it was made. Its ID
+// workspace is, which git folder its box gets, when it was made and its
+// quota group. Its ID
 // is the directory's name, so the two can't disagree. It holds no secret: a
 // box's token is made when the box starts and kept with its bundle, off the
 // pool (runsc.Driver.Token). A record written before 2026-11-12 also has a
@@ -27,6 +28,9 @@ type record struct {
 	Workspace string    `json:"workspace"`
 	Git       string    `json:"git"`
 	Created   time.Time `json:"created"`
+	// Group is the environment's quota group, 1/Group (quota.go); absent if
+	// it has none. A Fern before 2026-11-13 ignores it.
+	Group uint64 `json:"group,omitempty"`
 }
 
 // errBadRecord means an environment's record is there and can't be used:

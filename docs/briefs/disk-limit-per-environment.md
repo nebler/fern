@@ -1,5 +1,55 @@
 # A disk limit per environment
 
+**Status: built 2026-11-13** (`--env-disk-limit`, `fern limit`; architecture
+§9), off by default; of the four measurements at the end, the kernel's is
+made (on the server's 7.0.0-43, with a fix, below); the other three are still
+to make there before the flag is set. `lab/check.sh quota` checks it end to
+end in a box. Where the build differs from the design
+below:
+
+- **The enable waits for btrfs's cleaner first** (`btrfs subvolume sync`): on
+  the lab's kernel (6.10) quotas turned on while a deleted subvolume was still
+  being dropped made the next commit fail to count a block it freed
+  ("do_free_extent_accounting: errno=-2"), and btrfs forced the pool
+  read-only. The daemon enables before Reconcile, so nothing deletes in
+  between. Whether 7.0 does the same is not known; the wait costs nothing
+  after the first start.
+- **A pool that can't have limits doesn't stop the daemon:** it runs without
+  them, logs why, and `fern doctor` lists `disk limit` with the reason (a
+  kernel before 6.7, classic quotas on).
+- **A delete's destroy is refused nearly always, on any kernel:** btrfs's
+  cleaner drops the deleted subvolumes after the delete returns, and the group
+  keeps them as members until then. Reconcile and `fern gc` destroy the groups
+  nothing names, as designed.
+- **On the server's kernel too, a deleted environment's group stays, until
+  its stale members go** (Linux 7.0.0-43, 2026-11-13,
+  `TestClearGroupsAfterDelete`): after the delete and `btrfs subvolume sync`,
+  the group still had the workspace's own group `0/256` as a member,
+  `<stale>`, 0 bytes. The workspace is deleted before the snapshots that
+  hold its blocks; the kernel keeps its group while they do, and doesn't
+  remove it once they are gone. So the fix in 6.17 is not enough by itself:
+  `ClearGroups` first destroys each level-0 group that holds nothing
+  (`referenced` 0 in sysfs) and whose subvolume has no root item left
+  (`BTRFS_IOC_TREE_SEARCH`; `INO_LOOKUP` answers yes for any tree), as
+  `btrfs qgroup clear-stale` does, which takes it out of its environment's
+  group, then the environment's group. With that the test passes there.
+- **The next group's number** is read from sysfs once per daemon, then kept in
+  memory; one that exists (EEXIST) is skipped.
+- **Bringing in** writes no marker: the group is made, recorded, then joined; a
+  crash before the record leaves a group without members, which Reconcile
+  destroys. With quotas on from before (the flag turned off and on again),
+  what a subvolume held when it joined does count.
+- **Without the flag** a record's group still has its subvolumes join it, so
+  a limit set before keeps counting; `fern limit <env> none` removes it.
+- **The limit is `max_referenced`**, as `btrfs qgroup limit` sets it; under
+  simple quotas referenced and exclusive are the same.
+- **"At the limit"** is within 1% of it, and at least 1 MiB: a write reserves
+  before it counts, and failed at 98% of a 16 MiB limit in the lab.
+- **The notice** reaches Claude at its box's next start, like the others; a
+  thread that fills up mid-turn learns it from the failed write first.
+- **`fern df`** puts "wrote X of its limit of Y" in the note column, not a
+  new one.
+
 **Recommendation: build it with btrfs simple quotas, one group per
 environment, each subvolume put into its group right after it is made; turn
 it on only after the four measurements at the end pass on the server.** The
@@ -92,6 +142,33 @@ Read on the server on 2026-11-13, after this brief was written: Ubuntu
 26.04.1, kernel 7.0.0-38, btrfs-progs 6.17.1 with `--simple`. The kernel
 is past the upstream fix (6.17), so the group-destroy fault above should not
 occur there; item 1 below still checks it on a loop image.
+
+**Done on the server, 2026-11-13, kernel 7.0.0-43** (the store's tests in
+a privileged container there, on a 2 GB loop image, `lab/test-store.sh`):
+
+- Item 1: the store's whole suite passes, quota tests included. A group
+  whose members were deleted is destroyed once btrfs's cleaner is done, but
+  only after its stale, empty members are (above); the compressed-stats
+  fault does not occur.
+- In place of item 2, a small measurement: `BenchmarkStore` and
+  `BenchmarkStoreLimited` (simple quotas on, every subvolume in a group with
+  a 100 GiB limit), `-bench
+  'BenchmarkStore/(CreateEmpty|SnapshotClean|Restore|DeleteSnapshot)$'
+  -benchtime 20x -count 3`, with the race detector `lab/test-store.sh`
+  builds with, off's runs first; the median of the three runs, ms per
+  operation:
+
+  | | off | on |
+  |---|---:|---:|
+  | CreateEmpty | 2.14 | 2.37 |
+  | SnapshotClean | 2.36 | 2.15 |
+  | DeleteSnapshot | 0.40 | 0.31 |
+  | Restore | 9.59 | 7.96 |
+
+  Within the runs' own spread (off's CreateEmpty 2.13 to 2.49, Restore 9.4
+  to 10.8): no cost shows at this size. It is not item 2, which measures a
+  wake, a snapshot and a restore of a box with `lab/ab.sh` on the pool's
+  setup; items 2 to 4 are still to do.
 
 1. **The kernel:** `uname -r`, and whether its quota destroy works after a
    member is deleted (`lab/spike/squota/run.sh groups` there, by hand, on a

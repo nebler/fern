@@ -70,6 +70,11 @@ type DiskPart struct {
 	Exclusive uint64 `json:"exclusive"`
 	Unused    bool   `json:"unused,omitempty"` // nothing needs it: fern gc removes it
 	Note      string `json:"note,omitempty"`
+	// Written is what an environment with a quota group wrote and still
+	// holds, snapshots included, which counts against its disk limit,
+	// Limit (0: none).
+	Written uint64 `json:"written,omitempty"`
+	Limit   uint64 `json:"limit,omitempty"`
 }
 
 // Freed answers POST /gc (fern gc): what was removed, what couldn't be, and
@@ -114,6 +119,11 @@ type ForkRequest struct {
 // ForkResponse answers POST /envs/{id}/fork.
 type ForkResponse struct {
 	Forks []string `json:"forks"` // the new environments' IDs
+}
+
+// LimitRequest is the body of PUT /envs/{id}/limit (fern limit).
+type LimitRequest struct {
+	Bytes uint64 `json:"bytes"` // 0: none
 }
 
 // RestoreRequest is the body of POST /envs/{id}/restore.

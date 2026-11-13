@@ -10,7 +10,7 @@ For the owner of one server installed with `install.sh`. Commands marked *server
 | `bash install.sh doctor root@HOST` | Mac | the same, and whether your Mac's tunnel reaches T3 |
 | `fern top` | server | the boxes that are up, their memory and CPU, what holds them awake; the pool's room; the same problems |
 | `fern logs <env>` | server | what the daemon said of one environment, and what its boxes printed (also of the last run of a box that stopped). `fern ls` lists the environments; a thread's is `t3-…` |
-| `fern df` | server | what uses the pool and the disk under it, and what `fern gc` would free |
+| `fern df` | server | what uses the pool and the disk under it, what `fern gc` would free, and with disk limits each thread's use of its limit |
 | `journalctl -u fern-daemon -n 100`, `journalctl -u fern-t3 -n 100` | server | the daemon's and T3's own logs |
 
 With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to your phone, and so does a daemon or T3 that systemd gives up on; with `FERN_HEARTBEAT_URL`, a watcher tells you when the server goes quiet, or T3 stops answering.
@@ -22,6 +22,12 @@ With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to you
 2. `fern gc` — frees old images, what image builds left, snapshots past their retention.
 3. Delete threads that are done, in T3.
 4. The pool: `fern pool grow +10G` (with boxes running), if the disk under it has the room (`fern df`). The server's disk: `journalctl --vacuum-size=200M`; a larger disk from your provider, then `fern pool grow`.
+
+**A thread is at its disk limit** (`disk limit`: writes in its box fail with "Disk quota exceeded"; listed from 90%)
+1. `fern df` — what it wrote and still holds, against its limit. Other threads are not affected.
+2. Raise it: `fern limit <env> 20G` (server). It takes effect at once; `fern limit <env> none` removes it.
+3. Or free room: deleting files in the thread frees only what no snapshot holds, and a thread keeps its last 50 turns' snapshots, so what earlier turns wrote stays counted. `fern snapshots <env>`, then `fern rmsnap <env> <snap>…` for old turns (a revert to them is then refused).
+4. The thread's Claude is told at its box's next start, and asks you to do one of the two.
 
 **The pool's records are full** (`pool records`: btrfs has no room left for its own records; writes fail with free space showing)
 1. `fern pool grow +10G`. The problem stays listed for up to ten minutes after, as the daemon reads btrfs that often.
@@ -73,6 +79,7 @@ With `FERN_NOTIFY_URL` set (below), the problems `fern doctor` lists come to you
 ## Routine
 
 - **Update:** run the install again from your Mac: `curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash -s -- root@HOST` (`FERN_VERSION=<tag>` for a given release). It waits up to ten minutes for running turns, and keeps the release it replaces for a rollback.
+- **Disk limits per thread:** add `--env-disk-limit=20G` to `FERN_DAEMON_ARGS` in `/etc/fern/daemon.env` (server), then `systemctl restart fern-daemon` when no turn runs. At that start the daemon turns btrfs's simple quotas on (Linux 6.7 or later; `uname -r`) and gives every thread a limit, golden builders none; it counts what is written from then on, not what threads hold already. `fern doctor` says if the pool can't have them (`disk limit`). `fern limit <env> <size>` changes one thread's. Taking the flag out gives new threads no limit; existing ones keep theirs until `fern limit <env> none`.
 - **Grow the pool:** `fern pool grow +10G` or `fern pool grow 70G` (server), with boxes running; safe to run again.
 - **Backups:** the install with `FERN_BACKUP_ENDPOINT`, `_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY` ([README](../README.md#try-it)); `fern backup` makes one now (server). Keep a copy of `~/.config/fern/backup-key`.
 - **Notifications:** the install with `FERN_NOTIFY_URL=https://ntfy.sh/<a topic nobody would guess>` (subscribe to it in the ntfy app), and `FERN_HEARTBEAT_URL=<a check's ping URL>` from healthchecks.io or another dead man's switch, with a period of 5 minutes and some grace. `off` turns either off. `curl -d test https://ntfy.sh/<topic>` checks your phone's end.

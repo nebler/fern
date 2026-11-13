@@ -70,6 +70,12 @@ func (n *node) Space() (store.Space, error) {
 	return n.store.Space()
 }
 
+func (n *node) Quota(ctx context.Context, env store.Env) (store.Quota, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.store.Quota(ctx, env)
+}
+
 func (n *node) Crashing(ctx context.Context) ([]actor.Crashing, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

@@ -85,6 +85,8 @@ func (f *fakeStore) BuildFailure(context.Context, string) (store.BuildFailure, b
 
 func (f *fakeStore) Space() (store.Space, error) { return store.Space{}, nil }
 
+func (f *fakeStore) Quota(context.Context, store.Env) (store.Quota, error) { return store.Quota{}, nil }
+
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -769,6 +771,8 @@ func (f fakeNode) Problems(context.Context) ([]api.Problem, error) {
 	return []api.Problem{}, f.err
 }
 
+func (f fakeNode) SetLimit(context.Context, string, uint64) error { return f.err }
+
 // The routes about the node answer as they did when the daemon's main served
 // them, which the CLI and the lab's checks read: a failure is a 500 with the
 // error, whatever it wraps, but for a backup that is running or not set up.
@@ -778,6 +782,7 @@ func TestNodeRoutes(t *testing.T) {
 		name       string
 		method     string
 		path       string
+		body       string
 		err        error
 		noBackups  bool
 		wantStatus int
@@ -812,6 +817,15 @@ func TestNodeRoutes(t *testing.T) {
 			name: "gc fails", method: http.MethodPost, path: "/gc", err: errors.New("statfs: input/output error"),
 			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"statfs: input/output error"}`,
 		},
+		{name: "limit", method: http.MethodPut, path: "/envs/demo/limit", body: `{"bytes":21474836480}`, wantStatus: http.StatusNoContent},
+		{
+			name: "limit, an environment without a group", method: http.MethodPut, path: "/envs/demo/limit", body: `{"bytes":1}`,
+			err: fmt.Errorf("environment demo: %w", store.ErrNoLimit), wantStatus: http.StatusConflict, wantBody: `{"error":"environment demo: no disk limit"}`,
+		},
+		{
+			name: "limit, not a size", method: http.MethodPut, path: "/envs/demo/limit", body: `{"bytes":"20G"}`,
+			wantStatus: http.StatusBadRequest,
+		},
 		{name: "problems, none", method: http.MethodGet, path: "/problems", wantStatus: http.StatusOK, wantBody: `[]`},
 		{
 			name: "problems fail", method: http.MethodGet, path: "/problems", err: actor.ErrStopped,
@@ -826,16 +840,16 @@ func TestNodeRoutes(t *testing.T) {
 			envs := actor.New(newFakeStore(), drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
 			srv := server.New(newFakeStore(), drv, envs, false, notrace, log)
 			node := fakeNode{err: tt.err}
-			srv.Disk, srv.Health, srv.BackupConfig = node, node, "/etc/fern/backup.env"
+			srv.Disk, srv.Health, srv.Limits, srv.BackupConfig = node, node, node, "/etc/fern/backup.env"
 			if !tt.noBackups {
 				srv.Backups = node
 			}
 			rec := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, nil))
+			srv.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, strings.NewReader(tt.body)))
 			if rec.Code != tt.wantStatus {
 				t.Errorf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, tt.wantStatus)
 			}
-			if got := strings.TrimSpace(rec.Body.String()); got != tt.wantBody {
+			if got := strings.TrimSpace(rec.Body.String()); tt.wantBody != "" && got != tt.wantBody || tt.wantStatus == http.StatusNoContent && got != "" {
 				t.Errorf("%s %s body = %s, want %s", tt.method, tt.path, got, tt.wantBody)
 			}
 			if got := rec.Header().Get("Content-Type"); tt.wantBody != "" && got != "application/json" {

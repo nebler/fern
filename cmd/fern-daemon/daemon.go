@@ -172,6 +172,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	notifyURL := flags.String("notify-url", "", "POST a short text to this URL when something goes wrong on the node, and when all is well again, such as https://ntfy.sh/TOPIC (\"\": don't)")
 	heartbeatURL := flags.String("heartbeat-url", "", "GET this URL every --heartbeat-every while the daemon runs and its store and T3 (--t3) answer, for a watcher that tells when the GETs stop, such as https://hc-ping.com/UUID (\"\": don't)")
 	heartbeatEvery := flags.Duration("heartbeat-every", 5*time.Minute, "how often to GET --heartbeat-url")
+	envDiskLimit := flags.String("env-disk-limit", "", "give each thread a disk limit of this size, such as 20G, with btrfs simple quotas: what it writes and its snapshots hold counts (\"\": no limits)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -195,6 +196,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 			return errors.New("--heartbeat-every: want more than 0")
 		}
 	}
+	var envLimit uint64
+	if *envDiskLimit != "" {
+		if envLimit, err = store.ParseSize(*envDiskLimit); err != nil || envLimit == 0 {
+			return fmt.Errorf("--env-disk-limit: want a size such as 20G: %q", *envDiskLimit)
+		}
+	}
 	node, err := os.Hostname()
 	if err != nil {
 		return err
@@ -208,6 +215,16 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	st, err := store.Open(ctx, pool)
 	if err != nil {
 		return err
+	}
+	// Before Reconcile, which brings in the environments made without
+	// limits, and before anything deletes a subvolume. A pool that can't
+	// have them runs without, and fern doctor says why.
+	var limitsOff string
+	if envLimit > 0 {
+		if err := st.EnableLimits(ctx, envLimit); err != nil {
+			log.ErrorContext(ctx, "threads get no disk limit", slog.Any("error", err))
+			limitsOff = err.Error()
+		}
 	}
 	// Finish what a crash interrupted before anyone can see the half-done state.
 	lost, err := st.Reconcile(ctx)
@@ -322,6 +339,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// removed from it.
 	keeper := disk.New(st, envs, disk.Config{Root: pool, Proc: "/proc", Podman: disk.Podman, Sizes: store.PathUsage}, log)
 	apiSrv.Disk = keeper
+	// fern limit: one environment's disk limit.
+	apiSrv.Limits = st
 
 	// fern doctor: what is wrong now that would otherwise be a line in this
 	// daemon's log, or the error of a box's next command. The same list is a
@@ -331,7 +350,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	checker := health.Checker{
 		Store: st, Pool: pool, Boxes: envs,
 		Records: &health.Records{Btrfs: "btrfs", Pool: pool},
-		Memory:  health.NewMemory(runsc.Cgroup),
+		Memory:  health.NewMemory(runsc.Cgroup), LimitsOff: limitsOff,
 	}
 	if backer != nil {
 		checker.BackupEvery = *backupEvery

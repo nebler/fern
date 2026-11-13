@@ -31,6 +31,8 @@ type Pool interface {
 	Space() (store.Space, error)
 	List(ctx context.Context) ([]store.Env, error)
 	Usage(ctx context.Context, id string) (store.Usage, error)
+	Quota(ctx context.Context, env store.Env) (store.Quota, error)
+	ClearGroups(ctx context.Context) (int, error)
 }
 
 // Envs applies retention to every environment, each through its actor.
@@ -103,6 +105,13 @@ func (k *Keeper) Usage(ctx context.Context) (api.Disk, error) {
 			return api.Disk{}, err
 		}
 		part := api.DiskPart{Kind: "environment", Name: env.ID, Total: u.Total, Exclusive: u.Exclusive}
+		if env.Group != 0 {
+			q, err := k.pool.Quota(ctx, env)
+			if err != nil {
+				return api.Disk{}, err
+			}
+			part.Written, part.Limit = q.Used, q.Limit
+		}
 		if store.IsBuilder(env.ID) {
 			part.Kind = "golden"
 		} else if rel, err := filepath.Rel(k.cfg.Root, env.Workspace); err == nil {
@@ -225,8 +234,8 @@ func (k *Keeper) inUse(id string) bool {
 // Free removes what nothing needs and returns what it removed: the images in
 // the pool no tag points to and nothing runs from, Podman's images no
 // container uses (the pool has its own copy of Fern's; the next build or
-// install fetches again what it needs), and the snapshots past their
-// retention. What it couldn't remove is in the answer, not an error.
+// install fetches again what it needs), the snapshots past their
+// retention, and the quota groups of deleted environments. What it couldn't remove is in the answer, not an error.
 func (k *Keeper) Free(ctx context.Context) (api.Freed, error) {
 	return k.free(ctx, true)
 }
@@ -267,6 +276,13 @@ func (k *Keeper) free(ctx context.Context, podman bool) (api.Freed, error) {
 	}
 	if err := k.envs.PruneAll(ctx); err != nil {
 		freed.Failed = append(freed.Failed, "applying retention to the environments: "+err.Error())
+	}
+	// 40 bytes each, counting nothing anyone writes: only so they don't
+	// pile up.
+	if n, err := k.pool.ClearGroups(ctx); err != nil {
+		freed.Failed = append(freed.Failed, "destroying deleted environments' quota groups: "+err.Error())
+	} else if n > 0 {
+		freed.Removed = append(freed.Removed, fmt.Sprintf("%d quota groups of deleted environments", n))
 	}
 	sp, err := k.pool.Space()
 	if err != nil {

@@ -50,7 +50,8 @@ type fakeStore struct {
 	forked  map[string]store.SnapshotRef // forks, by what they were forked from
 	sources []store.SnapshotRef          // what Sources returns: golden builds a last daemon left
 	failed  map[string]store.BuildFailure
-	space   store.Space // what Space returns: the zero value has room
+	space   store.Space            // what Space returns: the zero value has room
+	quotas  map[string]store.Quota // the environments with a quota group
 }
 
 func newFakeStore() *fakeStore {
@@ -94,7 +95,7 @@ func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
 	if !f.envs[id] {
 		return store.Env{}, fmt.Errorf("environment %s: %w", id, store.ErrNotFound)
 	}
-	return store.Env{ID: id, Workspace: f.paths[id], Claude: "claude/" + id}, nil
+	return store.Env{ID: id, Workspace: f.paths[id], Claude: "claude/" + id, Group: f.quotas[id].Group}, nil
 }
 
 func (f *fakeStore) List(context.Context) ([]store.Env, error) {
@@ -192,6 +193,12 @@ func (f *fakeStore) Space() (store.Space, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.space, nil
+}
+
+func (f *fakeStore) Quota(_ context.Context, env store.Env) (store.Quota, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.quotas[env.ID], nil
 }
 
 func (f *fakeStore) Orphans(context.Context) ([]string, error) {

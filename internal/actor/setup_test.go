@@ -268,6 +268,15 @@ func TestNoticesAtClaudesWake(t *testing.T) {
 			},
 			want: []string{"takes no new snapshots", "build of this repository's starting point failed"},
 		},
+		{
+			name: "the thread is at its disk limit too",
+			change: func(_ *testing.T, _ string, st *fakeStore) {
+				st.mu.Lock()
+				defer st.mu.Unlock()
+				st.quotas = map[string]store.Quota{"one": {Group: 7, Used: 10 << 30, Limit: 10 << 30}}
+			},
+			want: []string{"reached its disk limit on Fern's server, 10.0 GiB of 10.0 GiB", "build of this repository's starting point failed"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

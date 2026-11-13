@@ -15,15 +15,28 @@ import (
 	"github.com/nebler/fern/internal/store"
 )
 
+// benchmarks are BenchmarkStore's cases.
+var benchmarks = []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "BuildSource20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "List", "List100", "Get", "FindByPath", "FindByPath100", "Snapshots50"}
+
 // BenchmarkStore exercises the real btrfs paths. Run in the pool
 // provided by lab/test-store.sh; fixture creation and cleanup are not timed.
 func BenchmarkStore(b *testing.B) {
-	for _, name := range []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "BuildSource20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "List", "List100", "Get", "FindByPath", "FindByPath100", "Snapshots50"} {
-		b.Run(name, func(b *testing.B) { benchmarkStore(b, name) })
+	for _, name := range benchmarks {
+		b.Run(name, func(b *testing.B) { benchmarkStore(b, name, 0) })
 	}
 }
 
-func benchmarkStore(b *testing.B, name string) {
+// BenchmarkStoreLimited is BenchmarkStore with a disk limit per
+// environment: simple quotas on, every subvolume joining its environment's
+// quota group. Each case turns quotas off again when it ends, which forgets
+// the groups, so BenchmarkStore's cases after it run as a pool without them.
+func BenchmarkStoreLimited(b *testing.B) {
+	for _, name := range benchmarks {
+		b.Run(name, func(b *testing.B) { benchmarkStore(b, name, 100<<30) })
+	}
+}
+
+func benchmarkStore(b *testing.B, name string, limit uint64) {
 	root := os.Getenv("FERN_TEST_BTRFS")
 	if root == "" {
 		b.Skip("run lab/test-store.sh")
@@ -41,6 +54,17 @@ func benchmarkStore(b *testing.B, name string) {
 	}
 	// The test pool is smaller than the free space a real one keeps.
 	store.SetRetention(st, 50, 0)
+	if limit > 0 {
+		if err := st.EnableLimits(b.Context(), limit); err != nil {
+			b.Fatal(err)
+		}
+		// Last, as cleanups run in reverse: on the filesystem, as dir is gone.
+		b.Cleanup(func() {
+			if err := store.DisableQuotas(root); err != nil {
+				b.Error(err)
+			}
+		})
+	}
 	b.Cleanup(func() {
 		ctx := context.WithoutCancel(b.Context())
 		envs, err := st.List(ctx)

@@ -50,6 +50,8 @@
 //	                                         file, its loop device, then btrfs
 //	fern gc                                  remove what nothing needs: old images, what
 //	                                         image builds left, snapshots past retention
+//	fern limit <env> <size>|none             set an environment's disk limit, such as 20G
+//	                                         (the daemon's --env-disk-limit gives new ones theirs)
 package main
 
 import (
@@ -192,6 +194,7 @@ func subcommands() []subcommand {
 		{name: "df", run: diskUsage},
 		{name: "pool", min: 2, max: 2, run: poolCommand},
 		{name: "gc", run: collect},
+		{name: "limit", min: 2, max: 2, run: setLimit},
 		{name: "backup", run: func(ctx context.Context, _ command, cl *api.Client, _ stdio) (int, error) {
 			return 0, cl.Backup(ctx)
 		}},
